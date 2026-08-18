@@ -1833,7 +1833,7 @@ requires_openai_auth = true
 
         let catalog_path = crate::codex_config::get_codex_model_catalog_path();
         let catalog: Value = read_json_file(&catalog_path).expect("read generated catalog");
-        assert_eq!(catalog["models"][0]["slug"], "gpt-5.4");
+        assert_eq!(catalog["models"][0]["slug"], "p1/gpt-5.4");
         assert_eq!(
             catalog["models"][0]["input_modalities"],
             json!(["text", "image"]),

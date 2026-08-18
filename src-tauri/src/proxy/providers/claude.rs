@@ -499,6 +499,10 @@ impl ClaudeAdapter {
             return ProviderType::XaiOAuth;
         }
 
+        // Kimi / Anthropic managed OAuth keep the Claude adapter (native
+        // Anthropic or coding-plan wire format). Detection is via
+        // Provider::is_*_oauth and extract_auth placeholders.
+
         // 检测 GitHub Copilot
         if self.is_github_copilot(provider) {
             return ProviderType::GitHubCopilot;
@@ -715,6 +719,10 @@ impl ProviderAdapter for ClaudeAdapter {
             return Ok(super::XAI_API_BASE_URL.to_string());
         }
 
+        if provider.is_kimi_oauth() {
+            return Ok(super::kimi_oauth_auth::kimi_oauth_upstream_base_url());
+        }
+
         // 1. 从 env 中获取
         if let Some(env) = provider.settings_config.get("env") {
             if let Some(url) = env.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) {
@@ -778,6 +786,20 @@ impl ProviderAdapter for ClaudeAdapter {
             return Some(AuthInfo::new(
                 "xai_oauth_placeholder".to_string(),
                 AuthStrategy::XaiOAuth,
+            ));
+        }
+
+        if provider.is_kimi_oauth() {
+            return Some(AuthInfo::new(
+                "kimi_oauth_placeholder".to_string(),
+                AuthStrategy::KimiOAuth,
+            ));
+        }
+
+        if provider.is_anthropic_oauth() {
+            return Some(AuthInfo::new(
+                "anthropic_oauth_placeholder".to_string(),
+                AuthStrategy::AnthropicOAuth,
             ));
         }
 
@@ -915,7 +937,7 @@ impl ProviderAdapter for ClaudeAdapter {
                     ),
                 ]
             }
-            AuthStrategy::XaiOAuth => {
+            AuthStrategy::XaiOAuth | AuthStrategy::KimiOAuth | AuthStrategy::AnthropicOAuth => {
                 vec![(HeaderName::from_static("authorization"), hv(&bearer)?)]
             }
             AuthStrategy::GitHubCopilot => {

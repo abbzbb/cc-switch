@@ -5,6 +5,8 @@ import type {
   ProxyTakeoverStatus,
   GlobalProxyConfig,
   AppProxyConfig,
+  ModelCombo,
+  SidecarSettings,
 } from "@/types/proxy";
 
 export const proxyApi = {
@@ -90,5 +92,27 @@ export const proxyApi = {
   // 设置计费模式来源
   async setPricingModelSource(appType: string, value: string): Promise<void> {
     return invoke("set_pricing_model_source", { appType, value });
+  },
+
+  async listModelCombos(): Promise<ModelCombo[]> {
+    return invoke("list_model_combos");
+  },
+
+  async upsertModelCombo(combo: ModelCombo): Promise<ModelCombo> {
+    return invoke("upsert_model_combo", { combo });
+  },
+
+  async deleteModelCombo(id: string): Promise<void> {
+    return invoke("delete_model_combo", { id });
+  },
+
+  async getSidecarSettings(): Promise<SidecarSettings> {
+    return invoke("get_sidecar_settings");
+  },
+
+  async updateSidecarSettings(
+    settings: SidecarSettings,
+  ): Promise<SidecarSettings> {
+    return invoke("update_sidecar_settings", { settings });
   },
 };

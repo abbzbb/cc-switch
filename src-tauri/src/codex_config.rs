@@ -1881,7 +1881,7 @@ fn codex_model_catalog_from_specs(
     json!({ "models": entries })
 }
 
-fn codex_model_catalog_from_settings(
+pub(crate) fn codex_model_catalog_from_settings(
     settings: &Value,
     config_text: &str,
     profile: CodexCatalogToolProfile,

@@ -230,6 +230,9 @@ TeamoRouter 还提供企业级功能，包括集中账单、团队管理、BYOK�
 
 - **本地代理热切换** — 格式转换、自动故障转移、熔断器、供应商健康监控和整流器
 - **应用级代理接管** — 独立为 Claude、Codex、Gemini 或 Grok Build 配置代理，具体到单个供应商
+- **`provider/model` 路由与 Combo** — 选择器合并目录；`combo/{id}` 可按 failover / 加权轮询跨卡
+- **托管账号池** — ChatGPT Official、Kimi For Coding、Claude Pro/Max 未加前缀时按额度选闲号，会话粘性；`{slug}/model` 钉卡
+- **Web Search / Vision Sidecar** — 非官方模型上的 hosted 搜索和纯文本模型识图，走已登录的 Claude Pro/Max 或 ChatGPT Official
 
 ### MCP、Prompts 与 Skills
 

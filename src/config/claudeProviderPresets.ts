@@ -60,7 +60,12 @@ export interface ProviderPreset {
   // 供应商类型标识（用于特殊供应商检测）
   // - "github_copilot": GitHub Copilot 供应商（需要 OAuth 认证）
   // - "codex_oauth": OpenAI Codex via ChatGPT Plus/Pro 反代（需要 OAuth 认证）
-  providerType?: "github_copilot" | "codex_oauth" | "xai_oauth";
+  providerType?:
+    | "github_copilot"
+    | "codex_oauth"
+    | "xai_oauth"
+    | "kimi_oauth"
+    | "anthropic_oauth";
 
   // 是否需要 OAuth 认证（而非 API Key）
   requiresOAuth?: boolean;
@@ -131,6 +136,27 @@ export const providerPresets: ProviderPreset[] = [
       },
     },
     category: "cn_official",
+    icon: "kimi",
+    iconColor: "#6366F1",
+  },
+  {
+    name: "Kimi For Coding (OAuth)",
+    primePartner: true,
+    websiteUrl: "https://www.kimi.com/code/?aff=cc-switch",
+    settingsConfig: {
+      env: {
+        ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/",
+        ANTHROPIC_MODEL: "kimi-for-coding",
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: "kimi-for-coding",
+        ANTHROPIC_DEFAULT_SONNET_MODEL: "kimi-for-coding",
+        ANTHROPIC_DEFAULT_OPUS_MODEL: "kimi-for-coding",
+        CLAUDE_CODE_MAX_CONTEXT_TOKENS: "262144",
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: "262144",
+      },
+    },
+    category: "cn_official",
+    providerType: "kimi_oauth",
+    requiresOAuth: true,
     icon: "kimi",
     iconColor: "#6366F1",
   },
@@ -1362,6 +1388,24 @@ export const providerPresets: ProviderPreset[] = [
     requiresOAuth: true,
     icon: "xai",
     iconColor: "#000000",
+  },
+  {
+    name: "Claude Pro/Max (OAuth)",
+    websiteUrl: "https://claude.ai",
+    settingsConfig: {
+      env: {
+        ANTHROPIC_BASE_URL: "https://api.anthropic.com",
+        ANTHROPIC_MODEL: "claude-sonnet-4-6",
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude-haiku-4-5",
+        ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-4-6",
+        ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-4-6",
+      },
+    },
+    category: "third_party",
+    providerType: "anthropic_oauth",
+    requiresOAuth: true,
+    icon: "anthropic",
+    iconColor: "#D4915D",
   },
   {
     name: "Nvidia",

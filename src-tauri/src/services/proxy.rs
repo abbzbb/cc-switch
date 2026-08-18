@@ -6,7 +6,10 @@ use crate::app_config::AppType;
 use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
 use crate::database::Database;
 use crate::provider::Provider;
+use crate::proxy::official_pool::OfficialPoolState;
+use crate::proxy::providers::anthropic_oauth_auth::AnthropicOAuthManager;
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
+use crate::proxy::providers::kimi_oauth_auth::KimiOAuthManager;
 use crate::proxy::server::ProxyServer;
 use crate::proxy::switch_lock::SwitchLockManager;
 use crate::proxy::types::*;
@@ -48,6 +51,7 @@ const CLAUDE_TAKEOVER_HAIKU_MODEL: &str = "claude-haiku-4-5";
 const CLAUDE_TAKEOVER_SONNET_MODEL: &str = "claude-sonnet-4-6";
 const CLAUDE_TAKEOVER_OPUS_MODEL: &str = "claude-opus-4-8";
 const CLAUDE_TAKEOVER_FABLE_MODEL: &str = "claude-fable-5";
+const CLAUDE_GATEWAY_MODEL_DISCOVERY_ENV: &str = "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY";
 // 写给 Claude Code 时沿用文档示例的大写形式；解析侧大小写不敏感。
 const CLAUDE_ONE_M_MARKER_FOR_CLIENT: &str = "[1M]";
 
@@ -389,6 +393,9 @@ impl Drop for CodexAuthFileTransaction {
 pub struct ProxyService {
     db: Arc<Database>,
     codex_oauth_manager: Arc<CodexOAuthManager>,
+    kimi_oauth_manager: Arc<KimiOAuthManager>,
+    anthropic_oauth_manager: Arc<AnthropicOAuthManager>,
+    official_pool: Arc<RwLock<OfficialPoolState>>,
     server: Arc<RwLock<Option<ProxyServer>>>,
     /// AppHandle，用于传递给 ProxyServer 以支持故障转移时的 UI 更新
     app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
@@ -402,19 +409,43 @@ pub struct HotSwitchOutcome {
 
 impl ProxyService {
     pub fn new(db: Arc<Database>) -> Self {
-        let codex_oauth_manager =
-            Arc::new(CodexOAuthManager::new(crate::config::get_app_config_dir()));
-
-        Self::new_with_codex_oauth_manager(db, codex_oauth_manager)
+        let app_config_dir = crate::config::get_app_config_dir();
+        let codex_oauth_manager = Arc::new(CodexOAuthManager::new(app_config_dir.clone()));
+        let kimi_oauth_manager = Arc::new(KimiOAuthManager::new(app_config_dir.clone()));
+        let anthropic_oauth_manager = Arc::new(AnthropicOAuthManager::new(app_config_dir));
+        Self::new_with_managed_auth(
+            db,
+            codex_oauth_manager,
+            kimi_oauth_manager,
+            anthropic_oauth_manager,
+        )
     }
 
     pub fn new_with_codex_oauth_manager(
         db: Arc<Database>,
         codex_oauth_manager: Arc<CodexOAuthManager>,
     ) -> Self {
+        let app_config_dir = crate::config::get_app_config_dir();
+        Self::new_with_managed_auth(
+            db,
+            codex_oauth_manager,
+            Arc::new(KimiOAuthManager::new(app_config_dir.clone())),
+            Arc::new(AnthropicOAuthManager::new(app_config_dir)),
+        )
+    }
+
+    pub fn new_with_managed_auth(
+        db: Arc<Database>,
+        codex_oauth_manager: Arc<CodexOAuthManager>,
+        kimi_oauth_manager: Arc<KimiOAuthManager>,
+        anthropic_oauth_manager: Arc<AnthropicOAuthManager>,
+    ) -> Self {
         Self {
             db,
             codex_oauth_manager,
+            kimi_oauth_manager,
+            anthropic_oauth_manager,
+            official_pool: Arc::new(RwLock::new(OfficialPoolState::default())),
             server: Arc::new(RwLock::new(None)),
             app_handle: Arc::new(RwLock::new(None)),
             switch_locks: SwitchLockManager::new(),
@@ -513,6 +544,7 @@ impl ProxyService {
         for (key, value) in takeover_model_fields {
             env.insert(key.to_string(), Value::String(value));
         }
+        env.insert(CLAUDE_GATEWAY_MODEL_DISCOVERY_ENV.to_string(), json!("1"));
 
         let token_keys = [
             "ANTHROPIC_AUTH_TOKEN",
@@ -965,7 +997,15 @@ impl ProxyService {
 
         // 4. 创建并启动服务器
         let app_handle = self.app_handle.read().await.clone();
-        let server = ProxyServer::new(config.clone(), self.db.clone(), app_handle);
+        let server = ProxyServer::new_with_managed_auth(
+            config.clone(),
+            self.db.clone(),
+            app_handle,
+            Some(self.codex_oauth_manager.clone()),
+            Some(self.official_pool.clone()),
+            Some(self.kimi_oauth_manager.clone()),
+            Some(self.anthropic_oauth_manager.clone()),
+        );
         let info = server
             .start()
             .await
@@ -3646,7 +3686,7 @@ impl ProxyService {
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
                 crate::codex_config::record_codex_managed_oauth_live_auth(auth)
                     .map_err(|e| format!("记录 Codex 托管认证标记失败: {e}"))?;
-                return Ok(());
+                return self.write_merged_codex_routing_catalog_from_db();
             }
             let live_config = if official_passthrough {
                 prepared_config
@@ -3659,10 +3699,35 @@ impl ProxyService {
             };
             crate::codex_config::write_codex_live_config_atomic(Some(&live_config))
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
-            return Ok(());
+            return self.write_merged_codex_routing_catalog_from_db();
         }
 
-        self.write_codex_live_for_provider(config, provider)
+        self.write_codex_live_for_provider(config, provider)?;
+        self.write_merged_codex_routing_catalog_from_db()
+    }
+
+    fn write_merged_codex_routing_catalog_from_db(&self) -> Result<(), String> {
+        let providers: Vec<Provider> = self
+            .db
+            .get_all_providers(AppType::Codex.as_str())
+            .map_err(|e| format!("读取 Codex 供应商失败: {e}"))?
+            .into_values()
+            .collect();
+        crate::proxy::model_routing::write_merged_codex_routing_catalog_with_combos(
+            &providers,
+            &self
+                .db
+                .list_model_combos()
+                .map_err(|e| format!("读取 Combo 失败: {e}"))?,
+        )
+        .map_err(|e| format!("写入合并模型目录失败: {e}"))
+    }
+
+    pub async fn refresh_codex_routing_catalog_if_takeover(&self) -> Result<(), String> {
+        if self.get_takeover_status().await?.codex {
+            self.write_merged_codex_routing_catalog_from_db()?;
+        }
+        Ok(())
     }
 
     fn write_codex_live_verbatim(&self, config: &Value) -> Result<(), String> {
@@ -3838,6 +3903,26 @@ impl ProxyService {
 
     // ==================== 原有方法 ====================
 
+    /// Record ChatGPT Official quota for pool ranking. Safe when the proxy
+    /// is stopped: the snapshot lives on this service and is shared with the
+    /// next ProxyServer.
+    pub async fn note_official_account_quota(&self, account_id: &str, utilization: f64) {
+        self.official_pool
+            .write()
+            .await
+            .note_quota(account_id, utilization);
+    }
+
+    pub async fn record_official_quota_snapshot(
+        &self,
+        account_id: &str,
+        quota: &crate::services::subscription::SubscriptionQuota,
+    ) {
+        if let Some(score) = crate::proxy::official_pool::hottest_quota_utilization(quota) {
+            self.note_official_account_quota(account_id, score).await;
+        }
+    }
+
     /// 获取服务器状态
     pub async fn get_status(&self) -> Result<ProxyStatus, String> {
         if let Some(server) = self.server.read().await.as_ref() {
@@ -3896,7 +3981,15 @@ impl ProxyService {
             }
 
             let app_handle = self.app_handle.read().await.clone();
-            let new_server = ProxyServer::new(new_config.clone(), self.db.clone(), app_handle);
+            let new_server = ProxyServer::new_with_managed_auth(
+                new_config.clone(),
+                self.db.clone(),
+                app_handle,
+                Some(self.codex_oauth_manager.clone()),
+                Some(self.official_pool.clone()),
+                Some(self.kimi_oauth_manager.clone()),
+                Some(self.anthropic_oauth_manager.clone()),
+            );
             let info = new_server
                 .start()
                 .await
@@ -4001,9 +4094,13 @@ impl ProxyService {
 mod tests {
     use super::*;
     use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta};
+    use axum::http::{header, HeaderMap, StatusCode};
+    use axum::routing::post;
+    use axum::Router;
     use serial_test::serial;
     use std::env;
     use tempfile::TempDir;
+    use tokio::sync::Mutex;
 
     struct TempHome {
         #[allow(dead_code)]
@@ -4218,6 +4315,7 @@ mod tests {
         );
         assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", Some(PROXY_TOKEN_PLACEHOLDER));
         assert_env_str(env, "ANTHROPIC_API_KEY", None);
+        assert_env_str(env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", Some("1"));
     }
 
     #[test]
@@ -8398,6 +8496,96 @@ requires_openai_auth = true
 
     #[tokio::test]
     #[serial]
+    async fn codex_takeover_merges_routing_catalog_across_providers() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        seed_codex_model_template();
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let config_a = r#"model_provider = "provider-a"
+model = "model-a"
+
+[model_providers.provider-a]
+name = "ProviderA"
+base_url = "https://provider-a.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+        let config_b = r#"model_provider = "provider-b"
+model = "model-b"
+
+[model_providers.provider-b]
+name = "ProviderB"
+base_url = "https://provider-b.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+        let provider_a = Provider::with_id(
+            "a".to_string(),
+            "ProviderA".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "key-a" },
+                "config": config_a,
+                "modelCatalog": { "models": [{ "model": "model-a" }] }
+            }),
+            None,
+        );
+        let provider_b = Provider::with_id(
+            "b".to_string(),
+            "ProviderB".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "key-b" },
+                "config": config_b,
+                "modelCatalog": { "models": [{ "model": "model-b" }] }
+            }),
+            None,
+        );
+        db.save_provider("codex", &provider_a)
+            .expect("save provider a");
+        db.save_provider("codex", &provider_b)
+            .expect("save provider b");
+        db.set_current_provider("codex", "a")
+            .expect("set current provider a");
+        crate::settings::set_current_provider(&AppType::Codex, Some("a"))
+            .expect("set local current provider a");
+        crate::codex_config::write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "key-a" }),
+            Some(config_a),
+        )
+        .expect("seed live codex config");
+
+        service
+            .takeover_live_config_strict(&AppType::Codex)
+            .await
+            .expect("take over Codex");
+
+        let catalog: Value = serde_json::from_str(
+            &std::fs::read_to_string(crate::codex_config::get_codex_model_catalog_path())
+                .expect("read merged catalog"),
+        )
+        .expect("parse merged catalog");
+        let slugs: Vec<&str> = catalog
+            .get("models")
+            .and_then(|models| models.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|entry| entry.get("slug").and_then(Value::as_str))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            slugs.contains(&"a/model-a") && slugs.contains(&"b/model-b"),
+            "takeover must merge routed ids from every participating card; got: {slugs:?}"
+        );
+        assert!(
+            !slugs.contains(&"model-a") && !slugs.contains(&"model-b"),
+            "non-official cards should only appear as slug/model after merge; got: {slugs:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn provider_switch_with_restored_codex_backup_propagates_catalog_write_errors() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
@@ -9999,5 +10187,1475 @@ experimental_bearer_token = "PROXY_MANAGED"
             .expect("read backup")
             .expect("backup exists");
         assert_eq!(backup.original_config, original_backup);
+    }
+
+    #[derive(Debug, Clone)]
+    struct CapturedUpstreamRequest {
+        model: String,
+        authorization: Option<String>,
+        chatgpt_account_id: Option<String>,
+    }
+
+    async fn spawn_capturing_responses_upstream(
+        fail_model: &'static str,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<Mutex<Vec<CapturedUpstreamRequest>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let captured = Arc::new(Mutex::new(Vec::<CapturedUpstreamRequest>::new()));
+        let handler = {
+            let captured = captured.clone();
+            move |request: axum::extract::Request| {
+                let captured = captured.clone();
+                async move {
+                    let (parts, body) = request.into_parts();
+                    let body = axum::body::to_bytes(body, 1024 * 1024)
+                        .await
+                        .expect("read mock request body");
+                    let json: Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
+                    let model = json
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let path = parts.uri.path().to_string();
+                    captured.lock().await.push(CapturedUpstreamRequest {
+                        model: model.clone(),
+                        authorization: parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(ToString::to_string),
+                        chatgpt_account_id: parts
+                            .headers
+                            .get("chatgpt-account-id")
+                            .and_then(|value| value.to_str().ok())
+                            .map(ToString::to_string),
+                    });
+
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        header::CONTENT_TYPE,
+                        "application/json".parse().expect("content type"),
+                    );
+                    if model == fail_model {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            headers,
+                            r#"{"error":{"message":"mock upstream failed"}}"#.to_string(),
+                        )
+                    } else if path.contains("messages") {
+                        (
+                            StatusCode::OK,
+                            headers,
+                            r#"{"id":"msg_mock","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-sonnet-4-6","stop_reason":"end_turn"}"#.to_string(),
+                        )
+                    } else {
+                        (
+                            StatusCode::OK,
+                            headers,
+                            r#"{"id":"resp_mock","object":"response","status":"completed","output":[]}"#.to_string(),
+                        )
+                    }
+                }
+            }
+        };
+        let mock_app = Router::new()
+            .route("/v1/responses", post(handler.clone()))
+            .route("/responses", post(handler.clone()))
+            .route("/v1/messages", post(handler.clone()))
+            .route("/messages", post(handler));
+        let mock_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind mock upstream");
+        let mock_addr = mock_listener.local_addr().expect("mock upstream address");
+        let mock_handle = tokio::spawn(async move {
+            axum::serve(mock_listener, mock_app)
+                .await
+                .expect("serve mock upstream");
+        });
+        (mock_addr, captured, mock_handle)
+    }
+
+    fn catalog_slugs(catalog: &Value) -> Vec<String> {
+        catalog
+            .get("models")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|entry| entry.get("slug").and_then(Value::as_str))
+                    .map(ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Isolated first-slice check: takeover merge, picker slugs, prefix pin
+    /// (no cross-card failover), unique unprefixed pin, unknown-prefix
+    /// fallthrough, unprefixed failover, and restore of the user's catalog pointer.
+    /// Uses TempHome so it never writes the host ~/.codex.
+    #[tokio::test]
+    #[serial]
+    async fn first_slice_opencodex_routing_verification() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        seed_codex_model_template();
+
+        let (kimi_addr, kimi_captured, kimi_handle) =
+            spawn_capturing_responses_upstream("no-such-model").await;
+        let (deepseek_addr, deepseek_captured, deepseek_handle) =
+            spawn_capturing_responses_upstream("").await;
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let mut app_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read codex proxy config");
+        app_config.auto_failover_enabled = true;
+        app_config.max_retries = 3;
+        db.update_proxy_config_for_app(app_config)
+            .await
+            .expect("enable codex failover");
+
+        let kimi_config = format!(
+            "model_provider = \"kimi\"\n\
+             model = \"k2\"\n\n\
+             [model_providers.kimi]\n\
+             name = \"Kimi\"\n\
+             base_url = \"http://{kimi_addr}/v1\"\n\
+             wire_api = \"responses\"\n\
+             requires_openai_auth = true\n"
+        );
+        let deepseek_config = format!(
+            "model_provider = \"deepseek\"\n\
+             model = \"deepseek-v4\"\n\n\
+             [model_providers.deepseek]\n\
+             name = \"DeepSeek\"\n\
+             base_url = \"http://{deepseek_addr}/v1\"\n\
+             wire_api = \"responses\"\n\
+             requires_openai_auth = true\n"
+        );
+
+        let mut kimi = Provider::with_id(
+            "kimi".to_string(),
+            "Kimi".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "kimi-key" },
+                "config": kimi_config,
+                "modelCatalog": { "models": [{ "model": "k2" }] }
+            }),
+            None,
+        );
+        kimi.sort_index = Some(0);
+        let mut deepseek = Provider::with_id(
+            "deepseek".to_string(),
+            "DeepSeek".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "deepseek-key" },
+                "config": deepseek_config,
+                "modelCatalog": { "models": [{ "model": "deepseek-v4" }] }
+            }),
+            None,
+        );
+        deepseek.sort_index = Some(1);
+        db.save_provider("codex", &kimi).expect("save kimi");
+        db.save_provider("codex", &deepseek).expect("save deepseek");
+        db.set_current_provider("codex", "kimi")
+            .expect("set current kimi");
+        crate::settings::set_current_provider(&AppType::Codex, Some("kimi"))
+            .expect("set local current kimi");
+        db.add_to_failover_queue("codex", "kimi")
+            .expect("queue kimi");
+        db.add_to_failover_queue("codex", "deepseek")
+            .expect("queue deepseek");
+
+        let codex_dir = crate::codex_config::get_codex_config_dir();
+        std::fs::create_dir_all(&codex_dir).expect("create codex dir");
+        let user_catalog_path = codex_dir.join("user-models.json");
+        std::fs::write(
+            &user_catalog_path,
+            r#"{"models":[{"slug":"k2","display_name":"K2"}]}"#,
+        )
+        .expect("seed user catalog");
+        let user_pointer = user_catalog_path.to_string_lossy().replace('\\', "/");
+        let live_config = format!("{kimi_config}\nmodel_catalog_json = \"{user_pointer}\"\n");
+        crate::codex_config::write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "kimi-key" }),
+            Some(&live_config),
+        )
+        .expect("seed live codex config");
+
+        let service = ProxyService::new(db.clone());
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("enable Codex takeover");
+
+        let takeover_toml = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read takeover config.toml");
+        assert!(
+            takeover_toml.contains(crate::codex_config::CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME),
+            "takeover live config must point at the cc-switch catalog; got:\n{takeover_toml}"
+        );
+
+        let merged_catalog: Value = serde_json::from_str(
+            &std::fs::read_to_string(crate::codex_config::get_codex_model_catalog_path())
+                .expect("read merged catalog file"),
+        )
+        .expect("parse merged catalog file");
+        let file_slugs = catalog_slugs(&merged_catalog);
+        assert!(
+            file_slugs.iter().any(|slug| slug == "kimi/k2")
+                && file_slugs.iter().any(|slug| slug == "deepseek/deepseek-v4"),
+            "picker catalog must list 供应商/模型 ids; got: {file_slugs:?}"
+        );
+
+        let status = service.get_status().await.expect("proxy status");
+        assert!(status.running, "takeover must start the proxy");
+        let proxy_base = format!("http://127.0.0.1:{}", status.port);
+        let client = reqwest::Client::new();
+        let models_body: Value = client
+            .get(format!("{proxy_base}/v1/models"))
+            .send()
+            .await
+            .expect("GET /v1/models")
+            .json()
+            .await
+            .expect("parse /v1/models");
+        let http_slugs = catalog_slugs(&models_body);
+        assert!(
+            http_slugs.iter().any(|slug| slug == "kimi/k2")
+                && http_slugs.iter().any(|slug| slug == "deepseek/deepseek-v4"),
+            "/v1/models must expose merged routed ids; got: {http_slugs:?}"
+        );
+
+        let post_responses = |model: &str| {
+            let client = client.clone();
+            let url = format!("{proxy_base}/v1/responses");
+            let model = model.to_string();
+            async move {
+                client
+                    .post(url)
+                    .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .json(&json!({
+                        "model": model,
+                        "input": "verification",
+                        "stream": false
+                    }))
+                    .send()
+                    .await
+                    .expect("POST /v1/responses")
+            }
+        };
+
+        let pinned = post_responses("deepseek/deepseek-v4").await;
+        assert!(
+            pinned.status().is_success(),
+            "prefixed pin should succeed, got {}",
+            pinned.status()
+        );
+        {
+            let kimi_hits = kimi_captured.lock().await.clone();
+            let deepseek_hits = deepseek_captured.lock().await.clone();
+            assert!(
+                kimi_hits.is_empty(),
+                "prefix pin must skip the current card; kimi got {kimi_hits:?}"
+            );
+            assert_eq!(
+                deepseek_hits.len(),
+                1,
+                "expected one DeepSeek upstream call"
+            );
+            assert_eq!(deepseek_hits[0].model, "deepseek-v4");
+            assert_eq!(
+                deepseek_hits[0].authorization.as_deref(),
+                Some("Bearer deepseek-key")
+            );
+        }
+
+        let unique = post_responses("k2").await;
+        assert!(
+            unique.status().is_success(),
+            "unique unprefixed pin should succeed, got {}",
+            unique.status()
+        );
+        {
+            let kimi_hits = kimi_captured.lock().await.clone();
+            let deepseek_hits = deepseek_captured.lock().await.clone();
+            assert_eq!(
+                kimi_hits.len(),
+                1,
+                "unique k2 must pin Kimi; got {kimi_hits:?}"
+            );
+            assert_eq!(kimi_hits[0].model, "k2");
+            assert_eq!(
+                kimi_hits[0].authorization.as_deref(),
+                Some("Bearer kimi-key")
+            );
+            assert_eq!(
+                deepseek_hits.len(),
+                1,
+                "unique unprefixed pin must not touch DeepSeek"
+            );
+        }
+
+        let all_codex: Vec<crate::provider::Provider> = db
+            .get_all_providers("codex")
+            .expect("list codex providers")
+            .into_values()
+            .collect();
+        let unknown_prefix = "openrouter/free-model";
+        let route = crate::proxy::model_routing::decide_model_route(&all_codex, unknown_prefix);
+        assert_eq!(
+            route,
+            crate::proxy::model_routing::ModelRouteDecision::Default,
+            "unknown first segment must not pin; providers={:?}",
+            all_codex
+                .iter()
+                .map(|provider| (
+                    provider.id.clone(),
+                    crate::proxy::model_routing::provider_upstream_model_ids(provider)
+                ))
+                .collect::<Vec<_>>()
+        );
+        let selected = crate::proxy::provider_router::ProviderRouter::new(db.clone())
+            .select_providers_for_request("codex", unknown_prefix)
+            .await
+            .expect("select fallthrough providers");
+        assert_eq!(
+            selected
+                .providers
+                .first()
+                .map(|provider| provider.id.as_str()),
+            Some("kimi"),
+            "unknown prefix should start at current/queue-head Kimi; got {:?}",
+            selected
+                .providers
+                .iter()
+                .map(|provider| provider.id.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        let fallthrough = post_responses(unknown_prefix).await;
+        let fallthrough_status = fallthrough.status();
+        let fallthrough_body = fallthrough.text().await.unwrap_or_default();
+        {
+            let kimi_hits = kimi_captured.lock().await.clone();
+            let deepseek_hits = deepseek_captured.lock().await.clone();
+            assert!(
+                fallthrough_status.is_success(),
+                "unknown prefix must fall through, got {fallthrough_status} body={fallthrough_body} kimi={kimi_hits:?} deepseek={deepseek_hits:?}"
+            );
+            assert_eq!(
+                kimi_hits.len(),
+                2,
+                "unknown prefix should hit current Kimi; status={fallthrough_status} body={fallthrough_body} kimi={kimi_hits:?} deepseek={deepseek_hits:?}"
+            );
+            assert_eq!(kimi_hits[1].model, unknown_prefix);
+        }
+
+        let failover = post_responses("no-such-model").await;
+        assert!(
+            failover.status().is_success(),
+            "unprefixed unknown model should failover to DeepSeek, got {}",
+            failover.status()
+        );
+        {
+            let kimi_hits = kimi_captured.lock().await.clone();
+            let deepseek_hits = deepseek_captured.lock().await.clone();
+            assert_eq!(
+                kimi_hits.last().map(|hit| hit.model.as_str()),
+                Some("no-such-model"),
+                "failover should try current Kimi first"
+            );
+            assert!(
+                deepseek_hits.iter().any(|hit| hit.model == "no-such-model"),
+                "unprefixed unknown model must failover; deepseek got {deepseek_hits:?}"
+            );
+        }
+
+        service
+            .set_takeover_for_app("codex", false)
+            .await
+            .expect("disable Codex takeover");
+        let restored = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read restored config.toml");
+        assert!(
+            restored.contains(&user_pointer),
+            "stopping takeover must restore the user's model_catalog_json pointer, got:\n{restored}"
+        );
+        let user_catalog_after =
+            std::fs::read_to_string(&user_catalog_path).expect("read user catalog after restore");
+        assert!(
+            user_catalog_after.contains("\"k2\""),
+            "user catalog file must stay intact"
+        );
+
+        kimi_handle.abort();
+        deepseek_handle.abort();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn combo_failover_rewrites_upstream_model() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        seed_codex_model_template();
+
+        let (kimi_addr, kimi_captured, kimi_handle) =
+            spawn_capturing_responses_upstream("k2").await;
+        let (deepseek_addr, deepseek_captured, deepseek_handle) =
+            spawn_capturing_responses_upstream("").await;
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let mut app_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read codex proxy config");
+        app_config.auto_failover_enabled = false;
+        app_config.max_retries = 0;
+        db.update_proxy_config_for_app(app_config)
+            .await
+            .expect("disable app failover");
+
+        let kimi_config = format!(
+            "model_provider = \"kimi\"\n\
+             model = \"k2\"\n\n\
+             [model_providers.kimi]\n\
+             name = \"Kimi\"\n\
+             base_url = \"http://{kimi_addr}/v1\"\n\
+             wire_api = \"responses\"\n\
+             requires_openai_auth = true\n"
+        );
+        let deepseek_config = format!(
+            "model_provider = \"deepseek\"\n\
+             model = \"deepseek-v4\"\n\n\
+             [model_providers.deepseek]\n\
+             name = \"DeepSeek\"\n\
+             base_url = \"http://{deepseek_addr}/v1\"\n\
+             wire_api = \"responses\"\n\
+             requires_openai_auth = true\n"
+        );
+        let mut kimi = Provider::with_id(
+            "kimi".to_string(),
+            "Kimi".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "kimi-key" },
+                "config": kimi_config,
+                "modelCatalog": { "models": [{ "model": "k2" }] }
+            }),
+            None,
+        );
+        kimi.sort_index = Some(0);
+        let mut deepseek = Provider::with_id(
+            "deepseek".to_string(),
+            "DeepSeek".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "deepseek-key" },
+                "config": deepseek_config,
+                "modelCatalog": { "models": [{ "model": "deepseek-v4" }] }
+            }),
+            None,
+        );
+        deepseek.sort_index = Some(1);
+        db.save_provider("codex", &kimi).expect("save kimi");
+        db.save_provider("codex", &deepseek).expect("save deepseek");
+        db.set_current_provider("codex", "kimi")
+            .expect("set current kimi");
+        crate::settings::set_current_provider(&AppType::Codex, Some("kimi"))
+            .expect("set local current kimi");
+        db.save_model_combos(&[crate::proxy::combo::ModelCombo {
+            id: "main".into(),
+            targets: vec![
+                crate::proxy::combo::parse_combo_target_spec("kimi/k2").unwrap(),
+                crate::proxy::combo::parse_combo_target_spec("deepseek/deepseek-v4").unwrap(),
+            ],
+            strategy: crate::proxy::combo::ComboStrategy::Failover,
+            sticky_limit: 1,
+        }])
+        .expect("save combo");
+
+        let codex_dir = crate::codex_config::get_codex_config_dir();
+        std::fs::create_dir_all(&codex_dir).expect("create codex dir");
+        crate::codex_config::write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "kimi-key" }),
+            Some(&kimi_config),
+        )
+        .expect("seed live codex config");
+
+        let service = ProxyService::new(db.clone());
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("enable Codex takeover");
+
+        let merged_catalog: Value = serde_json::from_str(
+            &std::fs::read_to_string(crate::codex_config::get_codex_model_catalog_path())
+                .expect("read merged catalog file"),
+        )
+        .expect("parse merged catalog file");
+        let file_slugs = catalog_slugs(&merged_catalog);
+        assert!(
+            file_slugs.iter().any(|slug| slug == "combo/main"),
+            "picker catalog must list combo/main; got: {file_slugs:?}"
+        );
+
+        let status = service.get_status().await.expect("proxy status");
+        let proxy_base = format!("http://127.0.0.1:{}", status.port);
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{proxy_base}/v1/responses"))
+            .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .json(&json!({
+                "model": "combo/main",
+                "input": "hi"
+            }))
+            .send()
+            .await
+            .expect("POST combo/main");
+        assert!(
+            response.status().is_success(),
+            "combo failover should succeed, got {}",
+            response.status()
+        );
+
+        {
+            let kimi_hits = kimi_captured.lock().await.clone();
+            let deepseek_hits = deepseek_captured.lock().await.clone();
+            assert_eq!(
+                kimi_hits
+                    .iter()
+                    .map(|hit| hit.model.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["k2"],
+                "combo first hop must rewrite to k2; got {kimi_hits:?}"
+            );
+            assert_eq!(
+                deepseek_hits
+                    .iter()
+                    .map(|hit| hit.model.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["deepseek-v4"],
+                "combo second hop must rewrite to deepseek-v4; got {deepseek_hits:?}"
+            );
+            assert_eq!(
+                deepseek_hits[0].authorization.as_deref(),
+                Some("Bearer deepseek-key")
+            );
+        }
+
+        service
+            .set_takeover_for_app("codex", false)
+            .await
+            .expect("disable Codex takeover");
+        kimi_handle.abort();
+        deepseek_handle.abort();
+    }
+
+    fn managed_official_card(id: &str, account_id: &str, sort_index: usize) -> Provider {
+        let mut provider = Provider::with_id(
+            id.to_string(),
+            format!("Official {id}"),
+            json!({ "auth": {}, "config": "" }),
+            None,
+        );
+        provider.category = Some("official".to_string());
+        provider.sort_index = Some(sort_index);
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("codex_oauth".to_string()),
+                account_id: Some(account_id.to_string()),
+            }),
+            ..Default::default()
+        });
+        provider
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn official_pool_injects_bound_account_token() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        seed_codex_model_template();
+
+        let (mock_addr, captured, mock_handle) =
+            spawn_capturing_responses_upstream("no-such-model").await;
+        let original_official_base = env::var("CC_SWITCH_TEST_CODEX_OFFICIAL_BASE_URL").ok();
+        struct RestoreOfficialBase(Option<String>);
+        impl Drop for RestoreOfficialBase {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => env::set_var("CC_SWITCH_TEST_CODEX_OFFICIAL_BASE_URL", value),
+                    None => env::remove_var("CC_SWITCH_TEST_CODEX_OFFICIAL_BASE_URL"),
+                }
+            }
+        }
+        let _restore_official_base = RestoreOfficialBase(original_official_base);
+        env::set_var(
+            "CC_SWITCH_TEST_CODEX_OFFICIAL_BASE_URL",
+            format!("http://{mock_addr}"),
+        );
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let mut app_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read codex proxy config");
+        app_config.auto_failover_enabled = false;
+        app_config.max_retries = 0;
+        db.update_proxy_config_for_app(app_config)
+            .await
+            .expect("disable app failover");
+
+        let main = managed_official_card("main", "account-a", 0);
+        let backup = managed_official_card("backup", "account-b", 1);
+        db.save_provider("codex", &main).expect("save main");
+        db.save_provider("codex", &backup).expect("save backup");
+        db.set_current_provider("codex", "main")
+            .expect("set current main");
+        crate::settings::set_current_provider(&AppType::Codex, Some("main"))
+            .expect("set local current main");
+
+        let oauth_dir = _home.dir.path().join("cc-switch-oauth");
+        std::fs::create_dir_all(&oauth_dir).expect("create oauth dir");
+        let manager = Arc::new(CodexOAuthManager::new(oauth_dir));
+        manager
+            .add_test_account_with_access_token("account-a", "token-a", Some("id-token-a"))
+            .await
+            .expect("seed account-a");
+        manager
+            .add_test_account_with_access_token("account-b", "token-b", Some("id-token-b"))
+            .await
+            .expect("seed account-b");
+
+        crate::codex_config::write_codex_live_atomic(&json!({}), Some(""))
+            .expect("seed live codex config");
+
+        let service = ProxyService::new_with_codex_oauth_manager(db.clone(), manager);
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("enable Codex takeover");
+
+        let status = service.get_status().await.expect("proxy status");
+        let proxy_base = format!("http://127.0.0.1:{}", status.port);
+        let client = reqwest::Client::new();
+
+        let pinned = client
+            .post(format!("{proxy_base}/v1/responses"))
+            .header(header::AUTHORIZATION, "Bearer account-a-session")
+            .header("chatgpt-account-id", "account-a")
+            .json(&json!({
+                "model": "backup/gpt-5.5",
+                "input": "hi"
+            }))
+            .send()
+            .await
+            .expect("POST backup/gpt-5.5");
+        assert!(
+            pinned.status().is_success(),
+            "official inject should succeed, got {}",
+            pinned.status()
+        );
+
+        let managed = client
+            .post(format!("{proxy_base}/v1/responses"))
+            .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .json(&json!({
+                "model": "backup/gpt-5.5",
+                "input": "hi"
+            }))
+            .send()
+            .await
+            .expect("POST PROXY_MANAGED backup/gpt-5.5");
+        assert!(
+            managed.status().is_success(),
+            "PROXY_MANAGED official inject should succeed, got {}",
+            managed.status()
+        );
+
+        {
+            let hits = captured.lock().await.clone();
+            assert_eq!(hits.len(), 2, "expected two upstream injects, got {hits:?}");
+            for hit in &hits {
+                assert_eq!(hit.model, "gpt-5.5");
+                assert_eq!(hit.authorization.as_deref(), Some("Bearer token-b"));
+                assert_eq!(hit.chatgpt_account_id.as_deref(), Some("account-b"));
+            }
+        }
+
+        service
+            .set_takeover_for_app("codex", false)
+            .await
+            .expect("disable Codex takeover");
+        mock_handle.abort();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn official_pool_picks_lower_quota_account_for_unprefixed_native_model() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        seed_codex_model_template();
+
+        let (mock_addr, captured, mock_handle) =
+            spawn_capturing_responses_upstream("no-such-model").await;
+        struct RestoreOfficialBase(Option<String>);
+        impl Drop for RestoreOfficialBase {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => env::set_var("CC_SWITCH_TEST_CODEX_OFFICIAL_BASE_URL", value),
+                    None => env::remove_var("CC_SWITCH_TEST_CODEX_OFFICIAL_BASE_URL"),
+                }
+            }
+        }
+        let _restore_official_base =
+            RestoreOfficialBase(env::var("CC_SWITCH_TEST_CODEX_OFFICIAL_BASE_URL").ok());
+        env::set_var(
+            "CC_SWITCH_TEST_CODEX_OFFICIAL_BASE_URL",
+            format!("http://{mock_addr}"),
+        );
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let mut app_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read codex proxy config");
+        app_config.auto_failover_enabled = false;
+        app_config.max_retries = 0;
+        db.update_proxy_config_for_app(app_config)
+            .await
+            .expect("disable app failover");
+
+        db.save_provider("codex", &managed_official_card("main", "account-a", 0))
+            .expect("save main");
+        db.save_provider("codex", &managed_official_card("backup", "account-b", 1))
+            .expect("save backup");
+        db.set_current_provider("codex", "main")
+            .expect("set current main");
+        crate::settings::set_current_provider(&AppType::Codex, Some("main"))
+            .expect("set local current main");
+
+        let oauth_dir = _home.dir.path().join("cc-switch-oauth");
+        std::fs::create_dir_all(&oauth_dir).expect("create oauth dir");
+        let manager = Arc::new(CodexOAuthManager::new(oauth_dir));
+        manager
+            .add_test_account_with_access_token("account-a", "token-a", Some("id-token-a"))
+            .await
+            .expect("seed account-a");
+        manager
+            .add_test_account_with_access_token("account-b", "token-b", Some("id-token-b"))
+            .await
+            .expect("seed account-b");
+
+        crate::codex_config::write_codex_live_atomic(&json!({}), Some(""))
+            .expect("seed live codex config");
+
+        let service = ProxyService::new_with_codex_oauth_manager(db.clone(), manager);
+        service.note_official_account_quota("account-a", 91.0).await;
+        service.note_official_account_quota("account-b", 14.0).await;
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("enable Codex takeover");
+
+        let status = service.get_status().await.expect("proxy status");
+        let response = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/responses", status.port))
+            .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .json(&json!({
+                "model": "gpt-5.5",
+                "input": "hi"
+            }))
+            .send()
+            .await
+            .expect("POST gpt-5.5");
+        assert!(
+            response.status().is_success(),
+            "quota pool pick should succeed, got {}",
+            response.status()
+        );
+
+        {
+            let hits = captured.lock().await.clone();
+            assert_eq!(hits.len(), 1, "expected one upstream hop, got {hits:?}");
+            assert_eq!(hits[0].authorization.as_deref(), Some("Bearer token-b"));
+            assert_eq!(hits[0].chatgpt_account_id.as_deref(), Some("account-b"));
+        }
+
+        service
+            .set_takeover_for_app("codex", false)
+            .await
+            .expect("disable Codex takeover");
+        mock_handle.abort();
+    }
+
+    fn kimi_coding_http_card(
+        id: &str,
+        key: &str,
+        mock_addr: std::net::SocketAddr,
+        sort_index: usize,
+    ) -> Provider {
+        let config = format!(
+            "model_provider = \"{id}\"\n\
+             model = \"kimi-for-coding\"\n\n\
+             [model_providers.{id}]\n\
+             name = \"Kimi {id}\"\n\
+             base_url = \"http://{mock_addr}/v1\"\n\
+             wire_api = \"responses\"\n\
+             requires_openai_auth = true\n"
+        );
+        let mut provider = Provider::with_id(
+            id.to_string(),
+            format!("Kimi {id}"),
+            json!({
+                "auth": { "OPENAI_API_KEY": key },
+                "config": config,
+                "modelCatalog": { "models": [{ "model": "kimi-for-coding" }] }
+            }),
+            None,
+        );
+        provider.sort_index = Some(sort_index);
+        provider
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn kimi_coding_pool_picks_lower_quota_account_for_unprefixed_model() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        seed_codex_model_template();
+
+        let (mock_addr, captured, mock_handle) =
+            spawn_capturing_responses_upstream("no-such-model").await;
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let mut app_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read codex proxy config");
+        app_config.auto_failover_enabled = false;
+        app_config.max_retries = 0;
+        db.update_proxy_config_for_app(app_config)
+            .await
+            .expect("disable app failover");
+
+        let main = kimi_coding_http_card("kimi-a", "key-a", mock_addr, 0);
+        let backup = kimi_coding_http_card("kimi-b", "key-b", mock_addr, 1);
+        db.save_provider("codex", &main).expect("save kimi-a");
+        db.save_provider("codex", &backup).expect("save kimi-b");
+        db.set_current_provider("codex", "kimi-a")
+            .expect("set current kimi-a");
+        crate::settings::set_current_provider(&AppType::Codex, Some("kimi-a"))
+            .expect("set local current kimi-a");
+
+        crate::codex_config::write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "key-a" }),
+            Some(
+                main.settings_config
+                    .get("config")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            ),
+        )
+        .expect("seed live codex config");
+
+        let service = ProxyService::new(db.clone());
+        service.note_official_account_quota("kimi-a", 91.0).await;
+        service.note_official_account_quota("kimi-b", 14.0).await;
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("enable Codex takeover");
+
+        let status = service.get_status().await.expect("proxy status");
+        let response = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/responses", status.port))
+            .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .json(&json!({
+                "model": "kimi-for-coding",
+                "input": "hi"
+            }))
+            .send()
+            .await
+            .expect("POST kimi-for-coding");
+        assert!(
+            response.status().is_success(),
+            "kimi quota pool pick should succeed, got {}",
+            response.status()
+        );
+
+        {
+            let hits = captured.lock().await.clone();
+            assert_eq!(hits.len(), 1, "expected one upstream hop, got {hits:?}");
+            assert_eq!(hits[0].authorization.as_deref(), Some("Bearer key-b"));
+            assert_eq!(hits[0].model, "kimi-for-coding");
+        }
+
+        service
+            .set_takeover_for_app("codex", false)
+            .await
+            .expect("disable Codex takeover");
+        mock_handle.abort();
+    }
+
+    fn managed_kimi_oauth_http_card(id: &str, account_id: &str, sort_index: usize) -> Provider {
+        let mut provider = Provider::with_id(
+            id.to_string(),
+            format!("Kimi {id}"),
+            json!({
+                "auth": { "OPENAI_API_KEY": "PROXY_MANAGED" },
+                "config": format!(
+                    "model = \"kimi-for-coding\"\n\n[model_providers.{id}]\nbase_url = \"https://api.kimi.com/coding/v1\"\n"
+                ),
+                "modelCatalog": { "models": [{ "model": "kimi-for-coding" }] }
+            }),
+            None,
+        );
+        provider.sort_index = Some(sort_index);
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("kimi_oauth".to_string()),
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("kimi_oauth".to_string()),
+                account_id: Some(account_id.to_string()),
+            }),
+            ..Default::default()
+        });
+        provider
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn kimi_oauth_pool_injects_bound_account_token() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        seed_codex_model_template();
+
+        let (mock_addr, captured, mock_handle) =
+            spawn_capturing_responses_upstream("no-such-model").await;
+        let original_kimi_base = env::var("CC_SWITCH_TEST_KIMI_OAUTH_BASE_URL").ok();
+        struct RestoreKimiBase(Option<String>);
+        impl Drop for RestoreKimiBase {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => env::set_var("CC_SWITCH_TEST_KIMI_OAUTH_BASE_URL", value),
+                    None => env::remove_var("CC_SWITCH_TEST_KIMI_OAUTH_BASE_URL"),
+                }
+            }
+        }
+        let _restore = RestoreKimiBase(original_kimi_base);
+        env::set_var(
+            "CC_SWITCH_TEST_KIMI_OAUTH_BASE_URL",
+            format!("http://{mock_addr}"),
+        );
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let mut app_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read codex proxy config");
+        app_config.auto_failover_enabled = false;
+        app_config.max_retries = 0;
+        db.update_proxy_config_for_app(app_config)
+            .await
+            .expect("disable app failover");
+
+        let main = managed_kimi_oauth_http_card("kimi-a", "acct-a", 0);
+        let backup = managed_kimi_oauth_http_card("kimi-b", "acct-b", 1);
+        db.save_provider("codex", &main).expect("save kimi-a");
+        db.save_provider("codex", &backup).expect("save kimi-b");
+        db.set_current_provider("codex", "kimi-a")
+            .expect("set current kimi-a");
+        crate::settings::set_current_provider(&AppType::Codex, Some("kimi-a"))
+            .expect("set local current kimi-a");
+
+        let oauth_dir = _home.dir.path().join("cc-switch-oauth");
+        std::fs::create_dir_all(&oauth_dir).expect("create oauth dir");
+        let kimi_manager = Arc::new(
+            crate::proxy::providers::kimi_oauth_auth::KimiOAuthManager::new(oauth_dir.clone()),
+        );
+        kimi_manager
+            .add_test_account_with_access_token("acct-a", "kimi-token-a", Some("a@kimi.com"))
+            .await
+            .expect("seed acct-a");
+        kimi_manager
+            .add_test_account_with_access_token("acct-b", "kimi-token-b", Some("b@kimi.com"))
+            .await
+            .expect("seed acct-b");
+
+        crate::codex_config::write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "PROXY_MANAGED" }),
+            Some(
+                main.settings_config
+                    .get("config")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            ),
+        )
+        .expect("seed live codex config");
+
+        let service = ProxyService::new_with_managed_auth(
+            db.clone(),
+            Arc::new(CodexOAuthManager::new(oauth_dir.clone())),
+            kimi_manager,
+            Arc::new(
+                crate::proxy::providers::anthropic_oauth_auth::AnthropicOAuthManager::new(
+                    oauth_dir,
+                ),
+            ),
+        );
+        service.note_official_account_quota("acct-a", 91.0).await;
+        service.note_official_account_quota("acct-b", 14.0).await;
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("enable Codex takeover");
+
+        let status = service.get_status().await.expect("proxy status");
+        let response = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/responses", status.port))
+            .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .json(&json!({
+                "model": "kimi-for-coding",
+                "input": "hi"
+            }))
+            .send()
+            .await
+            .expect("POST kimi-for-coding");
+        assert!(
+            response.status().is_success(),
+            "kimi oauth pool pick should succeed, got {}",
+            response.status()
+        );
+
+        {
+            let hits = captured.lock().await.clone();
+            assert_eq!(hits.len(), 1, "expected one upstream hop, got {hits:?}");
+            assert_eq!(
+                hits[0].authorization.as_deref(),
+                Some("Bearer kimi-token-b")
+            );
+            assert_eq!(hits[0].model, "kimi-for-coding");
+            assert!(
+                !hits[0]
+                    .authorization
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("PROXY_MANAGED"),
+                "managed inject must not leak PROXY_MANAGED"
+            );
+        }
+
+        captured.lock().await.clear();
+        let pinned = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/responses", status.port))
+            .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .json(&json!({
+                "model": "kimi-a/kimi-for-coding",
+                "input": "hi"
+            }))
+            .send()
+            .await
+            .expect("POST kimi-a/kimi-for-coding");
+        assert!(
+            pinned.status().is_success(),
+            "kimi oauth slug pin should succeed, got {}",
+            pinned.status()
+        );
+        {
+            let hits = captured.lock().await.clone();
+            assert_eq!(hits.len(), 1, "expected one pinned hop, got {hits:?}");
+            assert_eq!(
+                hits[0].authorization.as_deref(),
+                Some("Bearer kimi-token-a")
+            );
+            assert_eq!(hits[0].model, "kimi-for-coding");
+        }
+
+        service
+            .set_takeover_for_app("codex", false)
+            .await
+            .expect("disable Codex takeover");
+        mock_handle.abort();
+    }
+
+    fn managed_anthropic_oauth_http_card(
+        id: &str,
+        account_id: &str,
+        sort_index: usize,
+        base_url: &str,
+    ) -> Provider {
+        let mut provider = Provider::with_id(
+            id.to_string(),
+            format!("Claude {id}"),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "PROXY_MANAGED",
+                    "ANTHROPIC_BASE_URL": base_url,
+                    "ANTHROPIC_MODEL": "claude-sonnet-4-6"
+                }
+            }),
+            None,
+        );
+        provider.sort_index = Some(sort_index);
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("anthropic_oauth".to_string()),
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("anthropic_oauth".to_string()),
+                account_id: Some(account_id.to_string()),
+            }),
+            ..Default::default()
+        });
+        provider
+    }
+
+    /// Isolated managed-account store check: CLI import uses TempHome,
+    /// empty Claude Official seed is not OAuth, Kimi/Anthropic inject the
+    /// bound account token (never PROXY_MANAGED), unprefixed pool picks the
+    /// lower-quota account, slug pin stays on the named card, and a missing
+    /// account fails closed without an upstream hop.
+    #[tokio::test]
+    #[serial]
+    async fn managed_oauth_account_store_verification() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        seed_codex_model_template();
+
+        let mut official_seed = Provider::with_id(
+            "claude-official".to_string(),
+            "Claude Official".to_string(),
+            json!({ "env": {} }),
+            None,
+        );
+        official_seed.category = Some("official".to_string());
+        assert!(
+            !official_seed.is_anthropic_oauth(),
+            "empty official seed must not be treated as anthropic_oauth"
+        );
+        assert!(
+            !official_seed.uses_managed_account_auth(),
+            "empty official seed is not proxy-safe managed auth"
+        );
+
+        let oauth_dir = _home.dir.path().join("cc-switch-oauth");
+        std::fs::create_dir_all(&oauth_dir).expect("create oauth dir");
+        let kimi_manager = Arc::new(
+            crate::proxy::providers::kimi_oauth_auth::KimiOAuthManager::new(oauth_dir.clone()),
+        );
+        let anthropic_manager = Arc::new(
+            crate::proxy::providers::anthropic_oauth_auth::AnthropicOAuthManager::new(
+                oauth_dir.clone(),
+            ),
+        );
+
+        let missing = anthropic_manager
+            .import_from_claude_cli()
+            .await
+            .expect_err("empty TempHome has no Claude CLI credentials");
+        assert!(matches!(
+            missing,
+            crate::proxy::providers::anthropic_oauth_auth::AnthropicOAuthError::CredentialsNotFound
+        ));
+
+        let claude_dir = crate::config::get_claude_config_dir();
+        assert!(
+            claude_dir.starts_with(_home.dir.path()),
+            "Claude CLI import must read TempHome, not the host ~/.claude: {claude_dir:?}"
+        );
+        std::fs::create_dir_all(&claude_dir).expect("create isolated .claude");
+        std::fs::write(
+            claude_dir.join(".credentials.json"),
+            serde_json::to_string(&json!({
+                "claudeAiOauth": {
+                    "accessToken": "sk-ant-oat01-imported",
+                    "refreshToken": "refresh-imported",
+                    "expiresAt": chrono::Utc::now().timestamp_millis() + 3_600_000,
+                    "accountUuid": "acct-imported",
+                    "email": "Pro@Claude.AI"
+                }
+            }))
+            .expect("serialize fixture"),
+        )
+        .expect("write isolated Claude CLI credentials");
+        let imported = anthropic_manager
+            .import_from_claude_cli()
+            .await
+            .expect("import from isolated Claude CLI fixture");
+        assert_eq!(imported.id, "acct-imported");
+        assert_eq!(imported.login, "pro@claude.ai");
+        assert_eq!(
+            anthropic_manager
+                .get_valid_token_for_account("acct-imported")
+                .await
+                .expect("imported token"),
+            "sk-ant-oat01-imported"
+        );
+
+        let (mock_addr, captured, mock_handle) =
+            spawn_capturing_responses_upstream("no-such-model").await;
+        let original_kimi_base = env::var("CC_SWITCH_TEST_KIMI_OAUTH_BASE_URL").ok();
+        struct RestoreKimiBase(Option<String>);
+        impl Drop for RestoreKimiBase {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => env::set_var("CC_SWITCH_TEST_KIMI_OAUTH_BASE_URL", value),
+                    None => env::remove_var("CC_SWITCH_TEST_KIMI_OAUTH_BASE_URL"),
+                }
+            }
+        }
+        let _restore = RestoreKimiBase(original_kimi_base);
+        let mock_base = format!("http://{mock_addr}");
+        env::set_var("CC_SWITCH_TEST_KIMI_OAUTH_BASE_URL", &mock_base);
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        for app in ["codex", "claude"] {
+            let mut app_config = db
+                .get_proxy_config_for_app(app)
+                .await
+                .expect("read proxy config");
+            app_config.auto_failover_enabled = false;
+            app_config.max_retries = 0;
+            db.update_proxy_config_for_app(app_config)
+                .await
+                .expect("disable app failover");
+        }
+
+        let kimi_a = managed_kimi_oauth_http_card("kimi-a", "acct-a", 0);
+        let kimi_b = managed_kimi_oauth_http_card("kimi-b", "acct-b", 1);
+        db.save_provider("codex", &kimi_a).expect("save kimi-a");
+        db.save_provider("codex", &kimi_b).expect("save kimi-b");
+        db.set_current_provider("codex", "kimi-a")
+            .expect("set current kimi-a");
+        crate::settings::set_current_provider(&AppType::Codex, Some("kimi-a"))
+            .expect("set local current kimi-a");
+
+        let claude_a = managed_anthropic_oauth_http_card("claude-a", "ant-a", 0, &mock_base);
+        let claude_b = managed_anthropic_oauth_http_card("claude-b", "ant-b", 1, &mock_base);
+        let claude_missing =
+            managed_anthropic_oauth_http_card("claude-missing", "acct-missing", 2, &mock_base);
+        db.save_provider("claude", &claude_a)
+            .expect("save claude-a");
+        db.save_provider("claude", &claude_b)
+            .expect("save claude-b");
+        db.save_provider("claude", &claude_missing)
+            .expect("save claude-missing");
+        db.set_current_provider("claude", "claude-a")
+            .expect("set current claude-a");
+        crate::settings::set_current_provider(&AppType::Claude, Some("claude-a"))
+            .expect("set local current claude-a");
+
+        kimi_manager
+            .add_test_account_with_access_token("acct-a", "kimi-token-a", Some("a@kimi.com"))
+            .await
+            .expect("seed kimi acct-a");
+        kimi_manager
+            .add_test_account_with_access_token("acct-b", "kimi-token-b", Some("b@kimi.com"))
+            .await
+            .expect("seed kimi acct-b");
+        anthropic_manager
+            .add_test_account_with_access_token("ant-a", "ant-token-a", Some("a@claude.ai"))
+            .await
+            .expect("seed ant-a");
+        anthropic_manager
+            .add_test_account_with_access_token("ant-b", "ant-token-b", Some("b@claude.ai"))
+            .await
+            .expect("seed ant-b");
+
+        crate::codex_config::write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "PROXY_MANAGED" }),
+            Some(
+                kimi_a
+                    .settings_config
+                    .get("config")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(""),
+            ),
+        )
+        .expect("seed live codex config");
+
+        let service = ProxyService::new_with_managed_auth(
+            db.clone(),
+            Arc::new(CodexOAuthManager::new(oauth_dir)),
+            kimi_manager,
+            anthropic_manager,
+        );
+        service
+            .write_claude_live(&json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "live-placeholder",
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com"
+                }
+            }))
+            .expect("seed claude live config");
+        service.note_official_account_quota("acct-a", 91.0).await;
+        service.note_official_account_quota("acct-b", 14.0).await;
+        service.note_official_account_quota("ant-a", 90.0).await;
+        service.note_official_account_quota("ant-b", 15.0).await;
+
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("enable Codex takeover");
+        service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect("enable Claude takeover");
+
+        let live = service.read_claude_live().expect("read taken-over live");
+        let live_token = live
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_AUTH_TOKEN"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert_eq!(live_token, "PROXY_MANAGED");
+        assert!(
+            !live_token.contains("sk-ant-"),
+            "takeover live config must not contain the imported CLI token"
+        );
+
+        let status = service.get_status().await.expect("proxy status");
+        let client = reqwest::Client::new();
+
+        let kimi_pool = client
+            .post(format!("http://127.0.0.1:{}/v1/responses", status.port))
+            .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .json(&json!({ "model": "kimi-for-coding", "input": "hi" }))
+            .send()
+            .await
+            .expect("POST kimi-for-coding");
+        assert!(
+            kimi_pool.status().is_success(),
+            "kimi pool should succeed, got {}",
+            kimi_pool.status()
+        );
+        {
+            let hits = captured.lock().await.clone();
+            assert_eq!(hits.len(), 1, "kimi pool hops: {hits:?}");
+            assert_eq!(
+                hits[0].authorization.as_deref(),
+                Some("Bearer kimi-token-b")
+            );
+            assert_eq!(hits[0].model, "kimi-for-coding");
+        }
+
+        captured.lock().await.clear();
+        let kimi_pin = client
+            .post(format!("http://127.0.0.1:{}/v1/responses", status.port))
+            .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .json(&json!({ "model": "kimi-a/kimi-for-coding", "input": "hi" }))
+            .send()
+            .await
+            .expect("POST kimi-a/kimi-for-coding");
+        assert!(
+            kimi_pin.status().is_success(),
+            "kimi pin should succeed, got {}",
+            kimi_pin.status()
+        );
+        {
+            let hits = captured.lock().await.clone();
+            assert_eq!(hits.len(), 1, "kimi pin hops: {hits:?}");
+            assert_eq!(
+                hits[0].authorization.as_deref(),
+                Some("Bearer kimi-token-a")
+            );
+        }
+
+        captured.lock().await.clear();
+        let anthropic_pool = client
+            .post(format!("http://127.0.0.1:{}/v1/messages", status.port))
+            .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .header("anthropic-version", "2023-06-01")
+            .json(&json!({
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 16,
+                "messages": [{ "role": "user", "content": "hi" }]
+            }))
+            .send()
+            .await
+            .expect("POST claude-sonnet-4-6");
+        assert!(
+            anthropic_pool.status().is_success(),
+            "anthropic pool should succeed, got {} body={}",
+            anthropic_pool.status(),
+            anthropic_pool.text().await.unwrap_or_default()
+        );
+        {
+            let hits = captured.lock().await.clone();
+            assert_eq!(hits.len(), 1, "anthropic pool hops: {hits:?}");
+            assert_eq!(hits[0].authorization.as_deref(), Some("Bearer ant-token-b"));
+            assert_eq!(hits[0].model, "claude-sonnet-4-6");
+        }
+
+        captured.lock().await.clear();
+        let anthropic_pin = client
+            .post(format!("http://127.0.0.1:{}/v1/messages", status.port))
+            .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .header("anthropic-version", "2023-06-01")
+            .json(&json!({
+                "model": "claude-a/claude-sonnet-4-6",
+                "max_tokens": 16,
+                "messages": [{ "role": "user", "content": "hi" }]
+            }))
+            .send()
+            .await
+            .expect("POST claude-a/claude-sonnet-4-6");
+        assert!(
+            anthropic_pin.status().is_success(),
+            "anthropic pin should succeed, got {}",
+            anthropic_pin.status()
+        );
+        {
+            let hits = captured.lock().await.clone();
+            assert_eq!(hits.len(), 1, "anthropic pin hops: {hits:?}");
+            assert_eq!(hits[0].authorization.as_deref(), Some("Bearer ant-token-a"));
+        }
+
+        captured.lock().await.clear();
+        let missing_account = client
+            .post(format!("http://127.0.0.1:{}/v1/messages", status.port))
+            .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .header("anthropic-version", "2023-06-01")
+            .json(&json!({
+                "model": "claude-missing/claude-sonnet-4-6",
+                "max_tokens": 16,
+                "messages": [{ "role": "user", "content": "hi" }]
+            }))
+            .send()
+            .await
+            .expect("POST claude-missing/claude-sonnet-4-6");
+        assert!(
+            !missing_account.status().is_success(),
+            "missing managed account must fail closed, got {}",
+            missing_account.status()
+        );
+        {
+            let hits = captured.lock().await.clone();
+            assert!(
+                hits.is_empty(),
+                "missing account must not hop upstream, got {hits:?}"
+            );
+        }
+
+        service
+            .set_takeover_for_app("claude", false)
+            .await
+            .expect("disable Claude takeover");
+        service
+            .set_takeover_for_app("codex", false)
+            .await
+            .expect("disable Codex takeover");
+        mock_handle.abort();
     }
 }

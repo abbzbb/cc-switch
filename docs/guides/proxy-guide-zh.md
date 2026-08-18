@@ -33,6 +33,59 @@ CC Switch 的代理功能是一个本地 HTTP 代理服务器，可以统一管�
 
 启用接管后，你可以正常使用各个 CLI 工具。所有请求都会经过 CC Switch 代理转发到配置的供应商。
 
+### 按供应商选择模型（`provider/model`）
+
+接管 **Codex** 后，CC Switch 会把该应用下所有参与路由的供应商模型合并进 Codex 选择器，格式为 `供应商slug/模型`。请求里带上这个 id 时，代理会**固定**打到对应那张供应商卡，不再走跨供应商故障转移。
+
+```bash
+codex -m "kimi/k2" "解释这段代码"
+```
+
+Claude Code 接管后会打开网关模型发现（`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`）。`/model` 从本地 `GET /v1/models` 拉列表；条目 id 为 `anthropic/供应商slug/模型`（Claude Code 会过滤不含 `claude`/`anthropic` 的 id）。选中后请求仍按该前缀钉到对应供应商卡。haiku / sonnet / opus / fable 角色别名不变。Claude Desktop 的 `/claude-desktop/v1/models` 继续返回合并后的 `slug/model` 列表。
+
+```bash
+claude --model "anthropic/kimi/k2"
+```
+
+规则：
+
+- 规范 id：`{routing_slug}/{upstream_model}`。供应商卡片上可以覆盖 slug；默认优先用供应商 `id`，否则由名称生成。
+- 上游模型 id 内部若含 `/`，目录里会写成 `-`（例如 `org/model` → `kimi/org-model`）。两种写法请求都认。
+- 不带前缀的模型名保持原行为：当前供应商 + 故障转移，Claude 仍可用 haiku/sonnet/opus/fable 角色别名。
+- 两张及以上 **Codex 官方卡** 同时提供同一个原生 id（`gpt-*` / `o1` `o3` `o4*` / `codex-*`）时，未加前缀的请求走账号池：新会话选**已知用量最低**的官方账号（未知用量排在后面，不当成 0%）；会话粘在开启该对话的账号上，直到该账号返回 401/403/429，或最热窗口 ≥ 80% 且池里有更闲的账号。用量来自卡片上的订阅查询，以及成功转发后最多每 60 秒一次的后台刷新。`main/gpt-5.5` 仍钉选该卡并注入对应账号 token（即使 Codex 当前登录的是另一个账号）。
+- 两张及以上 **Kimi For Coding** 卡提供同一个未加前缀 id（`kimi-for-coding` / `k2` / `k3`）时同样走账号池，用量来自该卡的套餐查询。两张及以上存有 Claude OAuth token（`sk-ant-oat…`）的卡对未加前缀的 `claude-*` 同样选闲号。`{slug}/模型` 仍然钉卡。
+- 第一段不是已配置的路由 slug 时（例如 Claude Desktop 的 `anthropic/claude-sonnet-5`）会回落到当前供应商，而不是 400。
+- 在供应商编辑页可关闭「参与路由目录」，该卡就不会出现在合并列表里，但仍可用 slug 前缀直接请求。
+
+### Combo 虚拟模型
+
+代理面板可以定义 `combo/{id}`：一个虚拟模型对应一组真实的 `供应商slug/模型` 目标。
+
+```bash
+codex -m "combo/main" "解释这段代码"
+claude --model "anthropic/combo/main"
+```
+
+- 目标写成 `kimi/k2` 或带权重的 `kimi/k2:2`。
+- `failover`（默认）：按配置顺序尝试；某一跳可重试失败后换下一个目标。不依赖应用级故障转移开关。
+- `round-robin`：按权重平滑选择第一跳，失败仍会继续其余目标。
+- 未知的 `combo/foo` 返回 400；目标在当前应用下都解析不到则 503。
+- 有 Combo 时 `combo/` 命名空间被占用，供应商 slug 不要用 `combo`。
+
+### 认证中心托管登录
+
+设置 → 认证中心可以登录并绑定账号，token 只存在本机 account store，不会写进供应商卡片：
+
+- **Kimi For Coding**：设备码登录
+- **Claude Pro/Max**：浏览器 PKCE（本机 `localhost:54545` 回调）或从 Claude CLI 导入
+- 保存卡片时选择 `Kimi For Coding (OAuth)` / `Claude Pro/Max (OAuth)` 并绑定账号
+
+纯托管卡会在后台刷新额度，两张及以上同 family 卡对未加前缀模型走闲号池。认证中心和供应商卡片会显示该账号的用量。
+
+### Web Search / Vision Sidecar
+
+代理面板可以打开 sidecar。非官方模型上的 hosted `web_search` 会改成函数调用，由已登录的 Claude Pro/Max 或 ChatGPT Official 执行；纯文本模型收到图片时先描述再转发。未登录对应账号时请求保持原样。官方 ChatGPT / Anthropic OAuth 卡不拦截 hosted search。
+
 ### 4. 停止代理
 
 当你不再需要代理时，点击 **停止代理** 按钮。CC Switch 会：

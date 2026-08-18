@@ -848,6 +848,13 @@ impl ProviderAdapter for CodexAdapter {
 
     fn extract_base_url(&self, provider: &Provider) -> Result<String, ProxyError> {
         if is_codex_official_provider(provider) {
+            #[cfg(test)]
+            if let Ok(url) = std::env::var("CC_SWITCH_TEST_CODEX_OFFICIAL_BASE_URL") {
+                let url = url.trim().trim_end_matches('/');
+                if !url.is_empty() {
+                    return Ok(url.to_string());
+                }
+            }
             return Ok(super::CHATGPT_CODEX_BASE_URL.to_string());
         }
 
@@ -855,6 +862,10 @@ impl ProviderAdapter for CodexAdapter {
         // API origin associated with the managed token.
         if provider.is_xai_oauth() {
             return Ok(super::XAI_API_BASE_URL.to_string());
+        }
+
+        if provider.is_kimi_oauth() {
+            return Ok(super::kimi_oauth_auth::kimi_oauth_upstream_base_url());
         }
 
         // 1. 尝试直接获取 base_url 字段
@@ -913,6 +924,20 @@ impl ProviderAdapter for CodexAdapter {
             return Some(AuthInfo::new(
                 "xai_oauth_placeholder".to_string(),
                 AuthStrategy::XaiOAuth,
+            ));
+        }
+
+        if provider.is_kimi_oauth() {
+            return Some(AuthInfo::new(
+                "kimi_oauth_placeholder".to_string(),
+                AuthStrategy::KimiOAuth,
+            ));
+        }
+
+        if provider.is_anthropic_oauth() {
+            return Some(AuthInfo::new(
+                "anthropic_oauth_placeholder".to_string(),
+                AuthStrategy::AnthropicOAuth,
             ));
         }
 

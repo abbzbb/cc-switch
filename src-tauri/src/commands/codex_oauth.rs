@@ -8,6 +8,7 @@
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
 use crate::services::model_fetch::FetchedModel;
 use crate::services::subscription::{query_codex_quota, CredentialStatus, SubscriptionQuota};
+use crate::store::AppState;
 use std::sync::Arc;
 use tauri::State;
 
@@ -28,6 +29,7 @@ pub struct CodexOAuthState(pub Arc<CodexOAuthManager>);
 pub async fn get_codex_oauth_quota(
     account_id: Option<String>,
     state: State<'_, CodexOAuthState>,
+    app_state: State<'_, AppState>,
 ) -> Result<SubscriptionQuota, String> {
     let manager = &state.0;
 
@@ -53,13 +55,18 @@ pub async fn get_codex_oauth_quota(
     };
 
     // 瞬时传输失败以 Err 传播（前端 reject → retry + 保留上次成功值）。
-    query_codex_quota(
+    let quota = query_codex_quota(
         &token,
         Some(&id),
         "codex_oauth",
         "Codex OAuth access token expired or rejected. Please re-login via cc-switch.",
     )
-    .await
+    .await?;
+    app_state
+        .proxy_service
+        .record_official_quota_snapshot(&id, &quota)
+        .await;
+    Ok(quota)
 }
 
 /// 获取 Codex OAuth (ChatGPT Plus/Pro) 可用模型列表

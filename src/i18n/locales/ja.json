@@ -350,7 +350,9 @@
       "beta": "Beta",
       "copilotDescription": "GitHub Copilot アカウントを管理します",
       "codexOauthDescription": "ChatGPT アカウントを管理します",
-      "xaiOauthDescription": "xAI / Grok アカウントを管理します"
+      "xaiOauthDescription": "xAI / Grok アカウントを管理します",
+      "kimiOauthDescription": "Kimi For Coding アカウントを管理します",
+      "anthropicOauthDescription": "ブラウザでログインするか、Claude CLI から Pro/Max アカウントを取り込みます"
     },
     "advanced": {
       "configDir": {
@@ -1349,7 +1351,13 @@
     "fetchModelsNotSupported": "このプロバイダーはモデル一覧の取得に対応していません",
     "fetchModelsEndpointNotFound": "利用可能なモデル一覧エンドポイントが見つかりません。Base URL を確認するか、プロバイダーが該当 API を公開しているかご確認ください",
     "fetchModelsTimeout": "リクエストがタイムアウトしました。ネットワーク接続を確認してください",
-    "requiredFields": "プロバイダー名、API エンドポイント、API Key、モデルを入力してください"
+    "requiredFields": "プロバイダー名、API エンドポイント、API Key、モデルを入力してください",
+    "routingSlug": "ルーティング slug",
+    "routingSlugHint": "リクエストは {{slug}}/{model} でこのカードを指定します。空欄ならプロバイダー id または名前から生成します。名前を変えても旧セッションが別カードに飛ばないよう、上書き値の保存を推奨します。",
+    "routingCatalog": "ルーティングカタログに含める",
+    "routingCatalogHint": "オフにすると、このカードのモデルは Codex / Claude Desktop の結合リストに出ません。slug プレフィックスでの直接指定は引き続き使えます。",
+    "routingPreview": "カタログに書き込む ID：{{models}}",
+    "routingSlugBadge": "route {{slug}}"
   },
   "copilot": {
     "authSection": "GitHub Copilot 認証",
@@ -1450,6 +1458,52 @@
     "retry": "再試行",
     "logoutAll": "すべての xAI アカウントを削除",
     "loginRequired": "先に xAI アカウントへログインしてください"
+  },
+  "kimiOauth": {
+    "authStatus": "Kimi OAuth 認証",
+    "accountCount": "利用可能なアカウント: {{count}}",
+    "reauthRequired": "再ログインが必要です",
+    "notAuthenticated": "未認証",
+    "selectAccount": "アカウントを選択",
+    "selectAccountPlaceholder": "Kimi アカウントを選択",
+    "useDefaultAccount": "デフォルトアカウントを使用",
+    "accounts": "Kimi アカウント",
+    "defaultAccount": "デフォルト",
+    "expired": "資格情報が無効です",
+    "setAsDefault": "デフォルトに設定",
+    "removeAccount": "アカウントを削除",
+    "addOrReauth": "アカウントを追加または再ログイン",
+    "login": "Kimi でログイン",
+    "waitingForAuth": "Kimi の認証を待っています…",
+    "enterCode": "ブラウザに自動入力されていない場合は、次を入力してください：",
+    "retry": "再試行",
+    "logoutAll": "すべての Kimi アカウントを削除",
+    "loginRequired": "先に Kimi アカウントへログインしてください"
+  },
+  "anthropicOauth": {
+    "authStatus": "Claude Pro/Max OAuth",
+    "accountCount": "利用可能なアカウント: {{count}}",
+    "reauthRequired": "再ログインが必要です",
+    "notAuthenticated": "未認証",
+    "selectAccount": "アカウントを選択",
+    "selectAccountPlaceholder": "Claude アカウントを選択",
+    "useDefaultAccount": "デフォルトアカウントを使用",
+    "accounts": "Claude アカウント",
+    "defaultAccount": "デフォルト",
+    "expired": "資格情報が無効です",
+    "setAsDefault": "デフォルトに設定",
+    "removeAccount": "アカウントを削除",
+    "login": "ブラウザでログイン",
+    "loginAnother": "ブラウザでアカウントを追加",
+    "waitingForAuth": "ブラウザの認可を待っています…",
+    "openBrowser": "ログインページを開く",
+    "retry": "再試行",
+    "import": "Claude CLI から取り込む",
+    "importAnother": "Claude CLI から再取り込み",
+    "importSuccess": "Claude CLI からアカウントを取り込みました",
+    "importHint": "ブラウザで Claude Pro/Max にログインするか、現在の Claude CLI ログインを取り込みます。CLI アカウントを切り替えて再度取り込むと別のアカウントを追加できます。",
+    "logoutAll": "すべての Claude アカウントを削除",
+    "loginRequired": "先にログインするか、Claude CLI からアカウントを取り込んでください"
   },
   "managedAuth": {
     "accountRemoved": "アカウントを削除しました",
@@ -2873,6 +2927,7 @@
     "switchFailed": "切り替えに失敗しました: {{error}}",
     "takeover": {
       "hint": "ルーティングするアプリを選択します。有効にすると、そのアプリのリクエストはローカルルーティング経由で転送されます",
+      "routingHint": "Codex を接管すると選択に kimi/k2 が出ます。Claude を接管すると /model に anthropic/kimi/k2 が出ます。その ID で送ると該当カードに固定され、クロスプロバイダーのフェイルオーバーは使いません。Official カードが複数あるとき、接頭辞なしの gpt-* は使用量の低いアカウントを選びスレッドに固定します。80% で空きアカウントへ移せます。Kimi For Coding カードが複数あるときは kimi-for-coding / k2 / k3、Claude OAuth（sk-ant-oat）カードが複数あるときは claude-* も同様です。main/gpt-5.5 はそのカードを指定しトークンを注入します。Combo を作ると combo/main でフェイルオーバーや加重ラウンドロビンが使えます。",
       "enabled": "{{app}} ルーティング有効",
       "disabled": "{{app}} ルーティング無効",
       "failed": "ルーティングの切り替えに失敗しました: {{detail}}",
@@ -2881,6 +2936,41 @@
         "broken": "{{appLabel}} がルーティング中ですが、ルーティングサービスが実行されていません",
         "inactive": "{{appLabel}} のリクエストをローカルルーティング経由でルーティング"
       }
+    },
+    "combos": {
+      "title": "Combo 仮想モデル",
+      "description": "combo/{id} で provider/model のリストに転送します。failover は順に試し、round-robin は重みで最初のホップを選び、失敗時は残りの対象を続けます。Claude のピッカーでは anthropic/combo/{id} です。",
+      "empty": "Combo はまだありません。kimi/k2 のようなターゲットを追加してください。",
+      "id": "Combo id",
+      "strategy": "戦略",
+      "targets": "ターゲット（1行に provider/model[:weight]）",
+      "add": "追加",
+      "update": "更新",
+      "saved": "Combo を保存しました",
+      "deleted": "Combo を削除しました",
+      "idRequired": "Combo id を入力してください",
+      "targetsRequired": "provider/model ターゲットを少なくとも1つ入力してください",
+      "saveFailed": "Combo の保存に失敗しました",
+      "deleteFailed": "Combo の削除に失敗しました"
+    },
+    "sidecars": {
+      "title": "Web Search / Vision Sidecar",
+      "description": "非公式モデルの hosted web_search は関数呼び出しに書き換え、ログイン済みの Claude Pro/Max または ChatGPT Official で実行します。テキスト専用モデルに画像が来た場合は先に説明してから転送します。対応アカウントがない場合はリクエストをそのまま通します。",
+      "webSearch": "Web Search",
+      "vision": "Vision",
+      "webSearchBackend": "検索バックエンド",
+      "visionBackend": "画像バックエンド",
+      "backendAuto": "自動",
+      "backendAnthropic": "Claude Pro/Max",
+      "backendOpenai": "ChatGPT Official",
+      "webSearchModel": "検索モデル（任意）",
+      "visionModel": "画像モデル（任意）",
+      "modelPlaceholder": "空欄ならバックエンドのデフォルトを使う",
+      "maxSearches": "1 ターンあたりの最大検索数",
+      "maxDescriptions": "1 ターンあたりの最大説明数",
+      "searchTimeoutMs": "検索タイムアウト（ミリ秒）",
+      "visionTimeoutMs": "画像タイムアウト（ミリ秒）",
+      "saveFailed": "Sidecar 設定の保存に失敗しました"
     },
     "failover": {
       "proxyRequired": "フェイルオーバーを設定するには、ルーティングサービスを先に起動する必要があります",

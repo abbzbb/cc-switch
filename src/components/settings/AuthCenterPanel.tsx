@@ -7,6 +7,8 @@ import { CopilotAuthSection } from "@/components/providers/forms/CopilotAuthSect
 import { CodexOAuthSection } from "@/components/providers/forms/CodexOAuthSection";
 import type { ManagedAuthProvider } from "@/lib/api";
 import { XaiOAuthSection } from "@/components/providers/forms/XaiOAuthSection";
+import { KimiOAuthSection } from "@/components/providers/forms/KimiOAuthSection";
+import { AnthropicOAuthSection } from "@/components/providers/forms/AnthropicOAuthSection";
 import { ProviderIcon } from "@/components/ProviderIcon";
 
 interface AuthCenterPanelProps {
@@ -18,6 +20,8 @@ export function AuthCenterPanel({ authScrollTarget }: AuthCenterPanelProps) {
   const copilotSectionRef = useRef<HTMLElement | null>(null);
   const codexOauthSectionRef = useRef<HTMLElement | null>(null);
   const xaiOauthSectionRef = useRef<HTMLElement | null>(null);
+  const kimiOauthSectionRef = useRef<HTMLElement | null>(null);
+  const anthropicOauthSectionRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (!authScrollTarget) return;
@@ -27,7 +31,11 @@ export function AuthCenterPanel({ authScrollTarget }: AuthCenterPanelProps) {
         ? copilotSectionRef
         : authScrollTarget === "codex_oauth"
           ? codexOauthSectionRef
-          : xaiOauthSectionRef;
+          : authScrollTarget === "xai_oauth"
+            ? xaiOauthSectionRef
+            : authScrollTarget === "kimi_oauth"
+              ? kimiOauthSectionRef
+              : anthropicOauthSectionRef;
 
     const frame = requestAnimationFrame(() => {
       const prefersReducedMotion = window.matchMedia(
@@ -130,6 +138,48 @@ export function AuthCenterPanel({ authScrollTarget }: AuthCenterPanelProps) {
         </div>
 
         <XaiOAuthSection />
+      </section>
+
+      <section
+        ref={kimiOauthSectionRef}
+        className="scroll-mt-4 rounded-xl border border-border/60 bg-card/60 p-6"
+      >
+        <div className="mb-4 flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-muted">
+            <ProviderIcon icon="kimi" name="Kimi" size={20} />
+          </div>
+          <div>
+            <h4 className="font-medium">Kimi For Coding</h4>
+            <p className="text-sm text-muted-foreground">
+              {t("settings.authCenter.kimiOauthDescription", {
+                defaultValue: "管理 Kimi For Coding 账号",
+              })}
+            </p>
+          </div>
+        </div>
+
+        <KimiOAuthSection showAccountQuota />
+      </section>
+
+      <section
+        ref={anthropicOauthSectionRef}
+        className="scroll-mt-4 rounded-xl border border-border/60 bg-card/60 p-6"
+      >
+        <div className="mb-4 flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-muted">
+            <ProviderIcon icon="anthropic" name="Claude" size={20} />
+          </div>
+          <div>
+            <h4 className="font-medium">Claude Pro/Max</h4>
+            <p className="text-sm text-muted-foreground">
+              {t("settings.authCenter.anthropicOauthDescription", {
+                defaultValue: "用浏览器登录或从 Claude CLI 导入 Pro/Max 账号",
+              })}
+            </p>
+          </div>
+        </div>
+
+        <AnthropicOAuthSection showAccountQuota />
       </section>
     </div>
   );

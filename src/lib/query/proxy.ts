@@ -13,6 +13,8 @@ export const proxyKeys = {
   takeoverStatus: ["proxyTakeoverStatus"] as const,
   globalConfig: ["globalProxyConfig"] as const,
   appConfig: (appType: string) => ["appProxyConfig", appType] as const,
+  combos: ["modelCombos"] as const,
+  sidecars: ["sidecarSettings"] as const,
 };
 
 // ========== 代理服务器状态 Hooks ==========
@@ -136,6 +138,52 @@ export function useUpdateAppProxyConfig() {
       toast.error(
         t("proxy.settings.toast.saveFailed", { error: error.message }),
       );
+    },
+  });
+}
+
+export function useModelCombos() {
+  return useQuery({
+    queryKey: proxyKeys.combos,
+    queryFn: () => proxyApi.listModelCombos(),
+  });
+}
+
+export function useUpsertModelCombo() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (combo: import("@/types/proxy").ModelCombo) =>
+      proxyApi.upsertModelCombo(combo),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: proxyKeys.combos });
+    },
+  });
+}
+
+export function useDeleteModelCombo() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => proxyApi.deleteModelCombo(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: proxyKeys.combos });
+    },
+  });
+}
+
+export function useSidecarSettings() {
+  return useQuery({
+    queryKey: proxyKeys.sidecars,
+    queryFn: () => proxyApi.getSidecarSettings(),
+  });
+}
+
+export function useUpdateSidecarSettings() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (settings: import("@/types/proxy").SidecarSettings) =>
+      proxyApi.updateSidecarSettings(settings),
+    onSuccess: (settings) => {
+      queryClient.setQueryData(proxyKeys.sidecars, settings);
     },
   });
 }

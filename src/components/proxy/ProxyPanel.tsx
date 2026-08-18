@@ -35,6 +35,8 @@ import {
   PROXY_APP_IDS,
   type ProxyAppId,
 } from "@/config/appConfig";
+import { ComboPanel } from "@/components/proxy/ComboPanel";
+import { SidecarPanel } from "@/components/proxy/SidecarPanel";
 
 interface ProxyPanelProps {
   enableLocalProxy: boolean;
@@ -307,10 +309,19 @@ export function ProxyPanel({
                       "选择要接管的应用，启用后该应用的请求将通过本地代理转发",
                   })}
                 </p>
+                <p className="text-xs text-muted-foreground">
+                  {t("proxy.takeover.routingHint", {
+                    defaultValue:
+                      "接管 Codex 后选择器会出现 kimi/k2；接管 Claude 后 /model 会出现 anthropic/kimi/k2。该 id 会钉到对应供应商卡。多张官方卡、Kimi For Coding 或 Claude OAuth 卡时，未加前缀会选用量更低的账号。",
+                  })}
+                </p>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
+
+        <ComboPanel />
+        <SidecarPanel />
 
         {/* Running state: service info + stats */}
         {isRunning && status ? (

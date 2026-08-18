@@ -1169,6 +1169,17 @@ pub fn run() {
                 log::info!("✓ XaiOAuthManager initialized");
             }
 
+            {
+                use commands::{AnthropicOAuthState, KimiOAuthState};
+                let app_state = app.state::<AppState>();
+                app.manage(KimiOAuthState(app_state.kimi_oauth_manager.clone()));
+                app.manage(AnthropicOAuthState(
+                    app_state.anthropic_oauth_manager.clone(),
+                ));
+                log::info!("✓ KimiOAuthManager initialized");
+                log::info!("✓ AnthropicOAuthManager initialized");
+            }
+
             // 初始化全局出站代理 HTTP 客户端
             {
                 let db = &app.state::<AppState>().db;
@@ -1429,6 +1440,8 @@ pub fn run() {
             // subscription quota
             commands::get_subscription_quota,
             commands::get_codex_oauth_quota,
+            commands::get_kimi_oauth_quota,
+            commands::get_anthropic_oauth_quota,
             commands::get_codex_oauth_models,
             commands::get_xai_oauth_models,
             commands::get_xai_oauth_quota,
@@ -1571,6 +1584,12 @@ pub fn run() {
             commands::get_circuit_breaker_config,
             commands::update_circuit_breaker_config,
             commands::get_circuit_breaker_stats,
+            // Model combos
+            commands::list_model_combos,
+            commands::upsert_model_combo,
+            commands::delete_model_combo,
+            commands::get_sidecar_settings,
+            commands::update_sidecar_settings,
             // Failover queue management
             commands::get_failover_queue,
             commands::get_available_providers_for_failover,
@@ -1660,11 +1679,13 @@ pub fn run() {
             // Generic managed auth commands
             commands::auth_start_login,
             commands::auth_poll_for_account,
+            commands::auth_cancel_login,
             commands::auth_list_accounts,
             commands::auth_get_status,
             commands::auth_remove_account,
             commands::auth_set_default_account,
             commands::auth_logout,
+            commands::auth_import_local,
             // Copilot OAuth commands (multi-account support)
             commands::copilot_start_device_flow,
             commands::copilot_poll_for_auth,

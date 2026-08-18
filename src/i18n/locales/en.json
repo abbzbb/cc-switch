@@ -350,7 +350,9 @@
       "beta": "Beta",
       "copilotDescription": "Manage GitHub Copilot accounts",
       "codexOauthDescription": "Manage ChatGPT accounts",
-      "xaiOauthDescription": "Manage xAI / Grok accounts"
+      "xaiOauthDescription": "Manage xAI / Grok accounts",
+      "kimiOauthDescription": "Manage Kimi For Coding accounts",
+      "anthropicOauthDescription": "Sign in with a browser or import Claude Pro/Max accounts from Claude CLI"
     },
     "advanced": {
       "configDir": {
@@ -1349,7 +1351,13 @@
     "fetchModelsNotSupported": "This provider does not support fetching model list",
     "fetchModelsEndpointNotFound": "No reachable models endpoint found. Please check the Base URL or confirm whether the provider exposes this API.",
     "fetchModelsTimeout": "Request timed out, please check network connection",
-    "requiredFields": "Please fill in provider name, API endpoint, API Key and model"
+    "requiredFields": "Please fill in provider name, API endpoint, API Key and model",
+    "routingSlug": "Routing slug",
+    "routingSlugHint": "Requests use {{slug}}/{model} to pin this card. Leave blank to derive it from the provider id or name. Saving an override keeps old sessions on this card if you later rename it.",
+    "routingCatalog": "Include in routing catalog",
+    "routingCatalogHint": "When off, this card’s models stay out of the merged Codex / Claude Desktop picker, but you can still call it with a slug prefix.",
+    "routingPreview": "Will be written to the catalog: {{models}}",
+    "routingSlugBadge": "route {{slug}}"
   },
   "copilot": {
     "authSection": "GitHub Copilot Authentication",
@@ -1450,6 +1458,52 @@
     "retry": "Retry",
     "logoutAll": "Remove all xAI accounts",
     "loginRequired": "Sign in to an xAI account first"
+  },
+  "kimiOauth": {
+    "authStatus": "Kimi OAuth authentication",
+    "accountCount": "Usable accounts: {{count}}",
+    "reauthRequired": "Sign-in required",
+    "notAuthenticated": "Not authenticated",
+    "selectAccount": "Select account",
+    "selectAccountPlaceholder": "Select a Kimi account",
+    "useDefaultAccount": "Use default account",
+    "accounts": "Kimi accounts",
+    "defaultAccount": "Default",
+    "expired": "Credentials expired",
+    "setAsDefault": "Set as default",
+    "removeAccount": "Remove account",
+    "addOrReauth": "Add account or sign in again",
+    "login": "Sign in with Kimi",
+    "waitingForAuth": "Waiting for Kimi authorization…",
+    "enterCode": "If the browser did not fill it in automatically, enter:",
+    "retry": "Retry",
+    "logoutAll": "Remove all Kimi accounts",
+    "loginRequired": "Sign in to a Kimi account first"
+  },
+  "anthropicOauth": {
+    "authStatus": "Claude Pro/Max OAuth",
+    "accountCount": "Usable accounts: {{count}}",
+    "reauthRequired": "Sign-in required",
+    "notAuthenticated": "Not authenticated",
+    "selectAccount": "Select account",
+    "selectAccountPlaceholder": "Select a Claude account",
+    "useDefaultAccount": "Use default account",
+    "accounts": "Claude accounts",
+    "defaultAccount": "Default",
+    "expired": "Credentials expired",
+    "setAsDefault": "Set as default",
+    "removeAccount": "Remove account",
+    "login": "Sign in with browser",
+    "loginAnother": "Add another account in the browser",
+    "waitingForAuth": "Waiting for browser authorization…",
+    "openBrowser": "Open sign-in page",
+    "retry": "Retry",
+    "import": "Import from Claude CLI",
+    "importAnother": "Import again from Claude CLI",
+    "importSuccess": "Imported account from Claude CLI",
+    "importHint": "Sign in to Claude Pro/Max in the browser, or import the current Claude CLI login. Switch the CLI account and import again to add another.",
+    "logoutAll": "Remove all Claude accounts",
+    "loginRequired": "Sign in or import a Claude account from Claude CLI first"
   },
   "managedAuth": {
     "accountRemoved": "Account removed",
@@ -2873,6 +2927,7 @@
     "switchFailed": "Switch failed: {{error}}",
     "takeover": {
       "hint": "Select apps to route — once enabled, requests from that app will go through local routing",
+      "routingHint": "After Codex takeover the picker lists kimi/k2; after Claude takeover, /model lists anthropic/kimi/k2. Requests using that id pin that card and skip cross-provider failover. With several Official cards, unprefixed gpt-* picks the lowest-usage account and sticks to that thread; at 80% it can move to a quieter account. Several Kimi For Coding cards do the same for kimi-for-coding / k2 / k3, and several Claude OAuth (sk-ant-oat) cards do the same for unprefixed claude-*. main/gpt-5.5 pins that card and injects its token. Combos add combo/main for failover or weighted round-robin.",
       "enabled": "{{app}} routing enabled",
       "disabled": "{{app}} routing disabled",
       "failed": "Failed to toggle routing: {{detail}}",
@@ -2881,6 +2936,41 @@
         "broken": "{{appLabel}} is routing, but routing service is not running",
         "inactive": "Route {{appLabel}}'s requests through local routing"
       }
+    },
+    "combos": {
+      "title": "Combo virtual models",
+      "description": "Request combo/{id} to try an ordered list of provider/model targets. failover uses that order; round-robin picks the first hop by weight and still walks the rest on failure. Claude's picker shows anthropic/combo/{id}.",
+      "empty": "No combos yet. Add targets like kimi/k2.",
+      "id": "Combo id",
+      "strategy": "Strategy",
+      "targets": "Targets (one provider/model[:weight] per line)",
+      "add": "Add",
+      "update": "Update",
+      "saved": "Combo saved",
+      "deleted": "Combo deleted",
+      "idRequired": "Combo id is required",
+      "targetsRequired": "Add at least one provider/model target",
+      "saveFailed": "Failed to save combo",
+      "deleteFailed": "Failed to delete combo"
+    },
+    "sidecars": {
+      "title": "Web Search / Vision Sidecar",
+      "description": "Hosted web_search on non-official models becomes a function call executed by a signed-in Claude Pro/Max or ChatGPT Official account. Images sent to text-only models are described first. With no matching login, requests pass through unchanged.",
+      "webSearch": "Web Search",
+      "vision": "Vision",
+      "webSearchBackend": "Search backend",
+      "visionBackend": "Vision backend",
+      "backendAuto": "Auto",
+      "backendAnthropic": "Claude Pro/Max",
+      "backendOpenai": "ChatGPT Official",
+      "webSearchModel": "Search model (optional)",
+      "visionModel": "Vision model (optional)",
+      "modelPlaceholder": "Leave empty to use the backend default",
+      "maxSearches": "Max searches per turn",
+      "maxDescriptions": "Max descriptions per turn",
+      "searchTimeoutMs": "Search timeout (ms)",
+      "visionTimeoutMs": "Vision timeout (ms)",
+      "saveFailed": "Failed to save sidecar settings"
     },
     "failover": {
       "proxyRequired": "Routing service must be started to configure failover",

@@ -7,6 +7,7 @@ import { useManagedAuth } from "@/components/providers/forms/hooks/useManagedAut
 const apiMocks = vi.hoisted(() => ({
   authGetStatus: vi.fn(),
   authRemoveAccount: vi.fn(),
+  authCancelLogin: vi.fn(),
 }));
 const toastMocks = vi.hoisted(() => ({
   success: vi.fn(),
@@ -17,6 +18,7 @@ vi.mock("@/lib/api", () => ({
     authGetStatus: (...args: unknown[]) => apiMocks.authGetStatus(...args),
     authRemoveAccount: (...args: unknown[]) =>
       apiMocks.authRemoveAccount(...args),
+    authCancelLogin: (...args: unknown[]) => apiMocks.authCancelLogin(...args),
   },
   settingsApi: {},
 }));
@@ -63,6 +65,7 @@ describe("useManagedAuth", () => {
       ],
     });
     apiMocks.authRemoveAccount.mockReset().mockResolvedValue(undefined);
+    apiMocks.authCancelLogin.mockReset().mockResolvedValue(undefined);
   });
 
   it("shows a success toast after removing an account", async () => {
@@ -81,6 +84,25 @@ describe("useManagedAuth", () => {
     );
     await waitFor(() =>
       expect(toastMocks.success).toHaveBeenCalledWith("账号已移除"),
+    );
+  });
+
+  it("cancels Anthropic PKCE on the backend when login is aborted", async () => {
+    apiMocks.authGetStatus.mockResolvedValue({
+      provider: "anthropic_oauth",
+      authenticated: false,
+      default_account_id: null,
+      accounts: [],
+    });
+    const { result } = renderHook(() => useManagedAuth("anthropic_oauth"), {
+      wrapper: createWrapper(),
+    });
+    await waitFor(() => expect(result.current.isStatusSuccess).toBe(true));
+
+    act(() => result.current.cancelAuth());
+
+    await waitFor(() =>
+      expect(apiMocks.authCancelLogin).toHaveBeenCalledWith("anthropic_oauth"),
     );
   });
 });

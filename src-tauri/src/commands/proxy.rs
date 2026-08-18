@@ -466,3 +466,103 @@ pub async fn get_circuit_breaker_stats(
     let _ = (state, provider_id, app_type);
     Ok(None)
 }
+
+fn reserved_provider_routing_slugs(
+    db: &crate::database::Database,
+) -> std::collections::HashSet<String> {
+    let mut slugs = std::collections::HashSet::new();
+    for app in ["claude", "codex", "gemini", "grokbuild", "claude-desktop"] {
+        if let Ok(map) = db.get_all_providers(app) {
+            let providers: Vec<_> = map.into_values().collect();
+            slugs.extend(
+                crate::proxy::model_routing::assign_routing_slugs(&providers).into_values(),
+            );
+        }
+    }
+    slugs
+}
+
+/// List virtual combo models (`combo/{id}`).
+#[tauri::command]
+pub async fn list_model_combos(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<crate::proxy::combo::ModelCombo>, String> {
+    state.db.list_model_combos().map_err(|e| e.to_string())
+}
+
+/// Create or replace one combo definition.
+#[tauri::command]
+pub async fn upsert_model_combo(
+    state: tauri::State<'_, AppState>,
+    combo: crate::proxy::combo::ModelCombo,
+) -> Result<crate::proxy::combo::ModelCombo, String> {
+    let mut combo = combo;
+    combo.id = combo.id.trim().to_string();
+    let mut combos = state.db.list_model_combos().map_err(|e| e.to_string())?;
+    let other_ids = combos
+        .iter()
+        .filter(|existing| !existing.id.eq_ignore_ascii_case(&combo.id))
+        .map(|existing| existing.id.clone())
+        .collect();
+    crate::proxy::combo::validate_combo(
+        &combo,
+        &other_ids,
+        &reserved_provider_routing_slugs(&state.db),
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(existing) = combos
+        .iter_mut()
+        .find(|item| item.id.eq_ignore_ascii_case(&combo.id))
+    {
+        *existing = combo.clone();
+    } else {
+        combos.push(combo.clone());
+    }
+    state
+        .db
+        .save_model_combos(&combos)
+        .map_err(|e| e.to_string())?;
+    state
+        .proxy_service
+        .refresh_codex_routing_catalog_if_takeover()
+        .await?;
+    Ok(combo)
+}
+
+/// Delete a combo by id.
+#[tauri::command]
+pub async fn delete_model_combo(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let mut combos = state.db.list_model_combos().map_err(|e| e.to_string())?;
+    let before = combos.len();
+    combos.retain(|combo| !combo.id.eq_ignore_ascii_case(id.trim()));
+    if combos.len() == before {
+        return Err(format!("unknown combo '{id}'"));
+    }
+    state
+        .db
+        .save_model_combos(&combos)
+        .map_err(|e| e.to_string())?;
+    state
+        .proxy_service
+        .refresh_codex_routing_catalog_if_takeover()
+        .await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_sidecar_settings(
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::proxy::sidecar::SidecarSettings, String> {
+    Ok(crate::proxy::sidecar::load_sidecar_settings(&state.db))
+}
+
+#[tauri::command]
+pub async fn update_sidecar_settings(
+    state: tauri::State<'_, AppState>,
+    settings: crate::proxy::sidecar::SidecarSettings,
+) -> Result<crate::proxy::sidecar::SidecarSettings, String> {
+    crate::proxy::sidecar::save_sidecar_settings(&state.db, &settings).map_err(|e| e.to_string())
+}

@@ -116,6 +116,44 @@ export interface FailoverQueueItem {
   sortIndex?: number;
 }
 
+export type ComboStrategy = "failover" | "round-robin";
+
+export interface ComboTarget {
+  provider: string;
+  model: string;
+  weight?: number;
+}
+
+export interface ModelCombo {
+  id: string;
+  targets: ComboTarget[];
+  strategy?: ComboStrategy;
+  stickyLimit?: number;
+}
+
+export type SidecarBackend = "auto" | "openai" | "anthropic";
+
+export interface WebSearchSidecarConfig {
+  enabled: boolean;
+  backend: SidecarBackend;
+  model?: string | null;
+  maxSearchesPerTurn: number;
+  timeoutMs: number;
+}
+
+export interface VisionSidecarConfig {
+  enabled: boolean;
+  backend: SidecarBackend;
+  model?: string | null;
+  maxDescriptionsPerTurn: number;
+  timeoutMs: number;
+}
+
+export interface SidecarSettings {
+  webSearch: WebSearchSidecarConfig;
+  vision: VisionSidecarConfig;
+}
+
 // 全局代理配置（统一字段，三行镜像）
 export interface GlobalProxyConfig {
   proxyEnabled: boolean;

@@ -44,6 +44,7 @@ import EndpointSpeedTest from "./EndpointSpeedTest";
 import { CodexOAuthSection } from "./CodexOAuthSection";
 import { ApiKeySection, EndpointField, ModelDropdown } from "./shared";
 import { XaiOAuthSection } from "./XaiOAuthSection";
+import { KimiOAuthSection } from "./KimiOAuthSection";
 import {
   fetchModelsForConfig,
   fetchXaiOauthModels,
@@ -76,6 +77,11 @@ interface CodexFormFieldsProps {
   isXaiOauthAuthenticated?: boolean;
   selectedXaiAccountId?: string | null;
   onXaiAccountSelect?: (accountId: string | null) => void;
+  // Kimi OAuth 托管预设：token 由代理注入，端点由 adapter 硬定向
+  isKimiOauthPreset?: boolean;
+  isKimiOauthAuthenticated?: boolean;
+  selectedKimiAccountId?: string | null;
+  onKimiAccountSelect?: (accountId: string | null) => void;
   // API Key
   codexApiKey: string;
   onApiKeyChange: (key: string) => void;
@@ -371,6 +377,9 @@ export function CodexFormFields({
   isXaiOauthAuthenticated,
   selectedXaiAccountId,
   onXaiAccountSelect,
+  isKimiOauthPreset,
+  selectedKimiAccountId,
+  onKimiAccountSelect,
   codexApiKey,
   onApiKeyChange,
   category,
@@ -426,6 +435,7 @@ export function CodexFormFields({
   onLocalProxyBodyOverrideChange,
 }: CodexFormFieldsProps) {
   const { t } = useTranslation();
+  const hidesManagedOauthCredentials = isXaiOauthPreset || isKimiOauthPreset;
 
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
@@ -477,19 +487,19 @@ export function CodexFormFields({
     promptCacheRouting !== "auto" ||
     !!maxOutputTokens;
   const [advancedExpanded, setAdvancedExpanded] = useState(
-    isXaiOauthPreset ? false : hasAnyAdvancedValue,
+    hidesManagedOauthCredentials ? false : hasAnyAdvancedValue,
   );
 
   // 预设/编辑加载填充高级值后自动展开（仅从折叠→展开，不会自动折叠）；
-  // xAI OAuth 托管预设的高级值都是预设自带的，无需展示，保持折叠
+  // 托管 OAuth 预设的高级值都是预设自带的，无需展示，保持折叠
   useEffect(() => {
-    if (isXaiOauthPreset) {
+    if (hidesManagedOauthCredentials) {
       return;
     }
     if (hasAnyAdvancedValue) {
       setAdvancedExpanded(true);
     }
-  }, [hasAnyAdvancedValue, isXaiOauthPreset]);
+  }, [hasAnyAdvancedValue, hidesManagedOauthCredentials]);
 
   const [catalogRows, setCatalogRows] = useState<CodexCatalogRow[]>(() =>
     catalogModels.map((m) => createCatalogRow(m)),
@@ -752,8 +762,15 @@ export function CodexFormFields({
         />
       )}
 
+      {isKimiOauthPreset && (
+        <KimiOAuthSection
+          selectedAccountId={selectedKimiAccountId}
+          onAccountSelect={onKimiAccountSelect}
+        />
+      )}
+
       {/* Codex API Key 输入框（托管 OAuth 预设无需 Key） */}
-      {!isCodexOauthPreset && !isXaiOauthPreset && (
+      {!isCodexOauthPreset && !hidesManagedOauthCredentials && (
         <ApiKeySection
           id="codexApiKey"
           label="API Key"
@@ -776,7 +793,7 @@ export function CodexFormFields({
       )}
 
       {/* Codex Base URL 输入框（托管 OAuth 端点由 adapter 硬定向，不展示） */}
-      {shouldShowSpeedTest && !isXaiOauthPreset && (
+      {shouldShowSpeedTest && !hidesManagedOauthCredentials && (
         <EndpointField
           id="codexBaseUrl"
           label={t("codexConfig.apiUrlLabel")}
@@ -910,7 +927,7 @@ export function CodexFormFields({
             {/* 上游格式 —— Chat 需开启路由接管（走代理转换），Responses 原生直连。
                 沿用 shouldShowSpeedTest 门控，cloud_provider 保持不可切换；
                 xAI OAuth 托管预设格式钉死 Responses，不可切换。 */}
-            {shouldShowSpeedTest && !isXaiOauthPreset && (
+            {shouldShowSpeedTest && !hidesManagedOauthCredentials && (
               <div className="space-y-3">
                 <div className="space-y-1.5">
                   <FormLabel htmlFor="codex-upstream-format">

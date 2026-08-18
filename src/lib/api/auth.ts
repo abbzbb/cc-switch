@@ -3,7 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 export type ManagedAuthProvider =
   | "github_copilot"
   | "codex_oauth"
-  | "xai_oauth";
+  | "xai_oauth"
+  | "kimi_oauth"
+  | "anthropic_oauth";
 
 export interface ManagedAuthAccount {
   id: string;
@@ -15,7 +17,7 @@ export interface ManagedAuthAccount {
   github_domain: string;
   /** Codex-only: the account predates persisted id_token support. */
   reauth_required?: boolean;
-  /** xAI-only: the refresh credential is invalid and the account is unusable. */
+  /** xAI / Kimi / Anthropic: the refresh credential is invalid and the account is unusable. */
   requires_reauth: boolean;
 }
 
@@ -43,6 +45,14 @@ export async function authStartLogin(
   return invoke<ManagedAuthDeviceCodeResponse>("auth_start_login", {
     authProvider,
     githubDomain: githubDomain || null,
+  });
+}
+
+export async function authCancelLogin(
+  authProvider: ManagedAuthProvider,
+): Promise<void> {
+  return invoke("auth_cancel_login", {
+    authProvider,
   });
 }
 
@@ -102,12 +112,22 @@ export async function authLogout(
   });
 }
 
+export async function authImportLocal(
+  authProvider: ManagedAuthProvider,
+): Promise<ManagedAuthAccount> {
+  return invoke<ManagedAuthAccount>("auth_import_local", {
+    authProvider,
+  });
+}
+
 export const authApi = {
   authStartLogin,
+  authCancelLogin,
   authPollForAccount,
   authListAccounts,
   authGetStatus,
   authRemoveAccount,
   authSetDefaultAccount,
   authLogout,
+  authImportLocal,
 };

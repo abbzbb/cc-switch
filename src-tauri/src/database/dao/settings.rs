@@ -324,4 +324,21 @@ impl Database {
             .map_err(|e| AppError::Database(format!("序列化日志配置失败: {e}")))?;
         self.set_setting("log_config", &json)
     }
+
+    // --- Combo virtual models ---
+
+    pub fn list_model_combos(&self) -> Result<Vec<crate::proxy::combo::ModelCombo>, AppError> {
+        crate::proxy::combo::combos_from_setting_json(
+            self.get_setting(crate::proxy::combo::MODEL_COMBOS_SETTING_KEY)?
+                .as_deref(),
+        )
+    }
+
+    pub fn save_model_combos(
+        &self,
+        combos: &[crate::proxy::combo::ModelCombo],
+    ) -> Result<(), AppError> {
+        let json = crate::proxy::combo::combos_to_setting_json(combos)?;
+        self.set_setting(crate::proxy::combo::MODEL_COMBOS_SETTING_KEY, &json)
+    }
 }

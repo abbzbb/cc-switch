@@ -229,6 +229,9 @@ Modern AI-powered coding relies on tools like Claude Code, Claude Desktop, Codex
 
 - **Local proxy with hot-switching** — Format conversion, auto-failover, circuit breaker, provider health monitoring, and request rectifier
 - **App-level takeover** — Independently proxy Claude, Codex, Gemini, or Grok Build, down to individual providers
+- **`provider/model` routing and Combos** — Merged catalogs in the picker; `combo/{id}` fails over or weighted-round-robins across cards
+- **Managed account pools** — Unprefixed ChatGPT Official, Kimi For Coding, and Claude Pro/Max requests pick the idle account and stay sticky; `{slug}/model` pins the card
+- **Web Search / Vision sidecars** — Hosted search on non-official models and image descriptions for text-only models, via a signed-in Claude Pro/Max or ChatGPT Official account
 
 ### MCP, Prompts & Skills
 

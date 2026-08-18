@@ -624,6 +624,15 @@ async fn query_provider_usage_inner(
         .await
         .map_err(|e| format!("Failed to query coding plan: {e}"))?;
 
+        if quota.success
+            && provider.is_some_and(crate::proxy::official_pool::is_kimi_coding_provider)
+        {
+            state
+                .proxy_service
+                .record_official_quota_snapshot(provider_id, &quota)
+                .await;
+        }
+
         // 将 SubscriptionQuota 转换为 UsageResult
         if !quota.success {
             return Ok(crate::provider::UsageResult {

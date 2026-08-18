@@ -43,7 +43,12 @@ export function useManagedAuth(
     // A rejected xAI refresh token is persisted as `requires_reauth` by the
     // proxy hot path. Periodically refresh local status so an already-open Auth
     // Center stops showing the account as logged in without requiring a reload.
-    refetchInterval: authProvider === "xai_oauth" ? 15_000 : false,
+    refetchInterval:
+      authProvider === "xai_oauth" ||
+      authProvider === "kimi_oauth" ||
+      authProvider === "anthropic_oauth"
+        ? 15_000
+        : false,
   });
 
   const stopPolling = useCallback(() => {
@@ -71,20 +76,23 @@ export function useManagedAuth(
       setError(null);
 
       try {
-        await copyText(response.user_code);
-      } catch (e) {
-        console.debug("[ManagedAuth] Failed to copy user code:", e);
-      }
-
-      try {
         await settingsApi.openExternal(response.verification_uri);
       } catch (e) {
         console.debug("[ManagedAuth] Failed to open browser:", e);
       }
 
-      // Add a small buffer on top of GitHub's suggested interval to avoid
-      // hitting slow_down responses too aggressively during device polling.
-      const interval = Math.max((response.interval || 5) + 3, 8) * 1000;
+      const isBrowserPkce =
+        authProvider === "anthropic_oauth" || response.user_code === "BROWSER";
+      if (!isBrowserPkce) {
+        try {
+          await copyText(response.user_code);
+        } catch (e) {
+          console.debug("[ManagedAuth] Failed to copy user code:", e);
+        }
+      }
+      const interval = isBrowserPkce
+        ? Math.max(response.interval || 2, 2) * 1000
+        : Math.max((response.interval || 5) + 3, 8) * 1000;
       const expiresAt = Date.now() + response.expires_in * 1000;
 
       const pollOnce = async () => {
@@ -204,7 +212,10 @@ export function useManagedAuth(
     setPollingState("idle");
     setDeviceCode(null);
     setError(null);
-  }, [stopPolling]);
+    if (authProvider === "anthropic_oauth") {
+      void authApi.authCancelLogin(authProvider).catch(() => undefined);
+    }
+  }, [authProvider, stopPolling]);
 
   const logout = useCallback(() => {
     logoutMutation.mutate();

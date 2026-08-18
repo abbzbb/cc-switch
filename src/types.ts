@@ -232,6 +232,10 @@ export interface ProviderMeta {
   localProxyRequestOverrides?: LocalProxyRequestOverrides;
   // Whether this provider is currently projected into an additive app's live config.
   liveConfigManaged?: boolean;
+  routingSlug?: string;
+  // Whether this card contributes models to the merged proxy catalog.
+  // Omit / true = participate when the card advertises models; false = opt out.
+  routingCatalog?: boolean;
   // 供应商类型（用于识别 Copilot 等特殊供应商）
   providerType?: string;
   // GitHub Copilot 关联账号 ID（旧字段，保留兼容读取）

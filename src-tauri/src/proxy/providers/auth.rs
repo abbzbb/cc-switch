@@ -135,6 +135,20 @@ pub enum AuthStrategy {
     ///
     /// access token 由 xAI Device Code 流程获取并由 forwarder 动态注入。
     XaiOAuth,
+
+    /// Kimi For Coding OAuth（设备码）
+    ///
+    /// - Header: `Authorization: Bearer <access_token>`
+    ///
+    /// access token 由 Kimi device-code 流程获取并由 forwarder 动态注入。
+    KimiOAuth,
+
+    /// Anthropic Claude Pro/Max OAuth
+    ///
+    /// - Header: `Authorization: Bearer <sk-ant-oat…>`
+    ///
+    /// 本切片从 Claude CLI 导入或浏览器 PKCE 登录，并由 forwarder 动态注入。
+    AnthropicOAuth,
 }
 
 #[cfg(test)]

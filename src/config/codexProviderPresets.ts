@@ -34,7 +34,7 @@ export interface CodexProviderPreset {
   // Codex API 格式
   apiFormat?: CodexApiFormat;
   // 仅用于区分预设来源；ChatGPT/Codex 与 xAI/Grok 的认证流程彼此独立。
-  providerType?: "codex_oauth" | "xai_oauth";
+  providerType?: "codex_oauth" | "xai_oauth" | "kimi_oauth" | "anthropic_oauth";
   // OAuth 预设：隐藏 API Key 输入，保存前要求已登录托管账号
   requiresOAuth?: boolean;
   // Codex Chat 本地路由模式下的模型目录
@@ -239,6 +239,61 @@ export const codexProviderPresets: CodexProviderPreset[] = [
     // 以 CC Switch 为例）：「支持思考模式 开启（必须——关闭后 K3/K2.7 Code
     // 都会被路由到 K2.6）/ 支持思考等级 开启」。effortValueMode 不声明=
     // passthrough；网关自身对 effort 做归一映射（null→high、none→关思考）
+    codexChatReasoning: {
+      supportsThinking: true,
+      supportsEffort: true,
+      thinkingParam: "thinking",
+      effortParam: "reasoning_effort",
+      outputFormat: "reasoning_content",
+    },
+    category: "cn_official",
+    icon: "kimi",
+    iconColor: "#6366F1",
+  },
+  {
+    name: "Kimi For Coding (OAuth)",
+    primePartner: true,
+    websiteUrl: "https://www.kimi.com/code/?aff=cc-switch",
+    auth: generateThirdPartyAuth(""),
+    // 托管 OAuth：真实 token 由本地代理按请求注入，Kimi adapter 硬定向
+    // api.kimi.com/coding/v1；这里的 base_url / 空 auth 只是配置快照。
+    config: generateThirdPartyConfig(
+      "kimi_coding",
+      "https://api.kimi.com/coding/v1",
+      "kimi-for-coding",
+    ),
+    apiFormat: "openai_chat",
+    providerType: "kimi_oauth",
+    requiresOAuth: true,
+    promptCacheRouting: "enabled",
+    modelCatalog: modelCatalog([
+      {
+        model: "kimi-for-coding",
+        displayName: "Kimi For Coding",
+        contextWindow: 262144,
+        reasoningLevels: ["high"],
+      },
+      {
+        model: "kimi-for-coding-highspeed",
+        displayName: "Kimi For Coding HighSpeed",
+        contextWindow: 262144,
+        reasoningLevels: ["high"],
+      },
+      {
+        model: "k3",
+        displayName: "Kimi K3",
+        contextWindow: 1048576,
+        reasoningLevels: ["low", "high", "max"],
+        defaultReasoningLevel: "high",
+      },
+      {
+        model: "k3-256k",
+        displayName: "Kimi K3 256K",
+        contextWindow: 262144,
+        reasoningLevels: ["low", "high", "max"],
+        defaultReasoningLevel: "high",
+      },
+    ]),
     codexChatReasoning: {
       supportsThinking: true,
       supportsEffort: true,
