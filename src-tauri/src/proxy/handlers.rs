@@ -88,7 +88,8 @@ pub async fn get_status(State(state): State<ProxyState>) -> Result<Json<ProxySta
 ///   `anthropic-version` / `x-api-key`) expects Anthropic `{data:[{id,display_name}]}`.
 ///
 /// Codex is served only when live `model_catalog_json` still points at the
-/// cc-switch–owned catalog file.
+/// cc-switch–owned catalog file. The HTTP payload is built from the DB
+/// (same builder as the on-disk takeover projection).
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct ModelsListQuery {
     limit: Option<u32>,
@@ -102,7 +103,7 @@ pub async fn handle_models(
     if wants_anthropic_models_list(&headers, &query) {
         handle_claude_gateway_models(state).await
     } else {
-        Ok(Json(codex_catalog_models_payload()))
+        handle_codex_gateway_models(state).await
     }
 }
 
@@ -125,31 +126,36 @@ fn wants_anthropic_models_list(headers: &HeaderMap, query: &ModelsListQuery) -> 
         .is_some_and(|ua| ua.to_ascii_lowercase().contains("claude"))
 }
 
-fn codex_catalog_models_payload() -> Value {
+fn live_codex_catalog_is_cc_switch() -> bool {
     let config_dir = crate::codex_config::get_codex_config_dir();
-    let active_catalog_path = match crate::codex_config::read_codex_config_text() {
+    match crate::codex_config::read_codex_config_text() {
         Ok(config_text) => {
-            crate::codex_config::resolve_cc_switch_catalog_path(&config_text, &config_dir)
+            crate::codex_config::resolve_cc_switch_catalog_path(&config_text, &config_dir).is_some()
         }
-        Err(_) => None,
-    };
-
-    if let Some(catalog_path) = active_catalog_path.as_ref().filter(|path| path.exists()) {
-        match crate::codex_config::read_codex_model_catalog_text(catalog_path) {
-            Ok(text) => serde_json::from_str(&text).unwrap_or(json!({"models": []})),
-            Err(error) => {
-                log::warn!("[models] 拒绝读取越界或过大的目录文件: {error}");
-                json!({"models": []})
-            }
-        }
-    } else {
-        if active_catalog_path.is_none() {
-            log::debug!(
-                "[models] stale guard: catalog not served (model_catalog_json not set to cc-switch catalog)"
-            );
-        }
-        json!({"models": []})
+        Err(_) => false,
     }
+}
+
+async fn handle_codex_gateway_models(state: ProxyState) -> Result<Json<Value>, ProxyError> {
+    if !live_codex_catalog_is_cc_switch() {
+        log::debug!(
+            "[models] stale guard: catalog not served (model_catalog_json not set to cc-switch catalog)"
+        );
+        return Ok(Json(json!({"models": []})));
+    }
+    let providers: Vec<_> = state
+        .db
+        .get_all_providers("codex")
+        .map_err(|e| ProxyError::DatabaseError(e.to_string()))?
+        .into_values()
+        .collect();
+    let combos = state.db.list_model_combos().unwrap_or_default();
+    super::model_routing::build_merged_codex_routing_catalog_with_combos(&providers, &combos)
+        .map(Json)
+        .map_err(|error| {
+            log::warn!("[models] failed to build Codex catalog from db: {error}");
+            ProxyError::Internal(error.to_string())
+        })
 }
 
 async fn handle_claude_gateway_models(state: ProxyState) -> Result<Json<Value>, ProxyError> {

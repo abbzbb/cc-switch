@@ -756,16 +756,28 @@ export function CodexFormFields({
       {/* xAI OAuth 认证（Grok 订阅托管账号） */}
       {isXaiOauthPreset && (
         <XaiOAuthSection
+          mode="select"
           selectedAccountId={selectedXaiAccountId}
           onAccountSelect={onXaiAccountSelect}
+          onManageAccounts={
+            onManageAuthAccounts
+              ? () => onManageAuthAccounts("xai_oauth")
+              : undefined
+          }
           pollStatus={false}
         />
       )}
 
       {isKimiOauthPreset && (
         <KimiOAuthSection
+          mode="select"
           selectedAccountId={selectedKimiAccountId}
           onAccountSelect={onKimiAccountSelect}
+          onManageAccounts={
+            onManageAuthAccounts
+              ? () => onManageAuthAccounts("kimi_oauth")
+              : undefined
+          }
           pollStatus={false}
         />
       )}

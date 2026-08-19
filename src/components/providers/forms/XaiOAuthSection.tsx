@@ -23,19 +23,24 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { copyText } from "@/lib/clipboard";
+import { ManagedOAuthAccountSelect } from "./ManagedOAuthAccountSelect";
 import { useXaiOauth } from "./hooks/useXaiOauth";
 
 interface XaiOAuthSectionProps {
   className?: string;
+  mode?: "manage" | "select";
   selectedAccountId?: string | null;
   onAccountSelect?: (accountId: string | null) => void;
+  onManageAccounts?: () => void;
   pollStatus?: boolean;
 }
 
 export const XaiOAuthSection: React.FC<XaiOAuthSectionProps> = ({
   className,
+  mode = "manage",
   selectedAccountId,
   onAccountSelect,
+  onManageAccounts,
   pollStatus = true,
 }) => {
   const { t } = useTranslation();
@@ -71,9 +76,41 @@ export const XaiOAuthSection: React.FC<XaiOAuthSectionProps> = ({
   const remove = (accountId: string, event: React.MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
+    const login =
+      accounts.find((account) => account.id === accountId)?.login ?? accountId;
+    if (
+      !window.confirm(
+        t("xaiOauth.removeConfirm", {
+          login,
+          defaultValue: "移除账号 {{login}}？",
+        }),
+      )
+    ) {
+      return;
+    }
     removeAccount(accountId);
     if (selectedAccountId === accountId) onAccountSelect?.(null);
   };
+
+  const accountSelect =
+    mode === "select" && onAccountSelect ? (
+      <ManagedOAuthAccountSelect
+        accounts={accounts}
+        selectedAccountId={selectedAccountId}
+        onAccountSelect={onAccountSelect}
+        onManageAccounts={onManageAccounts}
+        selectLabel={t("xaiOauth.selectAccount", "选择账号")}
+        placeholder={t("xaiOauth.selectAccountPlaceholder", "选择 xAI 账号")}
+        noneOptionLabel={t("xaiOauth.useDefaultAccount", "使用默认账号")}
+        expiredLabel={t("xaiOauth.expired", "凭据已失效")}
+      />
+    ) : null;
+
+  if (mode === "select") {
+    return (
+      <div className={`space-y-4 ${className ?? ""}`}>{accountSelect}</div>
+    );
+  }
 
   return (
     <div className={`space-y-4 ${className ?? ""}`}>
@@ -315,7 +352,18 @@ export const XaiOAuthSection: React.FC<XaiOAuthSectionProps> = ({
           type="button"
           variant="outline"
           className="w-full text-red-500 hover:text-red-600"
-          onClick={logout}
+          onClick={() => {
+            if (
+              !window.confirm(
+                t("xaiOauth.logoutAllConfirm", {
+                  defaultValue: "移除所有 xAI 账号？",
+                }),
+              )
+            ) {
+              return;
+            }
+            logout();
+          }}
         >
           <LogOut className="mr-2 h-4 w-4" />
           {t("xaiOauth.logoutAll", "移除所有 xAI 账号")}

@@ -2,7 +2,6 @@ import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { FormLabel } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
 import { useProvidersQuery } from "@/lib/query/queries";
 import type { AppId } from "@/lib/api";
 import {
@@ -19,8 +18,6 @@ interface RoutingSlugFieldsProps {
   providerName: string;
   routingSlug: string;
   onRoutingSlugChange: (value: string) => void;
-  routingCatalog: boolean;
-  onRoutingCatalogChange: (value: boolean) => void;
   previewModels: Array<string | undefined | null>;
 }
 
@@ -30,8 +27,6 @@ export function RoutingSlugFields({
   providerName,
   routingSlug,
   onRoutingSlugChange,
-  routingCatalog,
-  onRoutingCatalogChange,
   previewModels,
 }: RoutingSlugFieldsProps) {
   const { t } = useTranslation();
@@ -105,28 +100,12 @@ export function RoutingSlugFields({
         ) : null}
       </div>
 
-      <div className="flex items-center justify-between gap-4">
-        <div className="space-y-1">
-          <FormLabel>
-            {t("providerForm.routingCatalog", {
-              defaultValue: "参与路由目录",
-            })}
-          </FormLabel>
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            {t("providerForm.routingCatalogHint", {
-              defaultValue:
-                "关闭后，这张卡的模型不会出现在 Claude / Codex / Claude Desktop 的合并列表里，但仍可用 slug 前缀直接请求。",
-            })}
-          </p>
-        </div>
-        <Switch
-          checked={routingCatalog}
-          onCheckedChange={onRoutingCatalogChange}
-          aria-label={t("providerForm.routingCatalog", {
-            defaultValue: "参与路由目录",
-          })}
-        />
-      </div>
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        {t("providerForm.routingCatalogHint", {
+          defaultValue:
+            "新卡默认加入 Claude / Codex / Claude Desktop 的合并目录。要退出目录，到代理页的「参与路由的配置」里关。无论是否加入，都可以用 slug 前缀直接请求。",
+        })}
+      </p>
 
       {previews.length > 0 && (
         <p className="text-xs text-muted-foreground">

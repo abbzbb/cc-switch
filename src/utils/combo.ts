@@ -11,6 +11,17 @@ const CLAUDE_COMBO_PREFIX = "anthropic/combo/";
 const MAX_COMBO_ID_LEN = 64;
 const MIN_COMBO_WEIGHT = 1;
 const MAX_COMBO_WEIGHT = 10_000;
+export const MIN_STICKY_LIMIT = 1;
+export const MAX_STICKY_LIMIT = 100;
+
+const ANTHROPIC_MODEL_ENV_KEYS = [
+  "ANTHROPIC_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_DEFAULT_FABLE_MODEL",
+  "CLAUDE_CODE_SUBAGENT_MODEL",
+] as const;
 
 type ComboParseErrorKind =
   | "invalid_target"
@@ -153,6 +164,62 @@ export function resolveComboHop(
     providerId: provider.id,
     providerName: provider.name,
   };
+}
+
+export function clampStickyLimit(value: number): number {
+  if (!Number.isInteger(value)) {
+    return MIN_STICKY_LIMIT;
+  }
+  return Math.min(MAX_STICKY_LIMIT, Math.max(MIN_STICKY_LIMIT, value));
+}
+
+function tomlModelLine(config: unknown): string | undefined {
+  if (typeof config !== "string") {
+    return undefined;
+  }
+  const match = config.match(/^\s*model\s*=\s*"([^"]+)"/m);
+  return match?.[1];
+}
+
+/** Best-effort catalog models for the combo slug picker (not the full Rust set). */
+export function providerUpstreamModelIds(provider: {
+  settingsConfig?: Record<string, unknown>;
+  meta?: {
+    claudeDesktopModelRoutes?: Record<string, { model?: string }>;
+  };
+}): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const push = (value?: string | null) => {
+    const trimmed = value?.trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    ids.push(trimmed);
+  };
+  const settings = provider.settingsConfig ?? {};
+  const catalog = settings.modelCatalog as
+    | { models?: Array<{ model?: string }> }
+    | undefined;
+  for (const row of catalog?.models ?? []) {
+    push(row.model);
+  }
+  if (typeof settings.model === "string") {
+    push(settings.model);
+  }
+  const env = settings.env as Record<string, unknown> | undefined;
+  for (const key of ANTHROPIC_MODEL_ENV_KEYS) {
+    const value = env?.[key];
+    if (typeof value === "string") {
+      push(value);
+    }
+  }
+  push(tomlModelLine(settings.config));
+  for (const route of Object.values(
+    provider.meta?.claudeDesktopModelRoutes ?? {},
+  )) {
+    push(route.model);
+  }
+  return ids;
 }
 
 export function formatComboTargets(targets: ComboTarget[]): string {

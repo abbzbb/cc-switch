@@ -4242,6 +4242,18 @@ impl ProviderService {
         base_url.trim().trim_end_matches('/').to_string()
     }
 
+    fn rewrite_codex_catalog_projection(state: &AppState, app_type: &AppType) {
+        if !matches!(app_type, AppType::Codex) {
+            return;
+        }
+        if let Err(error) = state
+            .proxy_service
+            .rewrite_codex_routing_catalog_from_db_if_takeover()
+        {
+            log::warn!("Failed to rewrite Codex routing catalog after provider save: {error}");
+        }
+    }
+
     /// List all providers for an app type
     pub fn list(
         state: &AppState,
@@ -4355,6 +4367,7 @@ impl ProviderService {
 
         // Save to database
         state.db.save_provider(app_type.as_str(), &provider)?;
+        Self::rewrite_codex_catalog_projection(state, &app_type);
 
         // Additive mode apps (OpenCode, OpenClaw): optionally write to live config.
         if app_type.is_additive_mode() {
@@ -4417,6 +4430,9 @@ impl ProviderService {
         let existing_provider = state
             .db
             .get_provider_by_id(&original_id, app_type.as_str())?;
+        if let Some(existing) = existing_provider.as_ref() {
+            crate::proxy::model_routing::preserve_routing_catalog(existing, &mut provider);
+        }
         // Normalize Claude model keys
         Self::normalize_provider_if_claude(&app_type, &mut provider);
         Self::validate_provider_settings(&app_type, &provider)?;
@@ -4490,6 +4506,7 @@ impl ProviderService {
 
             Self::set_provider_live_config_managed(&mut provider, false);
             state.db.save_provider(app_type.as_str(), &provider)?;
+            Self::rewrite_codex_catalog_projection(state, &app_type);
             state.db.delete_provider(app_type.as_str(), &original_id)?;
 
             if crate::settings::get_current_provider(&app_type).as_deref() == Some(&original_id) {
@@ -4583,6 +4600,7 @@ impl ProviderService {
             // DB current/live inconsistent with the subsequent save.
             if !is_current {
                 state.db.save_provider(app_type.as_str(), &provider)?;
+                Self::rewrite_codex_catalog_projection(state, &app_type);
                 return Ok(true);
             }
 
@@ -4713,6 +4731,7 @@ impl ProviderService {
 
         // Save to database
         state.db.save_provider(app_type.as_str(), &provider)?;
+        Self::rewrite_codex_catalog_projection(state, &app_type);
 
         if is_current {
             // 如果 Claude 代理接管处于激活状态，并且代理服务正在运行：

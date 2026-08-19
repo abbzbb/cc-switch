@@ -92,6 +92,22 @@ describe("assignRoutingSlugs", () => {
     expect(assigned.get(second)).toBe("same-aabbccdd");
     expect(assigned.get(third)).toBe("same-aabbccdd-2");
   });
+
+  it("sorts by sortIndex, not caller array order", () => {
+    const later = {
+      id: "bbbbbbbb-9b11-4d22-8c33-abcdef123456",
+      name: "Same",
+      sortIndex: 1,
+    };
+    const earlier = {
+      id: "aaaaaaaa-9b11-4d22-8c33-abcdef123456",
+      name: "Same",
+      sortIndex: 0,
+    };
+    const assigned = assignRoutingSlugs([later, earlier]);
+    expect(assigned.get(earlier.id)).toBe("same");
+    expect(assigned.get(later.id)).toBe("same-bbbbbbbb");
+  });
 });
 
 describe("assignedSlugForForm", () => {

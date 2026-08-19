@@ -58,6 +58,37 @@ describe("AnthropicOAuthSection", () => {
     ).toBeInTheDocument();
   });
 
+  it("hides manage chrome in select mode", () => {
+    mocks.useAnthropicOauth.mockReturnValue({
+      ...mocks.useAnthropicOauth(),
+      accounts: [
+        {
+          id: "acct-1",
+          login: "user@example.com",
+          requires_reauth: false,
+        },
+      ],
+      hasAnyAccount: true,
+      isAuthenticated: true,
+    });
+    render(
+      <AnthropicOAuthSection
+        mode="select"
+        selectedAccountId="acct-1"
+        onAccountSelect={vi.fn()}
+        onManageAccounts={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", {
+        name: /使用浏览器登录|Sign in with browser/i,
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /管理账号|Manage accounts/i }),
+    ).toBeInTheDocument();
+  });
+
   it("shows a browser waiting state instead of a user code", () => {
     mocks.useAnthropicOauth.mockReturnValue({
       ...mocks.useAnthropicOauth(),

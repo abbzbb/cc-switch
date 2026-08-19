@@ -445,7 +445,6 @@ function ProviderFormFull({
       ),
     );
     setRoutingSlug(initialData?.meta?.routingSlug ?? "");
-    setRoutingCatalog(initialData?.meta?.routingCatalog !== false);
   }, [appId, initialData, supportsFullUrl]);
 
   const defaultValues: ProviderFormData = useMemo(
@@ -663,9 +662,6 @@ function ProviderFormFull({
   );
   const [routingSlug, setRoutingSlug] = useState(
     () => initialData?.meta?.routingSlug ?? "",
-  );
-  const [routingCatalog, setRoutingCatalog] = useState(
-    () => initialData?.meta?.routingCatalog !== false,
   );
 
   const {
@@ -1790,6 +1786,7 @@ function ProviderFormFull({
     // dedicated commands and remain safe from stale form snapshots.
     if (isEditMode && baseMeta) {
       delete baseMeta.custom_endpoints;
+      delete baseMeta.routingCatalog;
     }
 
     const providerType = isCopilotProvider
@@ -1953,11 +1950,7 @@ function ProviderFormFull({
     } else {
       delete nextMeta.routingSlug;
     }
-    if (routingCatalog) {
-      delete nextMeta.routingCatalog;
-    } else {
-      nextMeta.routingCatalog = false;
-    }
+    delete nextMeta.routingCatalog;
 
     payload.meta = nextMeta;
 
@@ -2568,8 +2561,6 @@ function ProviderFormFull({
               providerName={form.watch("name")}
               routingSlug={routingSlug}
               onRoutingSlugChange={setRoutingSlug}
-              routingCatalog={routingCatalog}
-              onRoutingCatalogChange={setRoutingCatalog}
               previewModels={[
                 claudeModel,
                 defaultSonnetModel,
@@ -2663,8 +2654,6 @@ function ProviderFormFull({
               providerName={form.watch("name")}
               routingSlug={routingSlug}
               onRoutingSlugChange={setRoutingSlug}
-              routingCatalog={routingCatalog}
-              onRoutingCatalogChange={setRoutingCatalog}
               previewModels={[
                 ...(codexCatalogModels ?? []).map((row) => row.model),
                 codexModel,

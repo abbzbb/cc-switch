@@ -300,9 +300,6 @@ export function ClaudeDesktopProviderForm({
   const [routingSlug, setRoutingSlug] = useState(
     () => initialData?.meta?.routingSlug ?? "",
   );
-  const [routingCatalog, setRoutingCatalog] = useState(
-    () => initialData?.meta?.routingCatalog !== false,
-  );
   const [selectedPresetId, setSelectedPresetId] = useState<string | null>(
     "custom",
   );
@@ -618,7 +615,7 @@ export function ClaudeDesktopProviderForm({
       delete meta.endpointAutoSelect;
       delete meta.isFullUrl;
       meta.routingSlug = routingSlug.trim() || undefined;
-      meta.routingCatalog = routingCatalog ? undefined : false;
+      delete meta.routingCatalog;
       await onSubmit({
         ...values,
         name: values.name.trim(),
@@ -884,10 +881,10 @@ export function ClaudeDesktopProviderForm({
     meta.codexFastMode =
       activeProviderType === "codex_oauth" ? codexFastMode : undefined;
     meta.routingSlug = routingSlug.trim() || undefined;
-    meta.routingCatalog = routingCatalog ? undefined : false;
 
     delete meta.endpointAutoSelect;
     delete meta.isFullUrl;
+    delete meta.routingCatalog;
 
     await onSubmit({
       ...values,
@@ -993,20 +990,38 @@ export function ClaudeDesktopProviderForm({
                   />
                 ) : activeProviderType === "kimi_oauth" ? (
                   <KimiOAuthSection
+                    mode="select"
                     selectedAccountId={selectedKimiAccountId}
                     onAccountSelect={setSelectedKimiAccountId}
+                    onManageAccounts={
+                      onManageAuthAccounts
+                        ? () => onManageAuthAccounts("kimi_oauth")
+                        : undefined
+                    }
                     pollStatus={false}
                   />
                 ) : activeProviderType === "anthropic_oauth" ? (
                   <AnthropicOAuthSection
+                    mode="select"
                     selectedAccountId={selectedAnthropicAccountId}
                     onAccountSelect={setSelectedAnthropicAccountId}
+                    onManageAccounts={
+                      onManageAuthAccounts
+                        ? () => onManageAuthAccounts("anthropic_oauth")
+                        : undefined
+                    }
                     pollStatus={false}
                   />
                 ) : (
                   <XaiOAuthSection
+                    mode="select"
                     selectedAccountId={selectedXaiAccountId}
                     onAccountSelect={setSelectedXaiAccountId}
+                    onManageAccounts={
+                      onManageAuthAccounts
+                        ? () => onManageAuthAccounts("xai_oauth")
+                        : undefined
+                    }
                     pollStatus={false}
                   />
                 )}
@@ -1409,8 +1424,6 @@ export function ClaudeDesktopProviderForm({
           providerName={form.watch("name")}
           routingSlug={routingSlug}
           onRoutingSlugChange={setRoutingSlug}
-          routingCatalog={routingCatalog}
-          onRoutingCatalogChange={setRoutingCatalog}
           previewModels={routes.map((route) => route.model)}
         />
 

@@ -24,20 +24,25 @@ import {
 } from "@/components/ui/select";
 import { copyText } from "@/lib/clipboard";
 import { ManagedOauthAccountQuota } from "@/components/ManagedOauthQuota";
+import { ManagedOAuthAccountSelect } from "./ManagedOAuthAccountSelect";
 import { useKimiOauth } from "./hooks/useKimiOauth";
 
 interface KimiOAuthSectionProps {
   className?: string;
+  mode?: "manage" | "select";
   selectedAccountId?: string | null;
   onAccountSelect?: (accountId: string | null) => void;
+  onManageAccounts?: () => void;
   showAccountQuota?: boolean;
   pollStatus?: boolean;
 }
 
 export const KimiOAuthSection: React.FC<KimiOAuthSectionProps> = ({
   className,
+  mode = "manage",
   selectedAccountId,
   onAccountSelect,
+  onManageAccounts,
   showAccountQuota = false,
   pollStatus = true,
 }) => {
@@ -74,9 +79,41 @@ export const KimiOAuthSection: React.FC<KimiOAuthSectionProps> = ({
   const remove = (accountId: string, event: React.MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
+    const login =
+      accounts.find((account) => account.id === accountId)?.login ?? accountId;
+    if (
+      !window.confirm(
+        t("kimiOauth.removeConfirm", {
+          login,
+          defaultValue: "移除账号 {{login}}？",
+        }),
+      )
+    ) {
+      return;
+    }
     removeAccount(accountId);
     if (selectedAccountId === accountId) onAccountSelect?.(null);
   };
+
+  const accountSelect =
+    mode === "select" && onAccountSelect ? (
+      <ManagedOAuthAccountSelect
+        accounts={accounts}
+        selectedAccountId={selectedAccountId}
+        onAccountSelect={onAccountSelect}
+        onManageAccounts={onManageAccounts}
+        selectLabel={t("kimiOauth.selectAccount", "选择账号")}
+        placeholder={t("kimiOauth.selectAccountPlaceholder", "选择 Kimi 账号")}
+        noneOptionLabel={t("kimiOauth.useDefaultAccount", "使用默认账号")}
+        expiredLabel={t("kimiOauth.expired", "凭据已失效")}
+      />
+    ) : null;
+
+  if (mode === "select") {
+    return (
+      <div className={`space-y-4 ${className ?? ""}`}>{accountSelect}</div>
+    );
+  }
 
   return (
     <div className={`space-y-4 ${className ?? ""}`}>
@@ -326,7 +363,18 @@ export const KimiOAuthSection: React.FC<KimiOAuthSectionProps> = ({
           type="button"
           variant="outline"
           className="w-full text-red-500 hover:text-red-600"
-          onClick={logout}
+          onClick={() => {
+            if (
+              !window.confirm(
+                t("kimiOauth.logoutAllConfirm", {
+                  defaultValue: "移除所有 Kimi 账号？",
+                }),
+              )
+            ) {
+              return;
+            }
+            logout();
+          }}
         >
           <LogOut className="mr-2 h-4 w-4" />
           {t("kimiOauth.logoutAll", "移除所有 Kimi 账号")}

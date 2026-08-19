@@ -116,8 +116,8 @@ function sanitizeIdSuffix(id: string): string {
 
 /**
  * Unique slugs across a provider set. Same order and suffix rules as Rust
- * `assign_routing_slugs`: explicit routingSlug first, then collisions get
- * `-{8-char id}`.
+ * `assign_routing_slugs`: sort by sortIndex / createdAt / id, then explicit
+ * routingSlug first, then collisions get `-{8-char id}`.
  */
 export function assignRoutingSlugs(
   providers: RoutingSlugInput[],
@@ -126,7 +126,7 @@ export function assignRoutingSlugs(
   const assigned = new Map<string, string>();
   const withOverride: RoutingSlugInput[] = [];
   const withoutOverride: RoutingSlugInput[] = [];
-  for (const provider of providers) {
+  for (const provider of providersInAssignOrder(providers)) {
     if (provider.meta?.routingSlug?.trim()) {
       withOverride.push(provider);
     } else {

@@ -5,7 +5,6 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -18,15 +17,17 @@ import {
   useModelCombos,
   useUpsertModelCombo,
 } from "@/lib/query/proxy";
-import type { ComboStrategy, ModelCombo } from "@/types/proxy";
+import type { ComboStrategy, ComboTarget, ModelCombo } from "@/types/proxy";
 import { useProvidersQuery } from "@/lib/query/queries";
 import { getAppLabel } from "@/config/appConfig";
 import {
+  clampStickyLimit,
   formatComboTargets,
   isReservedComboId,
   isValidComboId,
   normalizeComboId,
   parseComboTargets,
+  providerUpstreamModelIds,
   resolveComboHop,
 } from "@/utils/combo";
 import {
@@ -45,8 +46,11 @@ export function ComboPanel() {
   const upsert = useUpsertModelCombo();
   const remove = useDeleteModelCombo();
   const [id, setId] = useState("");
-  const [targetsText, setTargetsText] = useState("");
+  const [targetDrafts, setTargetDrafts] = useState<ComboTarget[]>([
+    { provider: "", model: "" },
+  ]);
   const [strategy, setStrategy] = useState<ComboStrategy>("failover");
+  const [stickyLimit, setStickyLimit] = useState(1);
   const [editingId, setEditingId] = useState<string | null>(null);
 
   const comboId = normalizeComboId(id);
@@ -54,9 +58,16 @@ export function ComboPanel() {
     () => (comboId ? `combo/${comboId}` : "combo/{id}"),
     [comboId],
   );
+  const filledTargets = useMemo(
+    () =>
+      targetDrafts.filter(
+        (target) => target.provider.trim() && target.model.trim(),
+      ),
+    [targetDrafts],
+  );
   const parsedTargets = useMemo(
-    () => parseComboTargets(targetsText),
-    [targetsText],
+    () => parseComboTargets(formatComboTargets(filledTargets)),
+    [filledTargets],
   );
   const resolveApps = useMemo(
     () => [
@@ -85,19 +96,75 @@ export function ComboPanel() {
       desktopProviders.data?.providers,
     ],
   );
+  const slugOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const options: Array<{ slug: string; label: string }> = [];
+    for (const app of resolveApps) {
+      const slugs = assignRoutingSlugs(app.providers);
+      for (const provider of app.providers) {
+        const slug = slugs.get(provider.id);
+        if (!slug || seen.has(slug)) continue;
+        seen.add(slug);
+        options.push({ slug, label: `${slug} · ${provider.name}` });
+      }
+    }
+    return options;
+  }, [resolveApps]);
+
+  const modelsForSlug = (slug: string) => {
+    const seen = new Set<string>();
+    const models: string[] = [];
+    const want = slug.trim().toLowerCase();
+    if (!want) return models;
+    for (const app of resolveApps) {
+      const slugs = assignRoutingSlugs(app.providers);
+      for (const provider of app.providers) {
+        const assigned = slugs.get(provider.id);
+        if (assigned !== want && provider.id.toLowerCase() !== want) {
+          continue;
+        }
+        for (const model of providerUpstreamModelIds(provider)) {
+          if (seen.has(model)) continue;
+          seen.add(model);
+          models.push(model);
+        }
+      }
+    }
+    return models;
+  };
 
   const resetForm = () => {
     setId("");
-    setTargetsText("");
+    setTargetDrafts([{ provider: "", model: "" }]);
     setStrategy("failover");
+    setStickyLimit(1);
     setEditingId(null);
   };
 
   const loadCombo = (combo: ModelCombo) => {
     setEditingId(combo.id);
     setId(combo.id);
-    setTargetsText(formatComboTargets(combo.targets ?? []));
+    setTargetDrafts(
+      combo.targets?.length
+        ? combo.targets.map((target) => ({
+            provider: target.provider,
+            model: target.model,
+            ...(target.weight && target.weight !== 1
+              ? { weight: target.weight }
+              : {}),
+          }))
+        : [{ provider: "", model: "" }],
+    );
     setStrategy(combo.strategy ?? "failover");
+    setStickyLimit(clampStickyLimit(combo.stickyLimit ?? 1));
+  };
+
+  const updateDraft = (index: number, patch: Partial<ComboTarget>) => {
+    setTargetDrafts((current) =>
+      current.map((target, currentIndex) =>
+        currentIndex === index ? { ...target, ...patch } : target,
+      ),
+    );
   };
 
   const strategyLabel = (value: ComboStrategy | undefined) =>
@@ -123,7 +190,7 @@ export function ComboPanel() {
       );
       return;
     }
-    const parsed = parseComboTargets(targetsText);
+    const parsed = parseComboTargets(formatComboTargets(filledTargets));
     if (!parsed.ok) {
       const spec = parsed.error.spec;
       const message =
@@ -187,17 +254,13 @@ export function ComboPanel() {
     }
     const renaming =
       Boolean(editingId) && editingId!.toLowerCase() !== comboId.toLowerCase();
-    const stickySource = combos.find(
-      (combo) =>
-        combo.id.toLowerCase() === (editingId ?? comboId).toLowerCase(),
-    );
     try {
       await upsert.mutateAsync({
         combo: {
           id: comboId,
           targets: parsed.targets,
           strategy,
-          stickyLimit: stickySource?.stickyLimit ?? 1,
+          stickyLimit: clampStickyLimit(stickyLimit),
         },
         previousId: renaming && editingId ? editingId : undefined,
       });
@@ -275,7 +338,7 @@ export function ComboPanel() {
       ) : combos.length === 0 && !isError ? (
         <p className="text-xs text-muted-foreground">
           {t("proxy.combos.empty", {
-            defaultValue: "还没有 Combo。用 kimi/k2 这种目标加一条。",
+            defaultValue: "还没有 Combo。从目录 slug 里选目标加一条。",
           })}
         </p>
       ) : combos.length === 0 ? null : (
@@ -328,7 +391,13 @@ export function ComboPanel() {
           </Label>
           <Select
             value={strategy}
-            onValueChange={(value) => setStrategy(value as ComboStrategy)}
+            onValueChange={(value) => {
+              const next = value as ComboStrategy;
+              setStrategy(next);
+              if (next === "round-robin" && stickyLimit < 1) {
+                setStickyLimit(1);
+              }
+            }}
           >
             <SelectTrigger>
               <SelectValue />
@@ -344,19 +413,151 @@ export function ComboPanel() {
           </Select>
         </div>
       </div>
+      {strategy === "round-robin" ? (
+        <div className="space-y-1.5">
+          <Label className="text-xs">
+            {t("proxy.combos.stickyLimit", {
+              defaultValue: "粘滞次数",
+            })}
+          </Label>
+          <Input
+            type="number"
+            min={1}
+            max={100}
+            value={stickyLimit}
+            onChange={(event) =>
+              setStickyLimit(
+                clampStickyLimit(Number.parseInt(event.target.value, 10) || 1),
+              )
+            }
+          />
+          <p className="text-[11px] text-muted-foreground">
+            {t("proxy.combos.stickyLimitHint", {
+              defaultValue:
+                "round-robin 连续多少次请求粘在同一第一跳，范围 1–100。",
+            })}
+          </p>
+        </div>
+      ) : null}
       <div className="space-y-1.5">
         <Label className="text-xs">
           {t("proxy.combos.targets", {
-            defaultValue: "目标（每行一个 provider/model[:weight]）",
+            defaultValue: "目标（从已分配 slug 选择）",
           })}
         </Label>
-        <Textarea
-          value={targetsText}
-          onChange={(event) => setTargetsText(event.target.value)}
-          placeholder={"kimi/k2\ndeepseek/deepseek-v4:1"}
-          rows={3}
-        />
-        {targetsText.trim() && !parsedTargets.ok ? (
+        <div className="space-y-2">
+          {targetDrafts.map((draft, index) => {
+            const models = modelsForSlug(draft.provider);
+            const modelOptions =
+              draft.model && !models.includes(draft.model)
+                ? [...models, draft.model]
+                : models;
+            const slugChoices =
+              draft.provider &&
+              !slugOptions.some((option) => option.slug === draft.provider)
+                ? [
+                    ...slugOptions,
+                    { slug: draft.provider, label: draft.provider },
+                  ]
+                : slugOptions;
+            return (
+              <div
+                key={`${draft.provider}-${draft.model}-${index}`}
+                className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_5rem_auto]"
+              >
+                <Select
+                  value={draft.provider || undefined}
+                  onValueChange={(value) =>
+                    updateDraft(index, { provider: value, model: "" })
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue
+                      placeholder={t("proxy.combos.pickSlug", {
+                        defaultValue: "选择 slug",
+                      })}
+                    />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {slugChoices.map((option) => (
+                      <SelectItem key={option.slug} value={option.slug}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <>
+                  <Input
+                    value={draft.model}
+                    list={`combo-models-${index}`}
+                    onChange={(event) =>
+                      updateDraft(index, { model: event.target.value })
+                    }
+                    placeholder={t("proxy.combos.pickModel", {
+                      defaultValue: "模型",
+                    })}
+                  />
+                  {modelOptions.length > 0 ? (
+                    <datalist id={`combo-models-${index}`}>
+                      {modelOptions.map((model) => (
+                        <option key={model} value={model} />
+                      ))}
+                    </datalist>
+                  ) : null}
+                </>
+                <Input
+                  type="number"
+                  min={1}
+                  max={10000}
+                  value={draft.weight ?? 1}
+                  onChange={(event) => {
+                    const weight = Number.parseInt(event.target.value, 10);
+                    updateDraft(index, {
+                      weight:
+                        Number.isInteger(weight) && weight > 1
+                          ? weight
+                          : undefined,
+                    });
+                  }}
+                  aria-label={t("proxy.combos.weight", {
+                    defaultValue: "权重",
+                  })}
+                />
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="h-9 w-9"
+                  disabled={targetDrafts.length === 1}
+                  onClick={() =>
+                    setTargetDrafts((current) =>
+                      current.filter(
+                        (_, currentIndex) => currentIndex !== index,
+                      ),
+                    )
+                  }
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+            );
+          })}
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              setTargetDrafts((current) => [
+                ...current,
+                { provider: "", model: "" },
+              ])
+            }
+          >
+            <Plus className="h-4 w-4" />
+            {t("proxy.combos.addTarget", { defaultValue: "添加目标" })}
+          </Button>
+        </div>
+        {filledTargets.length > 0 && !parsedTargets.ok ? (
           <p className="text-[11px] text-destructive">
             {parsedTargets.error.kind === "nested_combo"
               ? t("proxy.combos.nestedCombo", {

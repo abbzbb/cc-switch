@@ -21,20 +21,25 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ManagedOauthAccountQuota } from "@/components/ManagedOauthQuota";
+import { ManagedOAuthAccountSelect } from "./ManagedOAuthAccountSelect";
 import { useAnthropicOauth } from "./hooks/useAnthropicOauth";
 
 interface AnthropicOAuthSectionProps {
   className?: string;
+  mode?: "manage" | "select";
   selectedAccountId?: string | null;
   onAccountSelect?: (accountId: string | null) => void;
+  onManageAccounts?: () => void;
   showAccountQuota?: boolean;
   pollStatus?: boolean;
 }
 
 export const AnthropicOAuthSection: React.FC<AnthropicOAuthSectionProps> = ({
   className,
+  mode = "manage",
   selectedAccountId,
   onAccountSelect,
+  onManageAccounts,
   showAccountQuota = false,
   pollStatus = true,
 }) => {
@@ -65,9 +70,44 @@ export const AnthropicOAuthSection: React.FC<AnthropicOAuthSectionProps> = ({
   const remove = (accountId: string, event: React.MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
+    const login =
+      accounts.find((account) => account.id === accountId)?.login ?? accountId;
+    if (
+      !window.confirm(
+        t("anthropicOauth.removeConfirm", {
+          login,
+          defaultValue: "移除账号 {{login}}？",
+        }),
+      )
+    ) {
+      return;
+    }
     removeAccount(accountId);
     if (selectedAccountId === accountId) onAccountSelect?.(null);
   };
+
+  const accountSelect =
+    mode === "select" && onAccountSelect ? (
+      <ManagedOAuthAccountSelect
+        accounts={accounts}
+        selectedAccountId={selectedAccountId}
+        onAccountSelect={onAccountSelect}
+        onManageAccounts={onManageAccounts}
+        selectLabel={t("anthropicOauth.selectAccount", "选择账号")}
+        placeholder={t(
+          "anthropicOauth.selectAccountPlaceholder",
+          "选择 Claude 账号",
+        )}
+        noneOptionLabel={t("anthropicOauth.useDefaultAccount", "使用默认账号")}
+        expiredLabel={t("anthropicOauth.expired", "凭据已失效")}
+      />
+    ) : null;
+
+  if (mode === "select") {
+    return (
+      <div className={`space-y-4 ${className ?? ""}`}>{accountSelect}</div>
+    );
+  }
 
   return (
     <div className={`space-y-4 ${className ?? ""}`}>
@@ -319,7 +359,18 @@ export const AnthropicOAuthSection: React.FC<AnthropicOAuthSectionProps> = ({
           type="button"
           variant="outline"
           className="w-full text-red-500 hover:text-red-600"
-          onClick={logout}
+          onClick={() => {
+            if (
+              !window.confirm(
+                t("anthropicOauth.logoutAllConfirm", {
+                  defaultValue: "移除所有 Claude 账号？",
+                }),
+              )
+            ) {
+              return;
+            }
+            logout();
+          }}
         >
           <LogOut className="mr-2 h-4 w-4" />
           {t("anthropicOauth.logoutAll", "移除所有 Claude 账号")}

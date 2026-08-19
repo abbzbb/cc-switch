@@ -3794,6 +3794,15 @@ impl ProxyService {
         Ok(())
     }
 
+    /// Sync rewrite of the takeover projection after a generic provider save.
+    /// Does not fetch upstream catalogs (that stays on the dedicated IPC path).
+    pub fn rewrite_codex_routing_catalog_from_db_if_takeover(&self) -> Result<(), String> {
+        if !self.detect_takeover_in_live_config_for_app(&AppType::Codex) {
+            return Ok(());
+        }
+        self.write_merged_codex_routing_catalog_from_db()
+    }
+
     fn write_codex_live_verbatim(&self, config: &Value) -> Result<(), String> {
         self.write_codex_live_verbatim_with_auth_guard(config, None)
     }
@@ -10493,6 +10502,28 @@ experimental_bearer_token = "PROXY_MANAGED"
             http_slugs.iter().any(|slug| slug == "kimi/k2")
                 && http_slugs.iter().any(|slug| slug == "deepseek/deepseek-v4"),
             "/v1/models must expose merged routed ids; got: {http_slugs:?}"
+        );
+
+        std::fs::write(
+            crate::codex_config::get_codex_model_catalog_path(),
+            r#"{"models":[]}"#,
+        )
+        .expect("stale the on-disk catalog");
+        let models_body_after_stale: Value = client
+            .get(format!("{proxy_base}/v1/models"))
+            .send()
+            .await
+            .expect("GET /v1/models after stale file")
+            .json()
+            .await
+            .expect("parse /v1/models after stale file");
+        let stale_slugs = catalog_slugs(&models_body_after_stale);
+        assert!(
+            stale_slugs.iter().any(|slug| slug == "kimi/k2")
+                && stale_slugs
+                    .iter()
+                    .any(|slug| slug == "deepseek/deepseek-v4"),
+            "/v1/models must be built from DB, not the on-disk file; got: {stale_slugs:?}"
         );
 
         let post_responses = |model: &str| {

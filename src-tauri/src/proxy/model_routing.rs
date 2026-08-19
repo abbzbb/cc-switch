@@ -103,15 +103,31 @@ pub fn preferred_routing_slug(provider: &Provider) -> String {
     }
 }
 
-/// Assign unique slugs across a provider set. Explicit `routingSlug` wins;
-/// collisions get a sanitized id suffix.
+fn compare_providers_for_assign(left: &Provider, right: &Provider) -> std::cmp::Ordering {
+    left.sort_index
+        .unwrap_or(usize::MAX)
+        .cmp(&right.sort_index.unwrap_or(usize::MAX))
+        .then_with(|| {
+            left.created_at
+                .unwrap_or(0)
+                .cmp(&right.created_at.unwrap_or(0))
+        })
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+/// Assign unique slugs across a provider set. Input order is ignored: cards
+/// are sorted like the provider DAO / TS assigner (`sort_index`, `created_at`,
+/// `id`). Explicit `routingSlug` wins; collisions get a sanitized id suffix.
 pub fn assign_routing_slugs(providers: &[Provider]) -> HashMap<String, String> {
+    let mut ordered: Vec<&Provider> = providers.iter().collect();
+    ordered.sort_by(|left, right| compare_providers_for_assign(left, right));
+
     let mut used: HashSet<String> = HashSet::new();
     let mut assigned = HashMap::new();
 
     let mut with_override = Vec::new();
     let mut without_override = Vec::new();
-    for provider in providers {
+    for provider in ordered {
         if provider
             .meta
             .as_ref()
@@ -160,6 +176,15 @@ pub fn set_routing_catalog_enabled(provider: &mut Provider, enabled: bool) {
     let mut meta = provider.meta.take().unwrap_or_default();
     meta.routing_catalog = if enabled { None } else { Some(false) };
     provider.meta = Some(meta);
+}
+
+/// Generic provider updates must not overwrite catalog membership.
+/// `set_provider_routing_catalog` is the only writer for this flag.
+pub fn preserve_routing_catalog(existing: &Provider, incoming: &mut Provider) {
+    let existing_flag = existing.meta.as_ref().and_then(|meta| meta.routing_catalog);
+    let mut meta = incoming.meta.take().unwrap_or_default();
+    meta.routing_catalog = existing_flag;
+    incoming.meta = Some(meta);
 }
 
 /// Alias inner `/` in an upstream model id to `-` for catalog slugs.
@@ -1080,6 +1105,52 @@ mod tests {
         let map = assign_routing_slugs(&[a, b]);
         let slugs: HashSet<_> = map.values().cloned().collect();
         assert_eq!(slugs.len(), 2);
+    }
+
+    #[test]
+    fn collision_winner_follows_sort_index_not_input_order() {
+        let mut first = provider("bbbbbbbb-9b11-4d22-8c33-abcdef123456", "Same Name", &["z"]);
+        first.sort_index = Some(1);
+        let mut second = provider("aaaaaaaa-9b11-4d22-8c33-abcdef123456", "Same Name", &["a"]);
+        second.sort_index = Some(0);
+        let map = assign_routing_slugs(&[first, second]);
+        assert_eq!(
+            map.get("aaaaaaaa-9b11-4d22-8c33-abcdef123456")
+                .map(String::as_str),
+            Some("same-name")
+        );
+        assert_eq!(
+            map.get("bbbbbbbb-9b11-4d22-8c33-abcdef123456")
+                .map(String::as_str),
+            Some("same-name-bbbbbbbb")
+        );
+    }
+
+    #[test]
+    fn preserve_routing_catalog_keeps_existing_opt_out() {
+        let mut existing = provider("kimi", "Kimi", &["k2"]);
+        existing.meta = Some(ProviderMeta {
+            routing_catalog: Some(false),
+            routing_slug: Some("kimi".to_string()),
+            ..Default::default()
+        });
+        let mut incoming = provider("kimi", "Kimi", &["k2"]);
+        incoming.meta = Some(ProviderMeta {
+            routing_slug: Some("kimi".to_string()),
+            ..Default::default()
+        });
+        preserve_routing_catalog(&existing, &mut incoming);
+        assert_eq!(
+            incoming.meta.as_ref().and_then(|meta| meta.routing_catalog),
+            Some(false)
+        );
+        assert_eq!(
+            incoming
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.routing_slug.as_deref()),
+            Some("kimi")
+        );
     }
 
     #[test]

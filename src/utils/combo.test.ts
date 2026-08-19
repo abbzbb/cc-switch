@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  clampStickyLimit,
   isReservedComboId,
   isValidComboId,
   normalizeComboId,
   parseComboTargets,
+  providerUpstreamModelIds,
   resolveComboHop,
 } from "./combo";
 
@@ -96,5 +98,33 @@ describe("resolveComboHop", () => {
     expect(
       resolveComboHop({ provider: "kimi", model: "k2" }, providers),
     ).toEqual({ matched: false });
+  });
+});
+
+describe("clampStickyLimit", () => {
+  it("clamps to the Rust 1–100 window", () => {
+    expect(clampStickyLimit(1)).toBe(1);
+    expect(clampStickyLimit(100)).toBe(100);
+    expect(clampStickyLimit(0)).toBe(1);
+    expect(clampStickyLimit(101)).toBe(100);
+    expect(clampStickyLimit(1.5)).toBe(1);
+  });
+});
+
+describe("providerUpstreamModelIds", () => {
+  it("reads catalog, env, toml, and desktop routes", () => {
+    expect(
+      providerUpstreamModelIds({
+        settingsConfig: {
+          modelCatalog: { models: [{ model: "k2" }, { model: "k2" }] },
+          model: "extra",
+          env: { ANTHROPIC_MODEL: "sonnet" },
+          config: 'model = "grok-4.5"\n',
+        },
+        meta: {
+          claudeDesktopModelRoutes: { opus: { model: "opus" } },
+        },
+      }),
+    ).toEqual(["k2", "extra", "sonnet", "grok-4.5", "opus"]);
   });
 });
