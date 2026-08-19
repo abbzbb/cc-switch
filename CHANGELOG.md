@@ -5,6 +5,22 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.1] - 2026-08-19
+
+The Codex picker is no longer capped at each card's mapping table or current `model`. The merged catalog unions toml-advertised models, a local Official GPT seed, and the last successful upstream `/v1/models` fetch. The proxy panel can choose which configs appear in that catalog.
+
+### Added
+
+- **Routing catalog picker on the proxy panel**: Codex / Claude / Claude Desktop cards can be included or hidden from the merged picker without opening each edit form. Slug-prefixed requests still work when a card is hidden. Gemini / Grok keep current-config + failover.
+
+### Changed
+
+- **Wider Codex catalog projection**: `cc-switch-model-catalog.json` unions the mapping table, toml `model` / `[model_providers.*].models`, a local Official seed (`gpt-5.4` / `gpt-5.5` / `gpt-5.6*`, …), and `~/.codex/cc-switch-model-discovery.json`. Loopback proxy URLs and `PROXY_MANAGED` keys are not fetched. Codex must be fully restarted after a refresh.
+
+### Fixed
+
+- **Unsigned release builds when signing secrets are missing**: Apple Developer ID and Tauri updater artifacts are skipped instead of failing the whole Release workflow; empty-array nounset abort on macOS bash 3.2 is avoided.
+
 ## [3.20.0] - 2026-08-19
 
 The local proxy now does OpenCodex-style routing without bundling `ocx`. After takeover, Codex and Claude pickers merge every participating card as `{slug}/{model}`; a request with that id pins the card and does not cross-provider failover. Unprefixed official ChatGPT / Kimi For Coding / Claude Pro/Max ids pick the idle managed account, stick the session, and refresh quota in the background. Combos expose `combo/{id}` as failover or weighted round-robin. The Auth Center can sign into Kimi (device code) and Claude Pro/Max (browser PKCE or Claude CLI import) and bind the account to a card without writing the token into provider settings. Hosted `web_search` on non-official models and images sent to text-only models can be executed by a signed-in Claude Pro/Max or ChatGPT Official sidecar.
