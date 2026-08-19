@@ -4,13 +4,14 @@ import { toast } from "sonner";
 import { Switch } from "@/components/ui/switch";
 import { useProvidersQuery } from "@/lib/query/queries";
 import { useSetProviderRoutingCatalog } from "@/lib/query/proxy";
-import type { AppId } from "@/lib/api/types";
 import { getAppLabel } from "@/config/appConfig";
 import { preferredRoutingSlug } from "@/utils/routingSlug";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import type { Provider } from "@/types";
+import type { ProxyTakeoverStatus } from "@/types/proxy";
 
-const ROUTING_CATALOG_APPS: AppId[] = ["codex", "claude", "claude-desktop"];
+const ROUTING_CATALOG_APPS = ["codex", "claude", "claude-desktop"] as const;
+type RoutingCatalogApp = (typeof ROUTING_CATALOG_APPS)[number];
 
 function isCatalogEnabled(provider: Provider): boolean {
   return provider.meta?.routingCatalog !== false;
@@ -20,7 +21,7 @@ function AppCatalogGroup({
   appId,
   takeoverOn,
 }: {
-  appId: AppId;
+  appId: RoutingCatalogApp;
   takeoverOn: boolean;
 }) {
   const { t } = useTranslation();
@@ -133,7 +134,7 @@ function AppCatalogGroup({
 }
 
 interface RoutingCatalogPanelProps {
-  takeoverByApp?: Partial<Record<string, boolean>>;
+  takeoverByApp?: ProxyTakeoverStatus;
 }
 
 export function RoutingCatalogPanel({
