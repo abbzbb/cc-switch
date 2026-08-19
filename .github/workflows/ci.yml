@@ -226,10 +226,10 @@ jobs:
         run: cargo test --lib --manifest-path src-tauri/Cargo.toml --no-run
 
       - name: Run Windows-to-WSL2 filesystem contract
+        # Keep cargo TEMP native. The ignored test applies CC_SWITCH_WSL_TEST_TEMP
+        # inside the process after the binary has already linked.
         shell: pwsh
         run: |
-          $env:TEMP = $env:CC_SWITCH_WSL_TEST_TEMP
-          $env:TMP = $env:CC_SWITCH_WSL_TEST_TEMP
           $testName = "config::tests::atomic_write_replaces_existing_wsl_unc_file"
           $testList = cargo test --lib --manifest-path src-tauri/Cargo.toml -- --ignored --list
           if ($LASTEXITCODE -ne 0) {
