@@ -552,6 +552,48 @@ pub async fn delete_model_combo(
     Ok(())
 }
 
+fn routing_catalog_app(app: &str) -> Result<crate::app_config::AppType, String> {
+    let app_type = crate::app_config::AppType::from_str(app)
+        .map_err(|error| format!("无效的应用类型: {error}"))?;
+    if !matches!(
+        app_type,
+        crate::app_config::AppType::Codex
+            | crate::app_config::AppType::Claude
+            | crate::app_config::AppType::ClaudeDesktop
+    ) {
+        return Err("只有 Codex / Claude / Claude Desktop 的配置能加入路由目录".into());
+    }
+    Ok(app_type)
+}
+
+/// Toggle whether one provider card appears in the merged routing picker.
+#[tauri::command]
+pub async fn set_provider_routing_catalog(
+    state: tauri::State<'_, AppState>,
+    app: String,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let app_type = routing_catalog_app(&app)?;
+    let mut provider = state
+        .db
+        .get_provider_by_id(&id, app_type.as_str())
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("供应商不存在: {id}"))?;
+    crate::proxy::model_routing::set_routing_catalog_enabled(&mut provider, enabled);
+    state
+        .db
+        .save_provider(app_type.as_str(), &provider)
+        .map_err(|e| e.to_string())?;
+    if matches!(app_type, crate::app_config::AppType::Codex) {
+        state
+            .proxy_service
+            .refresh_codex_routing_catalog_if_takeover()
+            .await?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn get_sidecar_settings(
     state: tauri::State<'_, AppState>,

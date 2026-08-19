@@ -170,6 +170,24 @@ export function useDeleteModelCombo() {
   });
 }
 
+export function useSetProviderRoutingCatalog() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      app,
+      id,
+      enabled,
+    }: {
+      app: string;
+      id: string;
+      enabled: boolean;
+    }) => proxyApi.setProviderRoutingCatalog(app, id, enabled),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["providers", variables.app] });
+    },
+  });
+}
+
 export function useSidecarSettings() {
   return useQuery({
     queryKey: proxyKeys.sidecars,

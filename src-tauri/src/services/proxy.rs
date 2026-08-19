@@ -1225,6 +1225,9 @@ impl ProxyService {
                 // live 文件仍停留在普通供应商配置。
                 if has_backup && live_matches_current_proxy {
                     self.refresh_active_target_from_current_provider(&app).await;
+                    if matches!(&app, AppType::Codex) {
+                        let _ = self.refresh_codex_routing_catalog_if_takeover().await;
+                    }
                     return Ok(());
                 }
                 restore_existing_backup_before_takeover = has_backup;
@@ -1338,6 +1341,10 @@ impl ProxyService {
                         }
                     }
                 }
+            }
+
+            if matches!(&app, AppType::Codex) {
+                let _ = self.refresh_codex_routing_catalog_if_takeover().await;
             }
 
             return Ok(());
@@ -3707,12 +3714,7 @@ impl ProxyService {
     }
 
     fn write_merged_codex_routing_catalog_from_db(&self) -> Result<(), String> {
-        let providers: Vec<Provider> = self
-            .db
-            .get_all_providers(AppType::Codex.as_str())
-            .map_err(|e| format!("读取 Codex 供应商失败: {e}"))?
-            .into_values()
-            .collect();
+        let providers = self.codex_catalog_providers()?;
         crate::proxy::model_routing::write_merged_codex_routing_catalog_with_combos(
             &providers,
             &self
@@ -3723,9 +3725,28 @@ impl ProxyService {
         .map_err(|e| format!("写入合并模型目录失败: {e}"))
     }
 
+    fn codex_catalog_providers(&self) -> Result<Vec<Provider>, String> {
+        Ok(self
+            .db
+            .get_all_providers(AppType::Codex.as_str())
+            .map_err(|e| format!("读取 Codex 供应商失败: {e}"))?
+            .into_values()
+            .collect())
+    }
+
+    async fn write_and_enrich_codex_routing_catalog(&self) -> Result<(), String> {
+        self.write_merged_codex_routing_catalog_from_db()?;
+        if crate::proxy::catalog_refresh::catalog_fetch_disabled() {
+            return Ok(());
+        }
+        let providers = self.codex_catalog_providers()?;
+        crate::proxy::catalog_refresh::refresh_discovery_cache(&providers).await;
+        self.write_merged_codex_routing_catalog_from_db()
+    }
+
     pub async fn refresh_codex_routing_catalog_if_takeover(&self) -> Result<(), String> {
         if self.get_takeover_status().await?.codex {
-            self.write_merged_codex_routing_catalog_from_db()?;
+            self.write_and_enrich_codex_routing_catalog().await?;
         }
         Ok(())
     }

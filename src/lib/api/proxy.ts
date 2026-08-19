@@ -106,6 +106,14 @@ export const proxyApi = {
     return invoke("delete_model_combo", { id });
   },
 
+  async setProviderRoutingCatalog(
+    app: string,
+    id: string,
+    enabled: boolean,
+  ): Promise<void> {
+    return invoke("set_provider_routing_catalog", { app, id, enabled });
+  },
+
   async getSidecarSettings(): Promise<SidecarSettings> {
     return invoke("get_sidecar_settings");
   },

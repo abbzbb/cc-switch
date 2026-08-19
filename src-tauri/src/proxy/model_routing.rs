@@ -13,6 +13,44 @@ use crate::provider::Provider;
 use crate::proxy::providers::{is_codex_official_provider, resolve_codex_catalog_tool_profile};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+
+/// Cap on models cached from one card's upstream `/v1/models`.
+pub const MAX_DISCOVERED_MODELS_PER_CARD: usize = 200;
+
+const ROUTING_DISCOVERY_FILENAME: &str = "cc-switch-model-discovery.json";
+
+/// Official Codex models the picker should keep even when the card only
+/// stored a single current `model =`. Live ChatGPT `/models` is not mirrored
+/// here; this is a local seed so unprefixed `gpt-*` rows do not collapse to
+/// just `gpt-5.5`.
+const OFFICIAL_CATALOG_SEED: &[&str] = &[
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.5",
+    "gpt-5.6",
+    "gpt-5.6-sol",
+    "gpt-5.6-luna",
+    "gpt-5.6-terra",
+    "gpt-5.3-codex-spark",
+    "codex-auto-review",
+];
+
+pub fn routing_discovery_cache_path() -> PathBuf {
+    get_codex_config_dir().join(ROUTING_DISCOVERY_FILENAME)
+}
+
+pub fn load_routing_discovery_cache() -> HashMap<String, Vec<String>> {
+    let path = routing_discovery_cache_path();
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+pub fn save_routing_discovery_cache(cache: &HashMap<String, Vec<String>>) {
+    let _ = write_json_file(&routing_discovery_cache_path(), cache);
+}
 
 /// Result of inspecting a request model id against the app's provider cards.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +152,14 @@ pub fn participates_in_routing_catalog(provider: &Provider) -> bool {
         return false;
     }
     is_codex_official_provider(provider) || !provider_upstream_model_ids(provider).is_empty()
+}
+
+/// Persist the catalog opt-in on a card. `true` restores the default
+/// (omit the flag); `false` writes an explicit opt-out. Other meta stays.
+pub fn set_routing_catalog_enabled(provider: &mut Provider, enabled: bool) {
+    let mut meta = provider.meta.take().unwrap_or_default();
+    meta.routing_catalog = if enabled { None } else { Some(false) };
+    provider.meta = Some(meta);
 }
 
 /// Alias inner `/` in an upstream model id to `-` for catalog slugs.
@@ -345,7 +391,11 @@ pub fn decide_model_route(providers: &[Provider], request_model: &str) -> ModelR
     ModelRouteDecision::Default
 }
 
-/// Upstream model ids advertised by a card (catalog + env + toml model).
+/// Upstream model ids advertised by a card (mapping table + env + toml).
+///
+/// Last `/v1/models` discovery is **not** included: that cache is only
+/// unioned when projecting `cc-switch-model-catalog.json`, so request
+/// routing does not read the sidecar file on the hot path.
 pub fn provider_upstream_model_ids(provider: &Provider) -> Vec<String> {
     let mut ids = Vec::new();
     let mut seen = HashSet::new();
@@ -397,12 +447,16 @@ pub fn provider_upstream_model_ids(provider: &Provider) -> Vec<String> {
 
     if let Some(model) = crate::proxy::providers::codex_provider_upstream_model(provider) {
         push(&model);
-    } else if let Some(config_text) = provider
+    }
+    if let Some(config_text) = provider
         .settings_config
         .get("config")
         .and_then(Value::as_str)
     {
         if let Some(model) = extract_toml_model_line(config_text) {
+            push(&model);
+        }
+        for model in extract_toml_advertised_models(config_text) {
             push(&model);
         }
     }
@@ -439,6 +493,7 @@ pub fn build_merged_codex_routing_catalog_with_combos(
     combos: &[crate::proxy::combo::ModelCombo],
 ) -> Result<Value, AppError> {
     let slugs = assign_routing_slugs(providers);
+    let discovery = load_routing_discovery_cache();
     let mut models = Vec::new();
     let mut seen_slugs = HashSet::new();
     let mut priority = 0usize;
@@ -464,15 +519,43 @@ pub fn build_merged_codex_routing_catalog_with_combos(
             profile,
         )?;
 
-        let entries = match built {
+        let mut entries = match built {
             Some(catalog) => catalog
                 .get("models")
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default(),
             None if keep_unprefixed => official_native_fallback_entries(),
-            None => catalog_entries_from_upstream_ids(provider, profile),
+            None => Vec::new(),
         };
+        if entries.is_empty() {
+            entries = catalog_entries_from_provider(
+                provider,
+                profile,
+                discovery.get(&provider.id).map(Vec::as_slice),
+            );
+        } else {
+            let have: HashSet<String> = entries
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .get("slug")
+                        .and_then(Value::as_str)
+                        .map(|slug| slug.trim().to_string())
+                })
+                .filter(|slug| !slug.is_empty())
+                .collect();
+            let extra: Vec<String> = advertised_model_ids_for_catalog(
+                provider,
+                discovery.get(&provider.id).map(Vec::as_slice),
+            )
+            .into_iter()
+            .filter(|id| !have.contains(id.as_str()) && !have.contains(&alias_inner_slashes(id)))
+            .collect();
+            if !extra.is_empty() {
+                entries.extend(catalog_entries_from_ids(&extra, profile));
+            }
+        }
 
         for mut entry in entries {
             let original_slug = entry
@@ -582,36 +665,54 @@ fn push_catalog_entry(
     models.push(entry);
 }
 
-fn catalog_entries_from_upstream_ids(
+fn advertised_model_ids_for_catalog(
     provider: &Provider,
-    profile: CodexCatalogToolProfile,
-) -> Vec<Value> {
-    let ids = provider_upstream_model_ids(provider);
+    discovered: Option<&[String]>,
+) -> Vec<String> {
+    let mut ids = provider_upstream_model_ids(provider);
+    let mut seen: HashSet<String> = ids.iter().cloned().collect();
+    if let Some(extra) = discovered {
+        for id in extra {
+            let trimmed = id.trim();
+            if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+                continue;
+            }
+            ids.push(trimmed.to_string());
+        }
+    }
+    ids
+}
+
+fn catalog_entries_from_ids(ids: &[String], profile: CodexCatalogToolProfile) -> Vec<Value> {
     if ids.is_empty() {
         return Vec::new();
     }
-    let mut settings = provider.settings_config.clone();
-    let models: Vec<Value> = ids
-        .into_iter()
-        .map(|model| json!({ "model": model }))
-        .collect();
-    if let Some(root) = settings.as_object_mut() {
-        root.insert("modelCatalog".to_string(), json!({ "models": models }));
-    }
-    let config_text = settings.get("config").and_then(Value::as_str).unwrap_or("");
-    crate::codex_config::codex_model_catalog_from_settings(&settings, config_text, profile)
+    let models: Vec<Value> = ids.iter().map(|model| json!({ "model": model })).collect();
+    let settings = json!({ "modelCatalog": { "models": models } });
+    crate::codex_config::codex_model_catalog_from_settings(&settings, "", profile)
         .ok()
         .flatten()
         .and_then(|catalog| catalog.get("models").and_then(Value::as_array).cloned())
         .unwrap_or_default()
 }
 
+fn catalog_entries_from_provider(
+    provider: &Provider,
+    profile: CodexCatalogToolProfile,
+    discovered: Option<&[String]>,
+) -> Vec<Value> {
+    catalog_entries_from_ids(
+        &advertised_model_ids_for_catalog(provider, discovered),
+        profile,
+    )
+}
+
 fn official_native_fallback_entries() -> Vec<Value> {
-    let settings = json!({
-        "modelCatalog": {
-            "models": [{ "model": "gpt-5.5", "displayName": "GPT-5.5" }]
-        }
-    });
+    let models: Vec<Value> = OFFICIAL_CATALOG_SEED
+        .iter()
+        .map(|model| json!({ "model": *model }))
+        .collect();
+    let settings = json!({ "modelCatalog": { "models": models } });
     crate::codex_config::codex_model_catalog_from_settings(
         &settings,
         "",
@@ -621,12 +722,17 @@ fn official_native_fallback_entries() -> Vec<Value> {
     .flatten()
     .and_then(|catalog| catalog.get("models").and_then(Value::as_array).cloned())
     .unwrap_or_else(|| {
-        vec![json!({
-            "slug": "gpt-5.5",
-            "display_name": "GPT-5.5",
-            "description": "GPT-5.5",
-            "priority": 1000
-        })]
+        OFFICIAL_CATALOG_SEED
+            .iter()
+            .map(|slug| {
+                json!({
+                    "slug": slug,
+                    "display_name": slug,
+                    "description": slug,
+                    "priority": 1000
+                })
+            })
+            .collect()
     })
 }
 
@@ -644,6 +750,50 @@ fn extract_toml_model_line(config_text: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn extract_toml_advertised_models(config_text: &str) -> Vec<String> {
+    let Ok(value) = config_text.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    let Some(providers) = value.get("model_providers").and_then(toml::Value::as_table) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for table in providers.values() {
+        if let Some(models) = table.get("models") {
+            collect_toml_model_ids(models, &mut out, &mut seen);
+        }
+    }
+    out
+}
+
+fn collect_toml_model_ids(value: &toml::Value, out: &mut Vec<String>, seen: &mut HashSet<String>) {
+    match value {
+        toml::Value::String(id) => {
+            let trimmed = id.trim();
+            if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+                out.push(trimmed.to_string());
+            }
+        }
+        toml::Value::Array(items) => {
+            for item in items {
+                collect_toml_model_ids(item, out, seen);
+            }
+        }
+        toml::Value::Table(table) => {
+            for key in ["model", "slug", "id"] {
+                if let Some(id) = table.get(key).and_then(toml::Value::as_str) {
+                    let trimmed = id.trim();
+                    if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+                        out.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn slugify(raw: &str) -> String {
@@ -896,6 +1046,26 @@ mod tests {
     }
 
     #[test]
+    fn set_routing_catalog_enabled_preserves_other_meta() {
+        let mut p = provider("kimi", "Kimi", &["k2"]);
+        p.meta = Some(ProviderMeta {
+            routing_slug: Some("kimi".into()),
+            routing_catalog: Some(false),
+            ..Default::default()
+        });
+        set_routing_catalog_enabled(&mut p, true);
+        assert!(participates_in_routing_catalog(&p));
+        assert_eq!(
+            p.meta
+                .as_ref()
+                .and_then(|meta| meta.routing_slug.as_deref()),
+            Some("kimi")
+        );
+        set_routing_catalog_enabled(&mut p, false);
+        assert!(!participates_in_routing_catalog(&p));
+    }
+
+    #[test]
     fn strip_prefix_is_case_insensitive_on_slug() {
         let p = provider("kimi", "Kimi", &["k2"]);
         let body = json!({ "model": "Kimi/k2" });
@@ -1081,5 +1251,67 @@ mod tests {
             .filter_map(|entry| entry.get("id").and_then(Value::as_str))
             .collect();
         assert!(ids.contains(&"anthropic/combo/main"), "{ids:?}");
+    }
+
+    fn catalog_slugs(providers: &[Provider]) -> Vec<String> {
+        let catalog = build_merged_codex_routing_catalog(providers).expect("merged catalog");
+        catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .get("slug")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn toml_models_array_is_unioned_with_mapping_table() {
+        let mut p = provider("packy", "Packy", &["gpt-5.6-sol"]);
+        p.settings_config["config"] = json!(
+            "model_provider = \"custom\"\nmodel = \"gpt-5.6-sol\"\n[model_providers.custom]\nbase_url = \"https://example.com/v1\"\nmodels = [\"gpt-5.4\", { model = \"kimi-k2\" }]\n"
+        );
+        let slugs = catalog_slugs(&[p]);
+        assert!(
+            slugs.contains(&"packy/gpt-5.6-sol".to_string()),
+            "{slugs:?}"
+        );
+        assert!(slugs.contains(&"packy/gpt-5.4".to_string()), "{slugs:?}");
+        assert!(slugs.contains(&"packy/kimi-k2".to_string()), "{slugs:?}");
+    }
+
+    #[test]
+    fn official_seed_includes_current_gpt_family() {
+        let slugs = catalog_slugs(&[official("codex-official")]);
+        for expected in [
+            "gpt-5.5",
+            "gpt-5.6",
+            "gpt-5.6-sol",
+            "codex-official/gpt-5.5",
+        ] {
+            assert!(
+                slugs.iter().any(|slug| slug == expected),
+                "missing {expected} in {slugs:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn discovery_cache_is_unioned_into_merged_catalog() {
+        with_test_home(|| {
+            let mut cache = HashMap::new();
+            cache.insert(
+                "grok".to_string(),
+                vec!["grok-4.5".into(), "grok-4.6".into()],
+            );
+            save_routing_discovery_cache(&cache);
+            let slugs = catalog_slugs(&[provider("grok", "Grok", &["grok-4.5"])]);
+            assert!(slugs.contains(&"grok/grok-4.5".to_string()), "{slugs:?}");
+            assert!(slugs.contains(&"grok/grok-4.6".to_string()), "{slugs:?}");
+        });
     }
 }

@@ -1607,7 +1607,7 @@
     "defaultModelNotInCatalog": "このモデルはモデルマッピングにないため、Codex の /model メニューには表示されません（直接リクエストは有効です）。",
     "addToModelMapping": "マッピングに追加",
     "modelMappingTitle": "モデルマッピング",
-    "modelMappingHint": "Codex model_catalog_json を生成し、/model コマンドでこれらの第三者モデル名を表示できるようにします。リストの内容はそのまま保存されます。変更後、モデルリストを更新するには Codex の再起動が必要です。",
+    "modelMappingHint": "Codex model_catalog_json に書き込み、toml の宣言と前回成功した /v1/models と合成します（上流のリアルタイムミラーではありません）。表示名はこの表が優先です。変更またはテイクオーバー更新後は Codex の再起動が必要です。",
     "addCatalogModel": "モデルを追加",
     "catalogDisplayName": "表示名",
     "catalogDisplayNamePlaceholder": "例: DeepSeek V4 Flash",
@@ -2936,6 +2936,15 @@
         "broken": "{{appLabel}} がルーティング中ですが、ルーティングサービスが実行されていません",
         "inactive": "{{appLabel}} のリクエストをローカルルーティング経由でルーティング"
       }
+    },
+    "routingCards": {
+      "title": "ルーティングに含める設定",
+      "description": "セレクタに出すプロバイダー設定を選びます。プラットフォームスイッチはそのアプリの live 設定を引き継ぐかどうかだけです。オフにしても slug 接頭辞での指定はできます。Gemini / Grok に結合カタログはなく、現行設定とフェイルオーバーキューを使います。",
+      "enabledCount": "{{enabled}} / {{total}} 件を含める",
+      "slug": "ルート {{slug}}",
+      "updated": "ルーティングカタログを更新しました",
+      "codexRestart": "Codex を完全終了して再起動すると /model が新しいカタログを読みます",
+      "failed": "ルーティングカタログを更新できませんでした: {{detail}}"
     },
     "combos": {
       "title": "Combo 仮想モデル",

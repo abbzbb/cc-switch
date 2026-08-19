@@ -36,6 +36,7 @@ import {
   type ProxyAppId,
 } from "@/config/appConfig";
 import { ComboPanel } from "@/components/proxy/ComboPanel";
+import { RoutingCatalogPanel } from "@/components/proxy/RoutingCatalogPanel";
 import { SidecarPanel } from "@/components/proxy/SidecarPanel";
 
 interface ProxyPanelProps {
@@ -320,6 +321,7 @@ export function ProxyPanel({
           )}
         </AnimatePresence>
 
+        <RoutingCatalogPanel takeoverByApp={takeoverStatus} />
         <ComboPanel />
         <SidecarPanel />
 

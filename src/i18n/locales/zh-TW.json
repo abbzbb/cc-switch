@@ -1602,7 +1602,7 @@
     "defaultModelNotInCatalog": "該模型不在模型映射中，Codex 的 /model 選單不會列出它（直接請求仍然有效）。",
     "addToModelMapping": "加入映射",
     "modelMappingTitle": "模型映射",
-    "modelMappingHint": "產生 Codex model_catalog_json，讓 /model 指令顯示這些第三方模型名；表中條目按填寫內容原樣儲存。修改後需要重新啟動 Codex 才能重新整理模型清單。",
+    "modelMappingHint": "寫入 Codex model_catalog_json，並與 toml 宣告的模型以及上次成功的 /v1/models 合併（不是上游即時鏡像）。顯示名稱以本表為準。修改或接管重新整理後需要重新啟動 Codex。",
     "addCatalogModel": "新增模型",
     "catalogDisplayName": "顯示名稱",
     "catalogModelId": "模型 ID",
@@ -2937,6 +2937,15 @@
         "broken": "{{appLabel}} 路由中，但路由服務未執行",
         "inactive": "路由 {{appLabel}} 的請求，讓該應用程式請求走本地路由"
       }
+    },
+    "routingCards": {
+      "title": "參與路由的設定",
+      "description": "勾選要出現在選擇器裡的供應商設定。平台開關只決定要不要接管該應用；這裡決定合併目錄裡出現哪幾張卡。關閉後仍可用 slug 前綴請求。Gemini / Grok 沒有合併目錄，繼續用目前設定 + 故障轉移佇列。",
+      "enabledCount": "{{enabled}} / {{total}} 已加入",
+      "slug": "路由 {{slug}}",
+      "updated": "已更新參與路由的設定",
+      "codexRestart": "完全結束並重新啟動 Codex 後，/model 才會讀到新目錄",
+      "failed": "更新參與路由的設定失敗: {{detail}}"
     },
     "combos": {
       "title": "Combo 虛擬模型",

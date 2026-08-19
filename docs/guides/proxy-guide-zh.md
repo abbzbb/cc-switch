@@ -1,218 +1,143 @@
 # CC Switch 代理功能使用指南
 
-## 功能介绍
+本地 HTTP 代理统一转发 Claude Code、Codex、Gemini CLI 的请求。v3.20.0 起，接管后还可以按供应商钉模型、用 Combo 跨卡、用已登录的官方账号做搜索/识图。**不需要**单独安装或启动 OpenCodex / `ocx`。
 
-CC Switch 的代理功能是一个本地 HTTP 代理服务器，可以统一管理 Claude Code、Codex 和 Gemini CLI 的 API 请求。主要特性包括：
+完整手册：[用户手册 · 代理与高可用](../user-manual/zh/README.md)。
 
-- **统一代理入口** - 所有 CLI 应用的请求通过本地代理转发
-- **自动故障转移** - 当前供应商故障时自动切换到备用供应商
-- **按应用控制** - 可独立控制每个应用是否启用代理
-- **配置保护** - 自动备份原始配置，停止代理时安全恢复
+## 功能一览
 
-## 快速开始
+- **统一入口** — CLI 打到 `127.0.0.1:15721`，由代理转发
+- **按应用接管** — Claude / Codex / Gemini 可分别开关
+- **`{slug}/{model}` 钉卡** — 选择器合并目录，带前缀则固定那张卡
+- **账号池** — 多张 ChatGPT Official / Kimi For Coding / Claude Pro/Max 时，未加前缀的官方 id 选闲号
+- **Combo** — `combo/{id}` 故障转移或加权轮询
+- **Sidecar** — 非官方模型的 hosted 搜索、纯文本识图
+- **应用级故障转移** — 未加前缀时按队列换整张卡
+- **配置保护** — 停止代理时恢复原始 CLI 配置
 
-### 1. 启动代理
+## 第一次怎么用（10 分钟）
 
-在 CC Switch 主界面，点击右上角的 **Proxy** 按钮，可以看到代理控制面板。
+### 1. 准备至少一张卡
 
-点击 **启动代理** 按钮启动本地代理服务器。代理默认监听 `127.0.0.1:15721`。
+- **中转 / API Key**：首页 **+**，选预设，填 Key。
+- **Kimi / Claude 订阅**：设置 → **OAuth 认证中心**登录，再添加 `Kimi For Coding (OAuth)` 或 `Claude Pro/Max (OAuth)` 并绑定账号。Token 不写进卡片。步骤见 [2.1](../user-manual/zh/2-providers/2.1-add.md#托管-oauth-供应商kimi--claude-promax)。
 
-### 2. 启用应用接管
+编辑卡时建议填好 **路由 slug**（例如 `kimi`），并确认 **参与路由目录** 为开。
 
-代理启动后，你可以选择让哪些应用的请求通过代理：
+### 2. 启动代理并接管
 
-- **Claude** - 接管 Claude Code 的 API 请求
-- **Codex** - 接管 Codex CLI 的 API 请求
-- **Gemini** - 接管 Gemini CLI 的 API 请求
+主界面点 **Proxy**（或顶部代理开关）→ **启动代理**。默认 `127.0.0.1:15721`。
 
-点击对应应用的开关即可启用/禁用接管。
+打开要走代理的应用开关：**Claude** / **Codex** / **Gemini**。CC Switch 会改 CLI 配置并备份原文。
 
-> **注意**：启用接管后，CC Switch 会自动修改对应应用的配置文件，将 API 端点指向本地代理。原始配置会被安全备份。
+### 3. 按目标选模型
 
-### 3. 正常使用 CLI
+| 你想要的 | 怎么写 |
+|----------|--------|
+| 钉死某张卡的某个模型 | Codex：`codex -m "kimi/k2"`；Claude：`claude --model "anthropic/kimi/k2"` |
+| 多张官方卡，新对话去闲号 | 不要加 slug，继续用 `gpt-5.5` / `kimi-for-coding` / `claude-*` |
+| 几张卡之间自动换或分担 | 代理面板建 Combo，然后 `codex -m "combo/main"` |
+| 中转模型要搜网页 / 看图 | 认证中心登录 Claude 或 ChatGPT，打开面板里的 Sidecar |
 
-启用接管后，你可以正常使用各个 CLI 工具。所有请求都会经过 CC Switch 代理转发到配置的供应商。
+规则摘要（细节以手册为准）：
 
-### 按供应商选择模型（`provider/model`）
+- 规范 id：`{routing_slug}/{upstream_model}`。上游 id 里的 `/` 在目录里写成 `-`，两种写法都认。
+- 第一段不是已配置 slug 时回落到当前供应商，不是 400。
+- 关闭「参与路由目录」后选择器不列出该卡，仍可用前缀请求。代理面板的「参与路由的配置」可按卡勾选，不必一张张打开编辑页。
+- Codex 选择器读的是 `cc-switch-model-catalog.json`：映射表 + toml 模型 + 上次 `/v1/models`。不是实时镜像；刷新后需重启 Codex。
+- `{slug}/model` 钉卡，不走跨卡故障转移；Official ChatGPT 同一请求内不跨号重试。
+- 账号池：新会话选已知用量最低的号（未知不当 0%）；粘会话；401/403/429 或最热窗口 ≥ 80% 且有更闲号时，**下一轮**换号。
 
-接管 **Codex** 后，CC Switch 会把该应用下所有参与路由的供应商模型合并进 Codex 选择器，格式为 `供应商slug/模型`。请求里带上这个 id 时，代理会**固定**打到对应那张供应商卡，不再走跨供应商故障转移。
+完整说明：[4.6 按供应商选择模型](../user-manual/zh/4-proxy/4.6-model-routing.md)。
 
-```bash
-codex -m "kimi/k2" "解释这段代码"
+### 4. 建一条 Combo（可选）
+
+代理面板 → **Combo 虚拟模型**：
+
+1. id 填 `main`（请求即 `combo/main`）。
+2. 策略：`failover`（按行尝试）或 `round-robin`（按权重选第一跳，失败仍继续）。
+3. 目标每行一个，例如：
+
 ```
-
-Claude Code 接管后会打开网关模型发现（`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`）。`/model` 从本地 `GET /v1/models` 拉列表；条目 id 为 `anthropic/供应商slug/模型`（Claude Code 会过滤不含 `claude`/`anthropic` 的 id）。选中后请求仍按该前缀钉到对应供应商卡。haiku / sonnet / opus / fable 角色别名不变。Claude Desktop 的 `/claude-desktop/v1/models` 继续返回合并后的 `slug/model` 列表。
-
-```bash
-claude --model "anthropic/kimi/k2"
+kimi/k2
+deepseek/deepseek-v4:2
 ```
-
-规则：
-
-- 规范 id：`{routing_slug}/{upstream_model}`。供应商卡片上可以覆盖 slug；默认优先用供应商 `id`，否则由名称生成。
-- 上游模型 id 内部若含 `/`，目录里会写成 `-`（例如 `org/model` → `kimi/org-model`）。两种写法请求都认。
-- 不带前缀的模型名保持原行为：当前供应商 + 故障转移，Claude 仍可用 haiku/sonnet/opus/fable 角色别名。
-- 两张及以上 **Codex 官方卡** 同时提供同一个原生 id（`gpt-*` / `o1` `o3` `o4*` / `codex-*`）时，未加前缀的请求走账号池：新会话选**已知用量最低**的官方账号（未知用量排在后面，不当成 0%）；会话粘在开启该对话的账号上，直到该账号返回 401/403/429，或最热窗口 ≥ 80% 且池里有更闲的账号。用量来自卡片上的订阅查询，以及成功转发后最多每 60 秒一次的后台刷新。`main/gpt-5.5` 仍钉选该卡并注入对应账号 token（即使 Codex 当前登录的是另一个账号）。
-- 两张及以上 **Kimi For Coding** 卡提供同一个未加前缀 id（`kimi-for-coding` / `k2` / `k3`）时同样走账号池，用量来自该卡的套餐查询。两张及以上存有 Claude OAuth token（`sk-ant-oat…`）的卡对未加前缀的 `claude-*` 同样选闲号。`{slug}/模型` 仍然钉卡。
-- 第一段不是已配置的路由 slug 时（例如 Claude Desktop 的 `anthropic/claude-sonnet-5`）会回落到当前供应商，而不是 400。
-- 在供应商编辑页可关闭「参与路由目录」，该卡就不会出现在合并列表里，但仍可用 slug 前缀直接请求。
-
-### Combo 虚拟模型
-
-代理面板可以定义 `combo/{id}`：一个虚拟模型对应一组真实的 `供应商slug/模型` 目标。
 
 ```bash
 codex -m "combo/main" "解释这段代码"
 claude --model "anthropic/combo/main"
 ```
 
-- 目标写成 `kimi/k2` 或带权重的 `kimi/k2:2`。
-- `failover`（默认）：按配置顺序尝试；某一跳可重试失败后换下一个目标。不依赖应用级故障转移开关。
-- `round-robin`：按权重平滑选择第一跳，失败仍会继续其余目标。
-- 未知的 `combo/foo` 返回 400；目标在当前应用下都解析不到则 503。
-- 有 Combo 时 `combo/` 命名空间被占用，供应商 slug 不要用 `combo`。
+未知 `combo/foo` → 400；目标都解析不到 → 503。供应商 slug 不要叫 `combo`。见 [4.7](../user-manual/zh/4-proxy/4.7-combo.md)。
 
-### 认证中心托管登录
+### 5. 打开 Sidecar（可选）
 
-设置 → 认证中心可以登录并绑定账号，token 只存在本机 account store，不会写进供应商卡片：
+代理面板 → **Web Search / Vision Sidecar**。先登录 Claude Pro/Max 或 ChatGPT Official。
 
-- **Kimi For Coding**：设备码登录
-- **Claude Pro/Max**：浏览器 PKCE（本机 `localhost:54545` 回调）或从 Claude CLI 导入
-- 保存卡片时选择 `Kimi For Coding (OAuth)` / `Claude Pro/Max (OAuth)` 并绑定账号
+- 非官方、非 Anthropic OAuth 卡上的 hosted `web_search` 会改成函数调用，由 sidecar 执行。
+- 纯文本模型收到图片时先描述再转发。
+- 官方 ChatGPT / Anthropic OAuth 卡不拦截自己的 hosted 搜索。没登录则不改写。
 
-纯托管卡会在后台刷新额度，两张及以上同 family 卡对未加前缀模型走闲号池。认证中心和供应商卡片会显示该账号的用量。
+见 [4.8](../user-manual/zh/4-proxy/4.8-sidecar.md)。
 
-### Web Search / Vision Sidecar
+### 6. 停止代理
 
-代理面板可以打开 sidecar。非官方模型上的 hosted `web_search` 会改成函数调用，由已登录的 Claude Pro/Max 或 ChatGPT Official 执行；纯文本模型收到图片时先描述再转发。未登录对应账号时请求保持原样。官方 ChatGPT / Anthropic OAuth 卡不拦截 hosted search。
+点 **停止代理**。服务关闭，CLI 配置恢复备份。
 
-### 4. 停止代理
+## 应用级故障转移
 
-当你不再需要代理时，点击 **停止代理** 按钮。CC Switch 会：
+和 Combo **不是同一条路径**：
 
-1. 安全关闭代理服务器
-2. 自动恢复所有应用的原始配置
-3. 清除代理状态
+| | 应用级故障转移 | Combo |
+|--|----------------|-------|
+| 开关 | 代理面板 / 设置里的「自动故障转移」 | Combo 自己的策略 |
+| 触发 | 未加前缀的请求失败 | 请求 `combo/{id}` |
+| 单位 | 换整张供应商卡 | 换目标列表里的 `slug/model` |
+| 钉选 `{slug}/model` | 不走队列 | 不是 Combo 请求则无关 |
 
-## 自动故障转移
-
-### 工作原理
-
-代理功能内置了智能故障转移机制：
-
-1. **健康监控** - 实时监控每个供应商的响应状态
-2. **熔断器** - 连续失败 5 次后触发熔断，暂停使用该供应商
-3. **自动切换** - 熔断后自动切换到列表中的下一个供应商
-4. **自动恢复** - 30 秒后尝试恢复熔断的供应商
-
-### 配置故障转移
-
-要使用故障转移功能，你需要：
-
-1. 在对应应用下添加多个供应商（至少 2 个）
-2. 启动代理并启用接管
-3. 当主供应商故障时，代理会自动切换到备用供应商
-
-### 健康状态指示
-
-在供应商卡片上可以看到健康状态指示：
-
-- **绿色** - 供应商正常
-- **红色** - 供应商故障/熔断中
-- **灰色** - 未使用代理或未检测
-
-## 按应用接管
-
-v3.9.0 新增了按应用分粒度控制功能：
-
-- 你可以只接管 Claude，而让 Codex 使用原始配置
-- 每个应用的接管状态独立管理
-- 启用/禁用不会影响其他应用
-
-### 接管状态检测
-
-CC Switch 通过检测配置备份来判断接管状态：
-
-- 存在备份 = 已接管
-- 无备份 = 未接管
-
-这确保了即使 CC Switch 异常退出，重新启动后也能正确识别状态。
+应用级：至少两张卡 → 启动代理并接管 → 配队列 → 打开自动故障转移。熔断、健康色见 [4.3](../user-manual/zh/4-proxy/4.3-failover.md)。
 
 ## 代理配置
 
-在代理面板中，你可以配置以下参数：
-
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| 监听地址 | 127.0.0.1 | 代理服务器绑定地址 |
-| 监听端口 | 15721 | 代理服务器端口 |
-| 最大重试 | 3 | 请求失败时的最大重试次数 |
-| 请求超时 | 120 秒 | 单个请求的超时时间 |
-| 启用日志 | 是 | 是否记录请求日志 |
+| 监听地址 | 127.0.0.1 | 仅本机；`0.0.0.0` 允许局域网 |
+| 监听端口 | 15721 | 与 CLI 指向的端口一致 |
+| 最大重试 | 3 | 单跳失败重试 |
+| 请求超时 | 120 秒 | 单个请求 |
+| 启用日志 | 是 | 高频场景可关以减负 |
+
+改地址/端口须先停代理再保存、再启动。
 
 ## 常见问题
 
-### Q: 代理启动失败，提示端口被占用？
+**端口被占用**：关掉占用 15721 的程序，或在代理配置里改端口。
 
-A: 默认端口 15721 可能被其他程序占用。你可以：
-- 关闭占用该端口的程序
-- 在代理配置中修改端口号
+**接管后 CLI 不能用**：代理是否在跑、接管开关是否开、供应商 Key/OAuth 是否有效、本机能否访问 `127.0.0.1`。
 
-### Q: 启用接管后 CLI 无法使用？
+**`kimi/k2` 没钉到 Kimi 卡**：slug 是否就是 `kimi`；未知前缀会回落当前卡。
 
-A: 请检查：
-1. 代理服务器是否正常运行（查看代理面板状态）
-2. 供应商配置是否正确（API Key 等）
-3. 网络连接是否正常
+**配额**：ChatGPT / Kimi OAuth / Claude OAuth 在认证中心和卡片底部自动显示。托盘不为 Kimi / Anthropic 展示配额。API Key 版 Token Plan 仍要手动开用量查询。
 
-### Q: 如何恢复原始配置？
+**macOS 打不开（本仓库 Releases）**：构建可能未经公证。Finder 中右键应用 → 打开。
 
-A: 点击 **停止代理** 按钮，CC Switch 会自动恢复所有应用的原始配置。
+更多问答：[5.2 FAQ](../user-manual/zh/5-faq/5.2-questions.md)。
 
-如果 CC Switch 异常退出，重新启动后会检测到之前的备份，你可以：
-- 点击停止代理来恢复配置
-- 或继续使用代理功能
+## 接管会改哪些文件
 
-### Q: 故障转移没有生效？
+| 应用 | 配置文件 | 改动 |
+|------|----------|------|
+| Claude | `~/.claude/settings.json` | `ANTHROPIC_BASE_URL` 指向代理 |
+| Codex | `~/.codex/config.toml` | `base_url` 指向代理 `/v1` |
+| Gemini | `~/.gemini/.env` | `GOOGLE_GEMINI_BASE_URL` 指向代理 |
 
-A: 请确保：
-1. 配置了至少 2 个供应商
-2. 代理已启动且接管已启用
-3. 故障转移只在代理模式下工作
+原文备份在 CC Switch 数据库，停止代理时恢复。
 
-### Q: 代理会影响性能吗？
+## 相关文档
 
-A: 本地代理的延迟开销非常小（通常 < 1ms）。但如果启用了请求日志，在高频请求场景下可能会有少量性能影响。
-
-## 技术细节
-
-### 配置文件位置
-
-启用接管后，CC Switch 会修改以下配置文件：
-
-| 应用 | 配置文件 | 修改内容 |
-|------|----------|----------|
-| Claude | `~/.claude/settings.json` | `apiBaseUrl` 指向代理 |
-| Codex | `~/.codex/config.toml` | `[api] baseUrl` 指向代理 |
-| Gemini | `~/.gemini/.env` | `GEMINI_BASE_URL` 指向代理 |
-
-原始配置备份在 CC Switch 数据库中，停止代理时自动恢复。
-
-### 代理模式
-
-代理服务器运行在接管模式下，会：
-
-1. 接收来自 CLI 的 HTTPS 请求
-2. 根据当前供应商配置转发到真实 API 端点
-3. 返回响应给 CLI
-4. 记录请求日志和健康状态
-
-### 数据库表
-
-代理功能使用以下数据库表：
-
-- `proxy_config` - 代理配置
-- `provider_health` - 供应商健康状态
-- `proxy_request_logs` - 请求日志
-- `circuit_breaker_config` - 熔断器配置
-- `proxy_live_backup` - Live 配置备份
+- [4.1 代理服务](../user-manual/zh/4-proxy/4.1-service.md)
+- [4.2 应用接管](../user-manual/zh/4-proxy/4.2-routing.md)
+- [4.6 按供应商选择模型](../user-manual/zh/4-proxy/4.6-model-routing.md)
+- [4.7 Combo](../user-manual/zh/4-proxy/4.7-combo.md)
+- [4.8 Sidecar](../user-manual/zh/4-proxy/4.8-sidecar.md)
+- [1.5 OAuth 认证中心](../user-manual/zh/1-getting-started/1.5-settings.md)

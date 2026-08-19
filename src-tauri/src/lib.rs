@@ -1588,6 +1588,7 @@ pub fn run() {
             commands::list_model_combos,
             commands::upsert_model_combo,
             commands::delete_model_combo,
+            commands::set_provider_routing_catalog,
             commands::get_sidecar_settings,
             commands::update_sidecar_settings,
             // Failover queue management

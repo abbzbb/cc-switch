@@ -324,7 +324,7 @@ If you launch from a desktop icon, add it to the `.desktop` `Exec=` line (e.g. `
 
 ## Documentation
 
-For detailed guides on every feature, check out the **[User Manual](docs/user-manual/en/README.md)** — covering provider management, MCP/Prompts/Skills, proxy & failover, and more.
+For detailed guides on every feature, check out the **[User Manual](docs/user-manual/en/README.md)** — covering provider management, MCP/Prompts/Skills, proxy & failover, and more. For v3.20.0 `{slug}/{model}` pinning, account pools, Combo, and Sidecar see [4.6](docs/user-manual/en/4-proxy/4.6-model-routing.md), [4.7](docs/user-manual/en/4-proxy/4.7-combo.md), [4.8](docs/user-manual/en/4-proxy/4.8-sidecar.md). Chinese walkthrough: [代理使用指南](docs/guides/proxy-guide-zh.md).
 
 ## Quick Start
 

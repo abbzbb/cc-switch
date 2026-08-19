@@ -34,7 +34,10 @@ CC Switch ユーザーマニュアル
 │   ├── 4.2 アプリケーション接管
 │   ├── 4.3 フェイルオーバー
 │   ├── 4.4 使用量統計
-│   └── 4.5 モデルテスト
+│   ├── 4.5 モデルテスト
+│   ├── 4.6 プロバイダーでモデルを選ぶ
+│   ├── 4.7 Combo 仮想モデル
+│   └── 4.8 Web Search / Vision Sidecar
 │
 └── 5. よくある質問
     ├── 5.1 設定ファイルの説明
@@ -81,10 +84,13 @@ CC Switch ユーザーマニュアル
 | ファイル | 内容 |
 |------|------|
 | [4.1-service.md](./4-proxy/4.1-service.md) | プロキシの起動、設定項目、実行状態 |
-| [4.2-routing.md](./4-proxy/4.2-routing.md) | アプリケーションルーティング、設定変更、ステータス表示 |
+| [4.2-routing.md](./4-proxy/4.2-routing.md) | アプリケーション接管、設定変更、ステータス表示 |
 | [4.3-failover.md](./4-proxy/4.3-failover.md) | フェイルオーバーキュー、サーキットブレーカー、ヘルスステータス |
 | [4.4-usage.md](./4-proxy/4.4-usage.md) | 使用量統計、トレンドグラフ、料金設定 |
 | [4.5-model-test.md](./4-proxy/4.5-model-test.md) | モデルテスト、ヘルスチェック、レイテンシテスト |
+| [4.6-model-routing.md](./4-proxy/4.6-model-routing.md) | `{slug}/{model}` 固定、アカウントプール、ルーティング slug |
+| [4.7-combo.md](./4-proxy/4.7-combo.md) | `combo/{id}` フェイルオーバーと重み付きラウンドロビン |
+| [4.8-sidecar.md](./4-proxy/4.8-sidecar.md) | hosted 検索とテキストのみ識図 Sidecar |
 
 ### 5. よくある質問
 
@@ -102,13 +108,22 @@ CC Switch ユーザーマニュアル
 - **プロバイダーの設定**：[2.1 プロバイダーの追加](./2-providers/2.1-add.md) をご確認ください
 - **Claude Desktop の利用**：[2.6 Claude Desktop](./2-providers/2.6-claude-desktop.md) をご確認ください
 - **プロキシの使用**：[4.1 プロキシサービス](./4-proxy/4.1-service.md) をご確認ください
+- **モデル固定 / Combo / Sidecar**：[4.6](./4-proxy/4.6-model-routing.md)、[4.7](./4-proxy/4.7-combo.md)、[4.8](./4-proxy/4.8-sidecar.md)
 - **お困りの方**：[5.2 FAQ](./5-faq/5.2-questions.md) をご確認ください
 
 ## バージョン情報
 
-- ドキュメントバージョン：v3.16.0
-- 最終更新：2026-05-29
-- CC Switch v3.16.0+ 対応
+- ドキュメントバージョン：v3.20.0
+- 最終更新：2026-08-19
+- CC Switch v3.20.0+ 対応
+
+### v3.20.0 の注目機能
+
+- **`{slug}/{model}` 固定**：Codex / Claude 接管後、セレクタが各カードを結合。接頭辞付きリクエストはそのカードに固定 — [4.6](./4-proxy/4.6-model-routing.md)
+- **公式系アカウントプール**：ChatGPT Official / Kimi For Coding / Claude Pro/Max が複数あるとき、接頭辞なし公式 id は空きアカウントを選ぶ
+- **Combo 仮想モデル**：`combo/{id}` でフェイルオーバーまたは重み付きラウンドロビン — [4.7](./4-proxy/4.7-combo.md)
+- **Kimi / Claude Pro/Max ホストログイン**：認証センターのデバイスコードまたはブラウザ PKCE / CLI 取り込み。トークンはカードに書かない — [1.5](./1-getting-started/1.5-settings.md)、[2.1](./2-providers/2.1-add.md)
+- **Web Search / Vision Sidecar**：非公式モデルの hosted 検索とテキストのみ識図を、ログイン済み Claude Pro/Max または ChatGPT Official が実行 — [4.8](./4-proxy/4.8-sidecar.md)
 
 ### v3.16.0 の注目機能
 

@@ -1607,7 +1607,7 @@
     "defaultModelNotInCatalog": "This model is not in the model mapping, so the Codex /model menu won't list it (direct requests still work).",
     "addToModelMapping": "Add to mapping",
     "modelMappingTitle": "Model Mapping",
-    "modelMappingHint": "Generates Codex model_catalog_json so /model can show these third-party model names; entries are saved exactly as listed. Codex must be restarted to refresh the model list after changes.",
+    "modelMappingHint": "Writes Codex model_catalog_json and unions it with models declared in toml plus the last successful /v1/models fetch (not a live upstream mirror). Display names come from this table. Restart Codex after edits or a takeover refresh.",
     "addCatalogModel": "Add Model",
     "catalogDisplayName": "Display Name",
     "catalogDisplayNamePlaceholder": "e.g., DeepSeek V4 Flash",
@@ -2936,6 +2936,15 @@
         "broken": "{{appLabel}} is routing, but routing service is not running",
         "inactive": "Route {{appLabel}}'s requests through local routing"
       }
+    },
+    "routingCards": {
+      "title": "Configs in the routing catalog",
+      "description": "Choose which provider configs appear in the merged picker. The platform switch only takes over that app’s live config; this list picks the cards. Turning a card off hides it from the picker; slug-prefixed requests still work. Gemini / Grok have no merged picker — they use the current config plus the failover queue.",
+      "enabledCount": "{{enabled}} / {{total}} included",
+      "slug": "Route {{slug}}",
+      "updated": "Routing catalog updated",
+      "codexRestart": "Fully quit and restart Codex so /model reloads the catalog",
+      "failed": "Could not update the routing catalog: {{detail}}"
     },
     "combos": {
       "title": "Combo virtual models",

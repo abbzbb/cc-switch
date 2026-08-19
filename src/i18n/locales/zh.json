@@ -1607,7 +1607,7 @@
     "defaultModelNotInCatalog": "该模型不在模型映射中，Codex 的 /model 菜单不会列出它（直接请求仍然有效）。",
     "addToModelMapping": "加入映射",
     "modelMappingTitle": "模型映射",
-    "modelMappingHint": "生成 Codex model_catalog_json，让 /model 命令显示这些第三方模型名；表中条目按填写内容原样保存。修改后需要重启 Codex 才能刷新模型列表。",
+    "modelMappingHint": "写入 Codex model_catalog_json，并与 toml 声明的模型和上次成功的 /v1/models 合并（不是上游实时镜像）。显示名以本表为准。修改或接管刷新后需要重启 Codex。",
     "addCatalogModel": "添加模型",
     "catalogDisplayName": "显示名称",
     "catalogDisplayNamePlaceholder": "例如: DeepSeek V4 Flash",
@@ -2936,6 +2936,15 @@
         "broken": "{{appLabel}} 路由中，但路由服务未运行",
         "inactive": "路由 {{appLabel}} 的请求，让该应用请求走本地路由"
       }
+    },
+    "routingCards": {
+      "title": "参与路由的配置",
+      "description": "勾选要出现在选择器里的供应商配置。平台开关只决定要不要接管该应用；这里决定合并目录里出现哪几张卡。关闭后仍可用 slug 前缀请求。Gemini / Grok 没有合并目录，继续用当前配置 + 故障转移队列。",
+      "enabledCount": "{{enabled}} / {{total}} 已加入",
+      "slug": "路由 {{slug}}",
+      "updated": "已更新参与路由的配置",
+      "codexRestart": "完全退出并重启 Codex 后，/model 才会读到新目录",
+      "failed": "更新参与路由的配置失败: {{detail}}"
     },
     "combos": {
       "title": "Combo 虚拟模型",
