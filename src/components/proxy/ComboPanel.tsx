@@ -29,7 +29,10 @@ import {
   parseComboTargets,
   resolveComboHop,
 } from "@/utils/combo";
-import { assignRoutingSlugs, providersInAssignOrder } from "@/utils/routingSlug";
+import {
+  assignRoutingSlugs,
+  providersInAssignOrder,
+} from "@/utils/routingSlug";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
 export function ComboPanel() {
@@ -183,12 +186,10 @@ export function ComboPanel() {
       return;
     }
     const renaming =
-      Boolean(editingId) &&
-      editingId!.toLowerCase() !== comboId.toLowerCase();
+      Boolean(editingId) && editingId!.toLowerCase() !== comboId.toLowerCase();
     const stickySource = combos.find(
       (combo) =>
-        combo.id.toLowerCase() ===
-        (editingId ?? comboId).toLowerCase(),
+        combo.id.toLowerCase() === (editingId ?? comboId).toLowerCase(),
     );
     try {
       await upsert.mutateAsync({
@@ -374,7 +375,8 @@ export function ComboPanel() {
                     })
                   : t("proxy.combos.invalidTarget", {
                       spec: parsedTargets.error.spec,
-                      defaultValue: "目标须为 provider/model[:weight]：{{spec}}",
+                      defaultValue:
+                        "目标须为 provider/model[:weight]：{{spec}}",
                     })}
           </p>
         ) : null}

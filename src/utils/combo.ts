@@ -52,9 +52,11 @@ export function isValidComboId(id: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(trimmed);
 }
 
-function splitOptionalWeight(
-  spec: string,
-): { route: string; weight?: number; error?: ComboParseError } {
+function splitOptionalWeight(spec: string): {
+  route: string;
+  weight?: number;
+  error?: ComboParseError;
+} {
   const lastColon = spec.lastIndexOf(":");
   if (lastColon <= 0) {
     return { route: spec };

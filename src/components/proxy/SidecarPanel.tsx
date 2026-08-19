@@ -241,7 +241,8 @@ export function SidecarPanel({
         {!proxyRunning ? (
           <p className="text-xs text-muted-foreground mt-1">
             {t("proxy.sidecars.proxyStopped", {
-              defaultValue: "代理未运行时仍可改设置，启动并完成接管后才会生效。",
+              defaultValue:
+                "代理未运行时仍可改设置，启动并完成接管后才会生效。",
             })}
           </p>
         ) : null}
@@ -257,7 +258,11 @@ export function SidecarPanel({
             checked={draft.webSearch.enabled}
             disabled={saving}
             onCheckedChange={(enabled) => {
-              if (enabled && !draft.webSearch.enabled && !confirmEnable("webSearch")) {
+              if (
+                enabled &&
+                !draft.webSearch.enabled &&
+                !confirmEnable("webSearch")
+              ) {
                 return;
               }
               patch(
@@ -301,7 +306,9 @@ export function SidecarPanel({
                   <SelectItem value="anthropic">
                     {backendLabel("anthropic")}
                   </SelectItem>
-                  <SelectItem value="openai">{backendLabel("openai")}</SelectItem>
+                  <SelectItem value="openai">
+                    {backendLabel("openai")}
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -388,7 +395,11 @@ export function SidecarPanel({
             checked={draft.vision.enabled}
             disabled={saving}
             onCheckedChange={(enabled) => {
-              if (enabled && !draft.vision.enabled && !confirmEnable("vision")) {
+              if (
+                enabled &&
+                !draft.vision.enabled &&
+                !confirmEnable("vision")
+              ) {
                 return;
               }
               patch(
@@ -423,14 +434,18 @@ export function SidecarPanel({
                 }
               >
                 <SelectTrigger>
-                  <SelectValue>{backendLabel(draft.vision.backend)}</SelectValue>
+                  <SelectValue>
+                    {backendLabel(draft.vision.backend)}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="auto">{backendLabel("auto")}</SelectItem>
                   <SelectItem value="anthropic">
                     {backendLabel("anthropic")}
                   </SelectItem>
-                  <SelectItem value="openai">{backendLabel("openai")}</SelectItem>
+                  <SelectItem value="openai">
+                    {backendLabel("openai")}
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </div>

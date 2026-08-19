@@ -57,8 +57,7 @@ fn validate_codex_official_authorization(
         )),
         Some(value) if crate::proxy::inbound_auth::is_proxy_auth_placeholder(value) => {
             Err(ProxyError::AuthError(
-                "已切换到 OpenAI 官方供应商，请重启 Codex 或新建会话以加载官方登录配置"
-                    .to_string(),
+                "已切换到 OpenAI 官方供应商，请重启 Codex 或新建会话以加载官方登录配置".to_string(),
             ))
         }
         Some(_) => {

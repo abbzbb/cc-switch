@@ -172,7 +172,9 @@ export function assignedSlugForForm(input: {
   const editingId = input.editingId?.trim();
   if (editingId) {
     const list = providersInAssignOrder(input.providers);
-    const index = list.findIndex((provider) => provider.id?.trim() === editingId);
+    const index = list.findIndex(
+      (provider) => provider.id?.trim() === editingId,
+    );
     const next: RoutingSlugInput = {
       ...input.draft,
       id: editingId,
