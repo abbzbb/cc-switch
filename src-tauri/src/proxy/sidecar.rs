@@ -50,7 +50,7 @@ pub enum SidecarBackend {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WebSearchSidecarConfig {
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub backend: SidecarBackend,
@@ -65,7 +65,7 @@ pub struct WebSearchSidecarConfig {
 impl Default for WebSearchSidecarConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             backend: SidecarBackend::Auto,
             model: None,
             max_searches_per_turn: DEFAULT_MAX_SEARCHES,
@@ -77,7 +77,7 @@ impl Default for WebSearchSidecarConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct VisionSidecarConfig {
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub backend: SidecarBackend,
@@ -92,7 +92,7 @@ pub struct VisionSidecarConfig {
 impl Default for VisionSidecarConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             backend: SidecarBackend::Auto,
             model: None,
             max_descriptions_per_turn: DEFAULT_MAX_DESCRIPTIONS,
@@ -108,10 +108,6 @@ pub struct SidecarSettings {
     pub web_search: WebSearchSidecarConfig,
     #[serde(default)]
     pub vision: VisionSidecarConfig,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_max_searches() -> u32 {
@@ -660,13 +656,24 @@ fn test_vision_url() -> Option<String> {
     None
 }
 
+fn sidecar_spend_allowed(headers: &HeaderMap, state: &ProxyState) -> bool {
+    crate::proxy::inbound_auth::presents_inbound_secret(
+        headers,
+        &crate::proxy::inbound_auth::inbound_capability_tokens(&state.db),
+    )
+}
+
 pub async fn should_run_web_search_sidecar(
     provider: &Provider,
     body: &Value,
     settings: &SidecarSettings,
     state: &ProxyState,
+    headers: &HeaderMap,
 ) -> bool {
     if !settings.web_search.enabled || !request_has_hosted_web_search(body) {
+        return false;
+    }
+    if !sidecar_spend_allowed(headers, state) {
         return false;
     }
     if is_codex_official_provider(provider) || provider.is_anthropic_oauth() {
@@ -683,10 +690,12 @@ pub async fn rewrite_vision_if_needed(
     request_model: &str,
     settings: &SidecarSettings,
     state: &ProxyState,
+    headers: &HeaderMap,
 ) -> Result<Value, ProxyError> {
     if !settings.vision.enabled
         || !request_has_images(body)
         || !model_is_text_only(provider, request_model)
+        || !sidecar_spend_allowed(headers, state)
     {
         return Ok(body.clone());
     }
@@ -985,8 +994,8 @@ fn anthropic_image_content(prompt: &str, image_url: &str) -> Value {
         }
     }
     content.push(json!({
-        "type": "image",
-        "source": { "type": "url", "url": image_url }
+        "type": "text",
+        "text": "[image omitted: only data: URLs are sent to the vision sidecar]"
     }));
     json!(content)
 }
@@ -1911,8 +1920,8 @@ mod tests {
     fn load_sidecar_settings_defaults_when_missing() {
         let db = crate::database::Database::memory().unwrap();
         let settings = load_sidecar_settings(&db);
-        assert!(settings.web_search.enabled);
-        assert!(settings.vision.enabled);
+        assert!(!settings.web_search.enabled);
+        assert!(!settings.vision.enabled);
         assert_eq!(settings.web_search.backend, SidecarBackend::Auto);
     }
 
@@ -1979,6 +1988,25 @@ mod tests {
                 None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
             }
         }
+    }
+
+    fn enable_sidecars(db: &crate::database::Database) -> String {
+        let token = crate::proxy::inbound_auth::get_or_create_inbound_token(db).unwrap();
+        save_sidecar_settings(
+            db,
+            &SidecarSettings {
+                web_search: WebSearchSidecarConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                vision: VisionSidecarConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+        token
     }
 
     #[tokio::test]
@@ -2073,6 +2101,7 @@ mod tests {
         db.update_proxy_config(proxy_config)
             .await
             .expect("ephemeral port");
+        let inbound = enable_sidecars(&db);
 
         let config = format!(
             "model_provider = \"deepseek\"\n\
@@ -2114,6 +2143,7 @@ mod tests {
         let response = reqwest::Client::new()
             .post(format!("http://127.0.0.1:{}/v1/responses", status.port))
             .header("Authorization", "Bearer PROXY_MANAGED")
+            .header("x-cc-switch-proxy", &inbound)
             .json(&json!({
                 "model": "deepseek-v4",
                 "input": "search rust",
@@ -2218,6 +2248,7 @@ mod tests {
         db.update_proxy_config(proxy_config)
             .await
             .expect("ephemeral port");
+        let inbound = enable_sidecars(&db);
 
         let mut provider = Provider::with_id(
             "deepseek".into(),
@@ -2265,6 +2296,7 @@ mod tests {
         let response = reqwest::Client::new()
             .post(format!("http://127.0.0.1:{}/v1/messages", status.port))
             .header("Authorization", "Bearer PROXY_MANAGED")
+            .header("x-cc-switch-proxy", &inbound)
             .header("anthropic-version", "2023-06-01")
             .json(&json!({
                 "model": "deepseek-v4",
@@ -2394,6 +2426,7 @@ mod tests {
         db.update_proxy_config(proxy_config)
             .await
             .expect("ephemeral port");
+        let inbound = enable_sidecars(&db);
 
         let config = format!(
             "model_provider = \"deepseek\"\n\
@@ -2438,6 +2471,7 @@ mod tests {
                 status.port
             ))
             .header("Authorization", "Bearer PROXY_MANAGED")
+            .header("x-cc-switch-proxy", &inbound)
             .json(&json!({
                 "model": "deepseek-v4",
                 "messages": [{ "role": "user", "content": "search rust" }],

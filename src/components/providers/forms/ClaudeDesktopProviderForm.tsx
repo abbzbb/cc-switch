@@ -408,15 +408,15 @@ export function ClaudeDesktopProviderForm({
   const {
     isAuthenticated: isXaiOauthAuthenticated,
     accounts: xaiOauthAccounts,
-  } = useXaiOauth();
+  } = useXaiOauth({ pollStatus: false });
   const {
     isAuthenticated: isKimiOauthAuthenticated,
     accounts: kimiOauthAccounts,
-  } = useKimiOauth();
+  } = useKimiOauth({ pollStatus: false });
   const {
     isAuthenticated: isAnthropicOauthAuthenticated,
     accounts: anthropicOauthAccounts,
-  } = useAnthropicOauth();
+  } = useAnthropicOauth({ pollStatus: false });
   const isOfficial =
     initialData?.category === "official" ||
     activePreset?.category === "official";
@@ -995,16 +995,19 @@ export function ClaudeDesktopProviderForm({
                   <KimiOAuthSection
                     selectedAccountId={selectedKimiAccountId}
                     onAccountSelect={setSelectedKimiAccountId}
+                    pollStatus={false}
                   />
                 ) : activeProviderType === "anthropic_oauth" ? (
                   <AnthropicOAuthSection
                     selectedAccountId={selectedAnthropicAccountId}
                     onAccountSelect={setSelectedAnthropicAccountId}
+                    pollStatus={false}
                   />
                 ) : (
                   <XaiOAuthSection
                     selectedAccountId={selectedXaiAccountId}
                     onAccountSelect={setSelectedXaiAccountId}
+                    pollStatus={false}
                   />
                 )}
               </div>
@@ -1385,16 +1388,6 @@ export function ClaudeDesktopProviderForm({
               )}
             </div>
 
-            <RoutingSlugFields
-              providerId={providerId}
-              providerName={form.watch("name")}
-              routingSlug={routingSlug}
-              onRoutingSlugChange={setRoutingSlug}
-              routingCatalog={routingCatalog}
-              onRoutingCatalogChange={setRoutingCatalog}
-              previewModels={routes.map((route) => route.model)}
-            />
-
             <FormField
               control={form.control}
               name="settingsConfig"
@@ -1409,6 +1402,17 @@ export function ClaudeDesktopProviderForm({
             />
           </>
         )}
+
+        <RoutingSlugFields
+          appId="claude-desktop"
+          providerId={providerId}
+          providerName={form.watch("name")}
+          routingSlug={routingSlug}
+          onRoutingSlugChange={setRoutingSlug}
+          routingCatalog={routingCatalog}
+          onRoutingCatalogChange={setRoutingCatalog}
+          previewModels={routes.map((route) => route.model)}
+        />
 
         {showButtons && (
           <div className="flex justify-end gap-2">

@@ -243,6 +243,41 @@ pub fn validate_combo(
     Ok(())
 }
 
+/// Insert or replace `combo`. When `previous_id` differs, drop that row in the
+/// same mutation so a rename cannot leave two ids.
+pub fn apply_upsert(
+    combos: &mut Vec<ModelCombo>,
+    mut combo: ModelCombo,
+    previous_id: Option<&str>,
+    reserved_slugs: &HashSet<String>,
+) -> Result<ModelCombo, AppError> {
+    combo.id = combo.id.trim().to_string();
+    let previous = previous_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && !id.eq_ignore_ascii_case(&combo.id));
+    let other_ids = combos
+        .iter()
+        .filter(|existing| {
+            !existing.id.eq_ignore_ascii_case(&combo.id)
+                && previous.map_or(true, |prev| !existing.id.eq_ignore_ascii_case(prev))
+        })
+        .map(|existing| existing.id.clone())
+        .collect();
+    validate_combo(&combo, &other_ids, reserved_slugs)?;
+    if let Some(prev) = previous {
+        combos.retain(|item| !item.id.eq_ignore_ascii_case(prev));
+    }
+    if let Some(existing) = combos
+        .iter_mut()
+        .find(|item| item.id.eq_ignore_ascii_case(&combo.id))
+    {
+        *existing = combo.clone();
+    } else {
+        combos.push(combo.clone());
+    }
+    Ok(combo)
+}
+
 pub fn combos_from_setting_json(raw: Option<&str>) -> Result<Vec<ModelCombo>, AppError> {
     let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(Vec::new());
@@ -518,6 +553,22 @@ mod tests {
 
         let dup = combo("dup", &["kimi/k2", "kimi/k2"]);
         assert!(validate_combo(&dup, &HashSet::new(), &HashSet::new()).is_err());
+    }
+
+    #[test]
+    fn apply_upsert_renames_in_one_write() {
+        let mut combos = vec![combo("old", &["kimi/k2"])];
+        let saved = apply_upsert(
+            &mut combos,
+            combo("new", &["deepseek/v4"]),
+            Some("old"),
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(saved.id, "new");
+        assert_eq!(combos.len(), 1);
+        assert_eq!(combos[0].id, "new");
+        assert_eq!(combos[0].targets[0].model, "v4");
     }
 
     #[test]

@@ -490,34 +490,21 @@ pub async fn list_model_combos(
     state.db.list_model_combos().map_err(|e| e.to_string())
 }
 
-/// Create or replace one combo definition.
+/// Create or replace one combo definition. `previous_id` renames in one save.
 #[tauri::command]
 pub async fn upsert_model_combo(
     state: tauri::State<'_, AppState>,
     combo: crate::proxy::combo::ModelCombo,
+    previous_id: Option<String>,
 ) -> Result<crate::proxy::combo::ModelCombo, String> {
-    let mut combo = combo;
-    combo.id = combo.id.trim().to_string();
     let mut combos = state.db.list_model_combos().map_err(|e| e.to_string())?;
-    let other_ids = combos
-        .iter()
-        .filter(|existing| !existing.id.eq_ignore_ascii_case(&combo.id))
-        .map(|existing| existing.id.clone())
-        .collect();
-    crate::proxy::combo::validate_combo(
-        &combo,
-        &other_ids,
+    let saved = crate::proxy::combo::apply_upsert(
+        &mut combos,
+        combo,
+        previous_id.as_deref(),
         &reserved_provider_routing_slugs(&state.db),
     )
     .map_err(|e| e.to_string())?;
-    if let Some(existing) = combos
-        .iter_mut()
-        .find(|item| item.id.eq_ignore_ascii_case(&combo.id))
-    {
-        *existing = combo.clone();
-    } else {
-        combos.push(combo.clone());
-    }
     state
         .db
         .save_model_combos(&combos)
@@ -526,7 +513,7 @@ pub async fn upsert_model_combo(
         .proxy_service
         .refresh_codex_routing_catalog_if_takeover()
         .await?;
-    Ok(combo)
+    Ok(saved)
 }
 
 /// Delete a combo by id.

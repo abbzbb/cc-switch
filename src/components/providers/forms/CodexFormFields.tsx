@@ -79,7 +79,6 @@ interface CodexFormFieldsProps {
   onXaiAccountSelect?: (accountId: string | null) => void;
   // Kimi OAuth 托管预设：token 由代理注入，端点由 adapter 硬定向
   isKimiOauthPreset?: boolean;
-  isKimiOauthAuthenticated?: boolean;
   selectedKimiAccountId?: string | null;
   onKimiAccountSelect?: (accountId: string | null) => void;
   // API Key
@@ -759,6 +758,7 @@ export function CodexFormFields({
         <XaiOAuthSection
           selectedAccountId={selectedXaiAccountId}
           onAccountSelect={onXaiAccountSelect}
+          pollStatus={false}
         />
       )}
 
@@ -766,6 +766,7 @@ export function CodexFormFields({
         <KimiOAuthSection
           selectedAccountId={selectedKimiAccountId}
           onAccountSelect={onKimiAccountSelect}
+          pollStatus={false}
         />
       )}
 

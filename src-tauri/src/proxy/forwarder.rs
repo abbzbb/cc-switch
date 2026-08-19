@@ -43,8 +43,6 @@ use std::sync::Arc;
 use tauri::Manager;
 use tokio::sync::RwLock;
 
-const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
-
 fn validate_codex_official_authorization(
     headers: &http::HeaderMap,
     provider: &Provider,
@@ -57,9 +55,12 @@ fn validate_codex_official_authorization(
         None | Some("") => Err(ProxyError::AuthError(
             "Codex 官方登录不可用，请先在 Codex 中完成 ChatGPT 登录".to_string(),
         )),
-        Some(value) if value.contains(PROXY_AUTH_PLACEHOLDER) => Err(ProxyError::AuthError(
-            "已切换到 OpenAI 官方供应商，请重启 Codex 或新建会话以加载官方登录配置".to_string(),
-        )),
+        Some(value) if crate::proxy::inbound_auth::is_proxy_auth_placeholder(value) => {
+            Err(ProxyError::AuthError(
+                "已切换到 OpenAI 官方供应商，请重启 Codex 或新建会话以加载官方登录配置"
+                    .to_string(),
+            ))
+        }
         Some(_) => {
             let expected_account_id = provider
                 .meta
@@ -177,6 +178,8 @@ pub struct RequestForwarder {
     max_attempts: usize,
     /// Combo 路由时按尝试改写 `body.model`。
     attempt_upstream_models: Option<Vec<String>>,
+    /// Pin / combo / official-pool successes must not rewrite current provider.
+    promote_current_on_success: bool,
     /// Inject ChatGPT Official / Codex OAuth tokens without requiring AppHandle.
     codex_oauth_manager: Option<Arc<CodexOAuthManager>>,
     kimi_oauth_manager: Option<Arc<KimiOAuthManager>>,
@@ -272,10 +275,16 @@ impl RequestForwarder {
             ),
             max_attempts,
             attempt_upstream_models: None,
+            promote_current_on_success: true,
             codex_oauth_manager: None,
             kimi_oauth_manager: None,
             anthropic_oauth_manager: None,
         }
+    }
+
+    pub fn with_promote_current_on_success(mut self, promote: bool) -> Self {
+        self.promote_current_on_success = promote;
+        self
     }
 
     pub fn with_attempt_upstream_models(mut self, models: Option<Vec<String>>) -> Self {
@@ -299,6 +308,30 @@ impl RequestForwarder {
     ) -> Self {
         self.anthropic_oauth_manager = manager;
         self
+    }
+
+    fn maybe_promote_current_after_success(
+        &self,
+        status: &mut ProxyStatus,
+        provider: &Provider,
+        app_type_str: &str,
+    ) {
+        if !self.promote_current_on_success
+            || self.current_provider_id_at_start.as_str() == provider.id.as_str()
+        {
+            return;
+        }
+        status.failover_count += 1;
+        let failover_manager = self.failover_manager.clone();
+        let app_handle = self.app_handle.clone();
+        let provider_id = provider.id.clone();
+        let provider_name = provider.name.clone();
+        let app_type = app_type_str.to_string();
+        tokio::spawn(async move {
+            let _ = failover_manager
+                .try_switch(app_handle.as_ref(), &app_type, &provider_id, &provider_name)
+                .await;
+        });
     }
 
     fn official_pool_should_rotate(error: &ProxyError) -> bool {
@@ -761,22 +794,11 @@ impl RequestForwarder {
                         let mut status = self.status.write().await;
                         status.success_requests += 1;
                         status.last_error = None;
-                        let should_switch =
-                            self.current_provider_id_at_start.as_str() != provider.id.as_str();
-                        if should_switch {
-                            status.failover_count += 1;
-
-                            // 异步触发供应商切换，更新 UI/托盘，并把“当前供应商”同步为实际使用的 provider
-                            let fm = self.failover_manager.clone();
-                            let ah = self.app_handle.clone();
-                            let pid = provider.id.clone();
-                            let pname = provider.name.clone();
-                            let at = app_type_str.to_string();
-
-                            tokio::spawn(async move {
-                                let _ = fm.try_switch(ah.as_ref(), &at, &pid, &pname).await;
-                            });
-                        }
+                        self.maybe_promote_current_after_success(
+                            &mut status,
+                            provider,
+                            app_type_str,
+                        );
                         // 重新计算成功率
                         if status.total_requests > 0 {
                             status.success_rate = (status.success_requests as f32
@@ -864,23 +886,11 @@ impl RequestForwarder {
                                         let mut status = self.status.write().await;
                                         status.success_requests += 1;
                                         status.last_error = None;
-                                        let should_switch =
-                                            self.current_provider_id_at_start.as_str()
-                                                != provider.id.as_str();
-                                        if should_switch {
-                                            status.failover_count += 1;
-                                            let fm = self.failover_manager.clone();
-                                            let ah = self.app_handle.clone();
-                                            let pid = provider.id.clone();
-                                            let pname = provider.name.clone();
-                                            let at = app_type_str.to_string();
-
-                                            tokio::spawn(async move {
-                                                let _ = fm
-                                                    .try_switch(ah.as_ref(), &at, &pid, &pname)
-                                                    .await;
-                                            });
-                                        }
+                                        self.maybe_promote_current_after_success(
+                                            &mut status,
+                                            provider,
+                                            app_type_str,
+                                        );
                                         if status.total_requests > 0 {
                                             status.success_rate = (status.success_requests as f32
                                                 / status.total_requests as f32)
@@ -1010,25 +1020,11 @@ impl RequestForwarder {
                                             let mut status = self.status.write().await;
                                             status.success_requests += 1;
                                             status.last_error = None;
-                                            let should_switch =
-                                                self.current_provider_id_at_start.as_str()
-                                                    != provider.id.as_str();
-                                            if should_switch {
-                                                status.failover_count += 1;
-
-                                                // 异步触发供应商切换，更新 UI/托盘
-                                                let fm = self.failover_manager.clone();
-                                                let ah = self.app_handle.clone();
-                                                let pid = provider.id.clone();
-                                                let pname = provider.name.clone();
-                                                let at = app_type_str.to_string();
-
-                                                tokio::spawn(async move {
-                                                    let _ = fm
-                                                        .try_switch(ah.as_ref(), &at, &pid, &pname)
-                                                        .await;
-                                                });
-                                            }
+                                            self.maybe_promote_current_after_success(
+                                                &mut status,
+                                                provider,
+                                                app_type_str,
+                                            );
                                             if status.total_requests > 0 {
                                                 status.success_rate = (status.success_requests
                                                     as f32
@@ -1174,22 +1170,11 @@ impl RequestForwarder {
                                         let mut status = self.status.write().await;
                                         status.success_requests += 1;
                                         status.last_error = None;
-                                        let should_switch =
-                                            self.current_provider_id_at_start.as_str()
-                                                != provider.id.as_str();
-                                        if should_switch {
-                                            status.failover_count += 1;
-                                            let fm = self.failover_manager.clone();
-                                            let ah = self.app_handle.clone();
-                                            let pid = provider.id.clone();
-                                            let pname = provider.name.clone();
-                                            let at = app_type_str.to_string();
-                                            tokio::spawn(async move {
-                                                let _ = fm
-                                                    .try_switch(ah.as_ref(), &at, &pid, &pname)
-                                                    .await;
-                                            });
-                                        }
+                                        self.maybe_promote_current_after_success(
+                                            &mut status,
+                                            provider,
+                                            app_type_str,
+                                        );
                                         if status.total_requests > 0 {
                                             status.success_rate = (status.success_requests as f32
                                                 / status.total_requests as f32)
@@ -1403,7 +1388,9 @@ impl RequestForwarder {
             && super::providers::should_convert_codex_responses_to_chat(provider, endpoint);
         let codex_responses_to_anthropic = matches!(app_type, AppType::Codex | AppType::GrokBuild)
             && super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint);
-        let inject_official_account = official_pool_inject_account_id(headers, provider);
+        let inbound_tokens = self.router.inbound_capability_tokens();
+        let inject_official_account =
+            official_pool_inject_account_id(headers, provider, &inbound_tokens);
         let codex_official_auth_passthrough = matches!(app_type, AppType::Codex)
             && super::providers::is_codex_official_provider(provider)
             && inject_official_account.is_none();
@@ -2348,6 +2335,10 @@ impl RequestForwarder {
                     .iter()
                     .any(|(name, _)| name.as_str() == "chatgpt-account-id")
             {
+                continue;
+            }
+
+            if key_str.eq_ignore_ascii_case(crate::proxy::inbound_auth::INBOUND_HEADER) {
                 continue;
             }
 
@@ -3591,7 +3582,7 @@ fn headers_contain_proxy_placeholder(headers: &http::HeaderMap) -> bool {
     headers.values().any(|value| {
         value
             .to_str()
-            .map(|value| value.contains(PROXY_AUTH_PLACEHOLDER))
+            .map(crate::proxy::inbound_auth::is_proxy_auth_placeholder)
             .unwrap_or(false)
     })
 }
@@ -3784,6 +3775,7 @@ fn is_protected_local_proxy_override_header(name: &http::HeaderName) -> bool {
             | "accept-encoding"
             | "content-type"
             | "authorization"
+            | "x-cc-switch-proxy"
             | "x-api-key"
             | "x-goog-api-key"
             | "chatgpt-account-id"
@@ -3977,6 +3969,7 @@ mod tests {
             streaming_first_byte_timeout,
             max_attempts: 1,
             attempt_upstream_models: None,
+            promote_current_on_success: true,
             codex_oauth_manager: None,
             kimi_oauth_manager: None,
             anthropic_oauth_manager: None,
@@ -4859,6 +4852,24 @@ mod tests {
         validate_codex_official_authorization(&headers, &provider)
             .expect("the selected account may pass through");
 
+        let inbound_tokens = vec!["ccs-proxy-test".to_string()];
+        assert_eq!(
+            official_pool_inject_account_id(
+                &{
+                    let mut mismatched = headers.clone();
+                    mismatched.insert("chatgpt-account-id", HeaderValue::from_static("account-a"));
+                    mismatched
+                },
+                &provider,
+                &inbound_tokens,
+            ),
+            None
+        );
+
+        headers.insert(
+            crate::proxy::inbound_auth::INBOUND_HEADER,
+            HeaderValue::from_static("ccs-proxy-test"),
+        );
         let mismatch = official_pool_inject_account_id(
             &{
                 let mut mismatched = headers.clone();
@@ -4866,9 +4877,13 @@ mod tests {
                 mismatched
             },
             &provider,
+            &inbound_tokens,
         );
         assert_eq!(mismatch.as_deref(), Some("account-b"));
-        assert_eq!(official_pool_inject_account_id(&headers, &provider), None);
+        assert_eq!(
+            official_pool_inject_account_id(&headers, &provider, &inbound_tokens),
+            None
+        );
     }
 
     #[test]

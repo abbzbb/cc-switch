@@ -35,7 +35,10 @@ export function AuthCenterPanel({ authScrollTarget }: AuthCenterPanelProps) {
             ? xaiOauthSectionRef
             : authScrollTarget === "kimi_oauth"
               ? kimiOauthSectionRef
-              : anthropicOauthSectionRef;
+              : authScrollTarget === "anthropic_oauth"
+                ? anthropicOauthSectionRef
+                : null;
+    if (!sectionRef) return;
 
     const frame = requestAnimationFrame(() => {
       const prefersReducedMotion = window.matchMedia(

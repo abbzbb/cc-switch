@@ -28,6 +28,7 @@ interface AnthropicOAuthSectionProps {
   selectedAccountId?: string | null;
   onAccountSelect?: (accountId: string | null) => void;
   showAccountQuota?: boolean;
+  pollStatus?: boolean;
 }
 
 export const AnthropicOAuthSection: React.FC<AnthropicOAuthSectionProps> = ({
@@ -35,6 +36,7 @@ export const AnthropicOAuthSection: React.FC<AnthropicOAuthSectionProps> = ({
   selectedAccountId,
   onAccountSelect,
   showAccountQuota = false,
+  pollStatus = true,
 }) => {
   const { t } = useTranslation();
   const {
@@ -56,7 +58,7 @@ export const AnthropicOAuthSection: React.FC<AnthropicOAuthSectionProps> = ({
     logout,
     importFromCli,
     isImporting,
-  } = useAnthropicOauth();
+  } = useAnthropicOauth({ pollStatus });
 
   const usableAccounts = accounts.filter((account) => !account.requires_reauth);
 

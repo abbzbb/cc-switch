@@ -605,15 +605,15 @@ function ProviderFormFull({
   const {
     isAuthenticated: isXaiOauthAuthenticated,
     accounts: xaiOauthAccounts,
-  } = useXaiOauth();
+  } = useXaiOauth({ pollStatus: false });
   const {
     isAuthenticated: isKimiOauthAuthenticated,
     accounts: kimiOauthAccounts,
-  } = useKimiOauth();
+  } = useKimiOauth({ pollStatus: false });
   const {
     isAuthenticated: isAnthropicOauthAuthenticated,
     accounts: anthropicOauthAccounts,
-  } = useAnthropicOauth();
+  } = useAnthropicOauth({ pollStatus: false });
 
   // 选中的 GitHub 账号 ID（多账号支持）
   const [selectedGitHubAccountId, setSelectedGitHubAccountId] = useState<
@@ -1934,8 +1934,6 @@ function ProviderFormFull({
         localIsFullUrl
           ? true
           : undefined,
-      routingSlug: routingSlug.trim() || undefined,
-      routingCatalog: routingCatalog ? undefined : false,
     };
 
     if (!isClaudeCodexOauthProvider && "codexFastMode" in nextMeta) {
@@ -2516,10 +2514,8 @@ function ProviderFormFull({
               isXaiOauthAuthenticated={isXaiOauthAuthenticated}
               selectedXaiAccountId={selectedXaiAccountId}
               onXaiAccountSelect={setSelectedXaiAccountId}
-              isKimiOauthAuthenticated={isKimiOauthAuthenticated}
               selectedKimiAccountId={selectedKimiAccountId}
               onKimiAccountSelect={setSelectedKimiAccountId}
-              isAnthropicOauthAuthenticated={isAnthropicOauthAuthenticated}
               selectedAnthropicAccountId={selectedAnthropicAccountId}
               onAnthropicAccountSelect={setSelectedAnthropicAccountId}
               templateValueEntries={templateValueEntries}
@@ -2567,6 +2563,7 @@ function ProviderFormFull({
 
           {appId === "claude" && (
             <RoutingSlugFields
+              appId="claude"
               providerId={providerId}
               providerName={form.watch("name")}
               routingSlug={routingSlug}
@@ -2592,7 +2589,6 @@ function ProviderFormFull({
               selectedXaiAccountId={selectedXaiAccountId}
               onXaiAccountSelect={setSelectedXaiAccountId}
               isKimiOauthPreset={isKimiOauthProvider}
-              isKimiOauthAuthenticated={isKimiOauthAuthenticated}
               selectedKimiAccountId={selectedKimiAccountId}
               onKimiAccountSelect={setSelectedKimiAccountId}
               codexApiKey={codexApiKey}
@@ -2662,6 +2658,7 @@ function ProviderFormFull({
 
           {appId === "codex" && (
             <RoutingSlugFields
+              appId="codex"
               providerId={providerId}
               providerName={form.watch("name")}
               routingSlug={routingSlug}

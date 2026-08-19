@@ -82,6 +82,7 @@ interface ProviderCardProps {
   isRemovalProtected?: boolean;
   isStateChangeProtected?: boolean;
   onSetAsDefault?: (modelId?: string) => void;
+  assignedRoutingSlug?: string;
 }
 
 /** 判断是否为官方供应商（无自定义 base URL / API key，直连官方 API） */
@@ -199,8 +200,10 @@ export function ProviderCard({
   isRemovalProtected,
   isStateChangeProtected,
   onSetAsDefault,
+  assignedRoutingSlug,
 }: ProviderCardProps) {
   const { t } = useTranslation();
+  const routingSlug = assignedRoutingSlug ?? preferredRoutingSlug(provider);
   const codexOfficialIdentity = resolveCodexOfficialIdentity(appId, provider);
   const managedCodexAccountId = resolveManagedAccountId(
     provider.meta,
@@ -522,11 +525,11 @@ export function ProviderCard({
               appId === "claude-desktop") && (
               <p
                 className="text-[11px] font-mono text-muted-foreground truncate"
-                title={preferredRoutingSlug(provider)}
+                title={routingSlug}
               >
                 {t("providerForm.routingSlugBadge", {
                   defaultValue: "路由 {{slug}}",
-                  slug: preferredRoutingSlug(provider),
+                  slug: routingSlug,
                 })}
               </p>
             )}

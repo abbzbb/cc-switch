@@ -29,12 +29,14 @@ interface XaiOAuthSectionProps {
   className?: string;
   selectedAccountId?: string | null;
   onAccountSelect?: (accountId: string | null) => void;
+  pollStatus?: boolean;
 }
 
 export const XaiOAuthSection: React.FC<XaiOAuthSectionProps> = ({
   className,
   selectedAccountId,
   onAccountSelect,
+  pollStatus = true,
 }) => {
   const { t } = useTranslation();
   const [copied, setCopied] = React.useState(false);
@@ -55,7 +57,7 @@ export const XaiOAuthSection: React.FC<XaiOAuthSectionProps> = ({
     setDefaultAccount,
     cancelAuth,
     logout,
-  } = useXaiOauth();
+  } = useXaiOauth({ pollStatus });
 
   const usableAccounts = accounts.filter((account) => !account.requires_reauth);
 

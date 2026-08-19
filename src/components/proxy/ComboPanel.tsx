@@ -18,47 +18,27 @@ import {
   useModelCombos,
   useUpsertModelCombo,
 } from "@/lib/query/proxy";
-import type { ComboStrategy, ComboTarget, ModelCombo } from "@/types/proxy";
+import type { ComboStrategy, ModelCombo } from "@/types/proxy";
+import { useProvidersQuery } from "@/lib/query/queries";
+import { getAppLabel } from "@/config/appConfig";
+import {
+  formatComboTargets,
+  isReservedComboId,
+  isValidComboId,
+  normalizeComboId,
+  parseComboTargets,
+  resolveComboHop,
+} from "@/utils/combo";
+import { assignRoutingSlugs, providersInAssignOrder } from "@/utils/routingSlug";
 import { extractErrorMessage } from "@/utils/errorUtils";
-
-function formatTargets(targets: ComboTarget[]): string {
-  return targets
-    .map((target) => {
-      const route = `${target.provider}/${target.model}`;
-      return target.weight && target.weight !== 1
-        ? `${route}:${target.weight}`
-        : route;
-    })
-    .join("\n");
-}
-
-function parseTargets(text: string): ComboTarget[] {
-  return text
-    .split(/[\n,]+/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((spec) => {
-      const weightMatch = spec.match(/:(\d+)$/);
-      const weight =
-        weightMatch && Number(weightMatch[1]) >= 1
-          ? Number(weightMatch[1])
-          : undefined;
-      const route = weightMatch ? spec.slice(0, spec.lastIndexOf(":")) : spec;
-      const slash = route.indexOf("/");
-      if (slash <= 0 || slash === route.length - 1) {
-        throw new Error(spec);
-      }
-      return {
-        provider: route.slice(0, slash).trim(),
-        model: route.slice(slash + 1).trim(),
-        ...(weight ? { weight } : {}),
-      };
-    });
-}
 
 export function ComboPanel() {
   const { t } = useTranslation();
-  const { data: combos = [], isLoading } = useModelCombos();
+  const { data, isLoading, isError, refetch } = useModelCombos();
+  const combos = data ?? [];
+  const codexProviders = useProvidersQuery("codex");
+  const claudeProviders = useProvidersQuery("claude");
+  const desktopProviders = useProvidersQuery("claude-desktop");
   const upsert = useUpsertModelCombo();
   const remove = useDeleteModelCombo();
   const [id, setId] = useState("");
@@ -66,10 +46,42 @@ export function ComboPanel() {
   const [strategy, setStrategy] = useState<ComboStrategy>("failover");
   const [editingId, setEditingId] = useState<string | null>(null);
 
-  const canonical = useMemo(() => {
-    const trimmed = id.trim();
-    return trimmed ? `combo/${trimmed}` : "combo/{id}";
-  }, [id]);
+  const comboId = normalizeComboId(id);
+  const canonical = useMemo(
+    () => (comboId ? `combo/${comboId}` : "combo/{id}"),
+    [comboId],
+  );
+  const parsedTargets = useMemo(
+    () => parseComboTargets(targetsText),
+    [targetsText],
+  );
+  const resolveApps = useMemo(
+    () => [
+      {
+        appId: "codex" as const,
+        providers: providersInAssignOrder(
+          Object.values(codexProviders.data?.providers ?? {}),
+        ),
+      },
+      {
+        appId: "claude" as const,
+        providers: providersInAssignOrder(
+          Object.values(claudeProviders.data?.providers ?? {}),
+        ),
+      },
+      {
+        appId: "claude-desktop" as const,
+        providers: providersInAssignOrder(
+          Object.values(desktopProviders.data?.providers ?? {}),
+        ),
+      },
+    ],
+    [
+      claudeProviders.data?.providers,
+      codexProviders.data?.providers,
+      desktopProviders.data?.providers,
+    ],
+  );
 
   const resetForm = () => {
     setId("");
@@ -81,32 +93,112 @@ export function ComboPanel() {
   const loadCombo = (combo: ModelCombo) => {
     setEditingId(combo.id);
     setId(combo.id);
-    setTargetsText(formatTargets(combo.targets ?? []));
+    setTargetsText(formatComboTargets(combo.targets ?? []));
     setStrategy(combo.strategy ?? "failover");
   };
 
+  const strategyLabel = (value: ComboStrategy | undefined) =>
+    value === "round-robin"
+      ? t("proxy.combos.strategyRoundRobin", {
+          defaultValue: "round-robin",
+        })
+      : t("proxy.combos.strategyFailover", { defaultValue: "failover" });
+
   const handleSave = async () => {
+    if (!comboId) {
+      toast.error(
+        t("proxy.combos.idRequired", { defaultValue: "请填写 Combo id" }),
+      );
+      return;
+    }
+    if (isReservedComboId(comboId) || !isValidComboId(comboId)) {
+      toast.error(
+        t("proxy.combos.idInvalid", {
+          defaultValue:
+            "Combo id 须以字母或数字开头，可含 . _ -，最长 64，且不能是 combo",
+        }),
+      );
+      return;
+    }
+    const parsed = parseComboTargets(targetsText);
+    if (!parsed.ok) {
+      const spec = parsed.error.spec;
+      const message =
+        parsed.error.kind === "nested_combo"
+          ? t("proxy.combos.nestedCombo", {
+              spec,
+              defaultValue: "目标不能再指向 combo/…：{{spec}}",
+            })
+          : parsed.error.kind === "invalid_weight"
+            ? t("proxy.combos.invalidWeight", {
+                spec,
+                defaultValue: "权重须为 1–10000：{{spec}}",
+              })
+            : parsed.error.kind === "duplicate_target"
+              ? t("proxy.combos.duplicateTarget", {
+                  spec,
+                  defaultValue: "重复目标：{{spec}}",
+                })
+              : t("proxy.combos.invalidTarget", {
+                  spec,
+                  defaultValue: "目标须为 provider/model[:weight]：{{spec}}",
+                });
+      toast.error(message);
+      return;
+    }
+    if (parsed.targets.length === 0) {
+      toast.error(
+        t("proxy.combos.targetsRequired", {
+          defaultValue: "请至少填写一个 provider/model 目标",
+        }),
+      );
+      return;
+    }
+    const idTaken = combos.some(
+      (combo) =>
+        combo.id.toLowerCase() === comboId.toLowerCase() &&
+        combo.id.toLowerCase() !== editingId?.toLowerCase(),
+    );
+    if (idTaken) {
+      toast.error(
+        t("proxy.combos.idExists", {
+          id: comboId,
+          defaultValue: "Combo id {{id}} 已存在",
+        }),
+      );
+      return;
+    }
+    const reservedSlugs = new Set(
+      resolveApps.flatMap((app) => [
+        ...assignRoutingSlugs(app.providers).values(),
+      ]),
+    );
+    if (reservedSlugs.has(comboId.toLowerCase())) {
+      toast.error(
+        t("proxy.combos.idCollidesSlug", {
+          id: comboId,
+          defaultValue: "Combo id {{id}} 与供应商路由 slug 冲突",
+        }),
+      );
+      return;
+    }
+    const renaming =
+      Boolean(editingId) &&
+      editingId!.toLowerCase() !== comboId.toLowerCase();
+    const stickySource = combos.find(
+      (combo) =>
+        combo.id.toLowerCase() ===
+        (editingId ?? comboId).toLowerCase(),
+    );
     try {
-      const targets = parseTargets(targetsText);
-      if (!id.trim()) {
-        toast.error(
-          t("proxy.combos.idRequired", { defaultValue: "请填写 Combo id" }),
-        );
-        return;
-      }
-      if (targets.length === 0) {
-        toast.error(
-          t("proxy.combos.targetsRequired", {
-            defaultValue: "请至少填写一个 provider/model 目标",
-          }),
-        );
-        return;
-      }
       await upsert.mutateAsync({
-        id: id.trim(),
-        targets,
-        strategy,
-        stickyLimit: 1,
+        combo: {
+          id: comboId,
+          targets: parsed.targets,
+          strategy,
+          stickyLimit: stickySource?.stickyLimit ?? 1,
+        },
+        previousId: renaming && editingId ? editingId : undefined,
       });
       toast.success(t("proxy.combos.saved", { defaultValue: "Combo 已保存" }), {
         closeButton: true,
@@ -120,10 +212,20 @@ export function ComboPanel() {
     }
   };
 
-  const handleDelete = async (comboId: string) => {
+  const handleDelete = async (rawId: string) => {
+    if (
+      !window.confirm(
+        t("proxy.combos.deleteConfirm", {
+          id: rawId,
+          defaultValue: "确定删除 combo/{{id}}？",
+        }),
+      )
+    ) {
+      return;
+    }
     try {
-      await remove.mutateAsync(comboId);
-      if (editingId === comboId) {
+      await remove.mutateAsync(rawId);
+      if (editingId === rawId) {
         resetForm();
       }
       toast.success(
@@ -147,23 +249,35 @@ export function ComboPanel() {
         <p className="text-xs text-muted-foreground mt-1">
           {t("proxy.combos.description", {
             defaultValue:
-              "请求 combo/{id} 会按目标列表转发。failover 按顺序尝试；round-robin 按权重选择第一跳，失败仍会继续后面的目标。",
+              "请求 combo/{id} 会按目标列表转发。failover 按顺序尝试；round-robin 按权重选择第一跳，失败仍会继续后面的目标。Claude 选择器里是 anthropic/combo/{id}。Combo 由所有目录应用共享。",
           })}
         </p>
       </div>
 
-      {isLoading ? (
+      {isError ? (
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs text-destructive">
+            {t("proxy.combos.loadFailed", {
+              defaultValue: "无法加载 Combo 列表",
+            })}
+          </p>
+          <Button size="sm" variant="outline" onClick={() => void refetch()}>
+            {t("common.retry", { defaultValue: "重试" })}
+          </Button>
+        </div>
+      ) : null}
+      {isLoading && combos.length === 0 ? (
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
           {t("common.loading", { defaultValue: "加载中…" })}
         </div>
-      ) : combos.length === 0 ? (
+      ) : combos.length === 0 && !isError ? (
         <p className="text-xs text-muted-foreground">
           {t("proxy.combos.empty", {
             defaultValue: "还没有 Combo。用 kimi/k2 这种目标加一条。",
           })}
         </p>
-      ) : (
+      ) : combos.length === 0 ? null : (
         <div className="space-y-2">
           {combos.map((combo) => (
             <div
@@ -177,10 +291,8 @@ export function ComboPanel() {
               >
                 <p className="text-sm font-medium truncate">combo/{combo.id}</p>
                 <p className="text-xs text-muted-foreground truncate">
-                  {combo.strategy === "round-robin"
-                    ? "round-robin"
-                    : "failover"}{" "}
-                  · {formatTargets(combo.targets ?? []).replace(/\n/g, ", ")}
+                  {strategyLabel(combo.strategy)} ·{" "}
+                  {formatComboTargets(combo.targets ?? []).replace(/\n/g, ", ")}
                 </p>
               </button>
               <Button
@@ -221,8 +333,12 @@ export function ComboPanel() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="failover">failover</SelectItem>
-              <SelectItem value="round-robin">round-robin</SelectItem>
+              <SelectItem value="failover">
+                {strategyLabel("failover")}
+              </SelectItem>
+              <SelectItem value="round-robin">
+                {strategyLabel("round-robin")}
+              </SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -239,9 +355,86 @@ export function ComboPanel() {
           placeholder={"kimi/k2\ndeepseek/deepseek-v4:1"}
           rows={3}
         />
+        {targetsText.trim() && !parsedTargets.ok ? (
+          <p className="text-[11px] text-destructive">
+            {parsedTargets.error.kind === "nested_combo"
+              ? t("proxy.combos.nestedCombo", {
+                  spec: parsedTargets.error.spec,
+                  defaultValue: "目标不能再指向 combo/…：{{spec}}",
+                })
+              : parsedTargets.error.kind === "invalid_weight"
+                ? t("proxy.combos.invalidWeight", {
+                    spec: parsedTargets.error.spec,
+                    defaultValue: "权重须为 1–10000：{{spec}}",
+                  })
+                : parsedTargets.error.kind === "duplicate_target"
+                  ? t("proxy.combos.duplicateTarget", {
+                      spec: parsedTargets.error.spec,
+                      defaultValue: "重复目标：{{spec}}",
+                    })
+                  : t("proxy.combos.invalidTarget", {
+                      spec: parsedTargets.error.spec,
+                      defaultValue: "目标须为 provider/model[:weight]：{{spec}}",
+                    })}
+          </p>
+        ) : null}
+        {parsedTargets.ok && parsedTargets.targets.length > 0 ? (
+          <div className="space-y-1.5">
+            {parsedTargets.targets.map((target, index) => {
+              const route = `${target.provider}/${target.model}`;
+              const hops = resolveApps.map((app) => ({
+                appId: app.appId,
+                ...resolveComboHop(target, app.providers),
+              }));
+              const anyMatched = hops.some((hop) => hop.matched);
+              const canResolveHops = resolveApps.some(
+                (app) => app.providers.length > 0,
+              );
+              return (
+                <div key={`${route}-${index}`} className="space-y-0.5">
+                  <p className="text-[11px] text-muted-foreground">
+                    {route}
+                    {target.weight && target.weight !== 1
+                      ? `:${target.weight}`
+                      : ""}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground">
+                    {hops
+                      .map((hop) =>
+                        hop.matched
+                          ? t("proxy.combos.hopMatched", {
+                              app: getAppLabel(hop.appId),
+                              slug: hop.assignedSlug ?? hop.providerId,
+                              defaultValue: "{{app}}：{{slug}}",
+                            })
+                          : t("proxy.combos.hopUnmatched", {
+                              app: getAppLabel(hop.appId),
+                              defaultValue: "{{app}}：未匹配",
+                            }),
+                      )
+                      .join(" · ")}
+                  </p>
+                  {!anyMatched && canResolveHops ? (
+                    <p className="text-[11px] text-amber-600 dark:text-amber-500">
+                      {t("proxy.combos.hopDropped", {
+                        route,
+                        defaultValue:
+                          "请求时会跳过 {{route}}：没有目录应用的卡匹配这个 slug 或 id。",
+                      })}
+                    </p>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
       </div>
       <div className="flex gap-2">
-        <Button size="sm" onClick={handleSave} disabled={upsert.isPending}>
+        <Button
+          size="sm"
+          onClick={handleSave}
+          disabled={upsert.isPending || remove.isPending}
+        >
           {upsert.isPending ? (
             <Loader2 className="h-4 w-4 animate-spin" />
           ) : (

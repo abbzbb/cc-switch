@@ -5,8 +5,8 @@ import { useTranslation } from "react-i18next";
 import { authApi } from "@/lib/api";
 import { useManagedAuth } from "./useManagedAuth";
 
-export function useAnthropicOauth() {
-  const managed = useManagedAuth("anthropic_oauth");
+export function useAnthropicOauth(options?: { pollStatus?: boolean }) {
+  const managed = useManagedAuth("anthropic_oauth", options);
   const queryClient = useQueryClient();
   const { t } = useTranslation();
   const queryKey = ["managed-auth-status", "anthropic_oauth"];

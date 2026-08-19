@@ -98,8 +98,11 @@ export const proxyApi = {
     return invoke("list_model_combos");
   },
 
-  async upsertModelCombo(combo: ModelCombo): Promise<ModelCombo> {
-    return invoke("upsert_model_combo", { combo });
+  async upsertModelCombo(
+    combo: ModelCombo,
+    previousId?: string,
+  ): Promise<ModelCombo> {
+    return invoke("upsert_model_combo", { combo, previousId });
   },
 
   async deleteModelCombo(id: string): Promise<void> {

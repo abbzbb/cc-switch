@@ -323,7 +323,7 @@ export function ProxyPanel({
 
         <RoutingCatalogPanel takeoverByApp={takeoverStatus} />
         <ComboPanel />
-        <SidecarPanel />
+        <SidecarPanel proxyRunning={isRunning} />
 
         {/* Running state: service info + stats */}
         {isRunning && status ? (

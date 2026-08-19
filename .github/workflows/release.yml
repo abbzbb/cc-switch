@@ -21,6 +21,7 @@ concurrency:
 jobs:
   release:
     runs-on: ${{ matrix.os }}
+    environment: release
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     continue-on-error: ${{ matrix.os == 'windows-11-arm' || matrix.os == 'macos-14' }}
@@ -40,9 +41,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          # Tag pushes build that commit. Manual runs build the selected workflow ref
-          # so unsigned-release workflow fixes are included even if the tag is older.
-          ref: ${{ github.ref }}
+          # Tag pushes build that commit. Manual dispatch builds the named tag,
+          # never the workflow branch, so release assets cannot drift from the tag.
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.sha }}
+
+      - name: Verify checkout matches release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="${{ env.RELEASE_TAG }}"
+          git fetch --tags --force origin "refs/tags/${expected}:refs/tags/${expected}" || true
+          tag_sha="$(git rev-parse "refs/tags/${expected}^{commit}")"
+          head_sha="$(git rev-parse HEAD)"
+          if [ "$tag_sha" != "$head_sha" ]; then
+            echo "Refusing to build $expected: tag is $tag_sha but HEAD is $head_sha" >&2
+            exit 1
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -670,7 +684,8 @@ jobs:
     name: Publish GitHub Release
     runs-on: ubuntu-22.04
     needs: release
-    if: ${{ always() && !cancelled() }}
+    environment: release
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     permissions:
@@ -689,12 +704,23 @@ jobs:
           set -euo pipefail
           ls -la release-assets
 
+      - name: Decide prerelease
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if find release-assets -name '*.sig' | grep -q .; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: CC Switch ${{ env.RELEASE_TAG }}
-          prerelease: false
+          prerelease: ${{ steps.meta.outputs.prerelease }}
           body: |
             ## CC Switch ${{ env.RELEASE_TAG }}
 

@@ -8,6 +8,8 @@ const apiMocks = vi.hoisted(() => ({
   authGetStatus: vi.fn(),
   authRemoveAccount: vi.fn(),
   authCancelLogin: vi.fn(),
+  authStartLogin: vi.fn(),
+  authPollForAccount: vi.fn(),
 }));
 const toastMocks = vi.hoisted(() => ({
   success: vi.fn(),
@@ -19,8 +21,13 @@ vi.mock("@/lib/api", () => ({
     authRemoveAccount: (...args: unknown[]) =>
       apiMocks.authRemoveAccount(...args),
     authCancelLogin: (...args: unknown[]) => apiMocks.authCancelLogin(...args),
+    authStartLogin: (...args: unknown[]) => apiMocks.authStartLogin(...args),
+    authPollForAccount: (...args: unknown[]) =>
+      apiMocks.authPollForAccount(...args),
   },
-  settingsApi: {},
+  settingsApi: {
+    openExternal: vi.fn().mockResolvedValue(undefined),
+  },
 }));
 
 vi.mock("sonner", () => ({
@@ -66,6 +73,14 @@ describe("useManagedAuth", () => {
     });
     apiMocks.authRemoveAccount.mockReset().mockResolvedValue(undefined);
     apiMocks.authCancelLogin.mockReset().mockResolvedValue(undefined);
+    apiMocks.authStartLogin.mockReset().mockResolvedValue({
+      device_code: "dev",
+      user_code: "BROWSER",
+      verification_uri: "https://example.com",
+      interval: 2,
+      expires_in: 60,
+    });
+    apiMocks.authPollForAccount.mockReset().mockResolvedValue(null);
   });
 
   it("shows a success toast after removing an account", async () => {
@@ -99,6 +114,8 @@ describe("useManagedAuth", () => {
     });
     await waitFor(() => expect(result.current.isStatusSuccess).toBe(true));
 
+    act(() => result.current.startAuth());
+    await waitFor(() => expect(result.current.isPolling).toBe(true));
     act(() => result.current.cancelAuth());
 
     await waitFor(() =>

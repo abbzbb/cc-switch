@@ -12,10 +12,24 @@ import type {
 
 type PollingState = "idle" | "polling" | "success" | "error";
 
+type ManagedAuthOptions = {
+  githubDomain?: string;
+  /** When false, skip the 15s status refresh. Default true for Auth Center. */
+  pollStatus?: boolean;
+};
+
 export function useManagedAuth(
   authProvider: ManagedAuthProvider,
-  githubDomain?: string,
+  githubDomainOrOptions?: string | ManagedAuthOptions,
 ) {
+  const githubDomain =
+    typeof githubDomainOrOptions === "string"
+      ? githubDomainOrOptions
+      : githubDomainOrOptions?.githubDomain;
+  const pollStatus =
+    typeof githubDomainOrOptions === "string"
+      ? true
+      : (githubDomainOrOptions?.pollStatus ?? true);
   const queryClient = useQueryClient();
   const { t } = useTranslation();
   const queryKey = ["managed-auth-status", authProvider];
@@ -29,6 +43,8 @@ export function useManagedAuth(
     null,
   );
   const pollingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollingStateRef = useRef<PollingState>("idle");
+  const ownsLoginRef = useRef(false);
 
   const {
     data: authStatus,
@@ -44,9 +60,10 @@ export function useManagedAuth(
     // proxy hot path. Periodically refresh local status so an already-open Auth
     // Center stops showing the account as logged in without requiring a reload.
     refetchInterval:
-      authProvider === "xai_oauth" ||
-      authProvider === "kimi_oauth" ||
-      authProvider === "anthropic_oauth"
+      pollStatus &&
+      (authProvider === "xai_oauth" ||
+        authProvider === "kimi_oauth" ||
+        authProvider === "anthropic_oauth")
         ? 15_000
         : false,
   });
@@ -63,14 +80,28 @@ export function useManagedAuth(
   }, []);
 
   useEffect(() => {
+    pollingStateRef.current = pollingState;
+  }, [pollingState]);
+
+  useEffect(() => {
     return () => {
       stopPolling();
+      if (ownsLoginRef.current && authProvider === "anthropic_oauth") {
+        ownsLoginRef.current = false;
+        void authApi.authCancelLogin(authProvider).catch(() => undefined);
+      }
     };
-  }, [stopPolling]);
+  }, [authProvider, stopPolling]);
 
   const startLoginMutation = useMutation({
     mutationFn: () => authApi.authStartLogin(authProvider, githubDomain),
     onSuccess: async (response) => {
+      if (!ownsLoginRef.current) {
+        if (authProvider === "anthropic_oauth") {
+          void authApi.authCancelLogin(authProvider).catch(() => undefined);
+        }
+        return;
+      }
       setDeviceCode(response);
       setPollingState("polling");
       setError(null);
@@ -99,7 +130,11 @@ export function useManagedAuth(
         if (Date.now() > expiresAt) {
           stopPolling();
           setPollingState("error");
-          setError("Device code expired. Please try again.");
+          setError(
+            t("managedAuth.deviceCodeExpired", {
+              defaultValue: "Device code expired. Please try again.",
+            }),
+          );
           return;
         }
 
@@ -110,6 +145,7 @@ export function useManagedAuth(
             githubDomain,
           );
           if (newAccount) {
+            ownsLoginRef.current = false;
             stopPolling();
             setPollingState("success");
             await refetchStatus();
@@ -135,10 +171,15 @@ export function useManagedAuth(
       pollingTimeoutRef.current = setTimeout(() => {
         stopPolling();
         setPollingState("error");
-        setError("Device code expired. Please try again.");
+        setError(
+          t("managedAuth.deviceCodeExpired", {
+            defaultValue: "Device code expired. Please try again.",
+          }),
+        );
       }, response.expires_in * 1000);
     },
     onError: (e) => {
+      ownsLoginRef.current = false;
       setPollingState("error");
       setError(e instanceof Error ? e.message : String(e));
     },
@@ -200,6 +241,7 @@ export function useManagedAuth(
   });
 
   const startAuth = useCallback(() => {
+    ownsLoginRef.current = true;
     setPollingState("idle");
     setDeviceCode(null);
     setError(null);
@@ -208,11 +250,13 @@ export function useManagedAuth(
   }, [startLoginMutation, stopPolling]);
 
   const cancelAuth = useCallback(() => {
+    const owned = ownsLoginRef.current;
+    ownsLoginRef.current = false;
     stopPolling();
     setPollingState("idle");
     setDeviceCode(null);
     setError(null);
-    if (authProvider === "anthropic_oauth") {
+    if (owned && authProvider === "anthropic_oauth") {
       void authApi.authCancelLogin(authProvider).catch(() => undefined);
     }
   }, [authProvider, stopPolling]);

@@ -152,8 +152,13 @@ export function useModelCombos() {
 export function useUpsertModelCombo() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (combo: import("@/types/proxy").ModelCombo) =>
-      proxyApi.upsertModelCombo(combo),
+    mutationFn: ({
+      combo,
+      previousId,
+    }: {
+      combo: import("@/types/proxy").ModelCombo;
+      previousId?: string;
+    }) => proxyApi.upsertModelCombo(combo, previousId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: proxyKeys.combos });
     },
@@ -200,6 +205,17 @@ export function useUpdateSidecarSettings() {
   return useMutation({
     mutationFn: (settings: import("@/types/proxy").SidecarSettings) =>
       proxyApi.updateSidecarSettings(settings),
+    onMutate: async (settings) => {
+      await queryClient.cancelQueries({ queryKey: proxyKeys.sidecars });
+      const previous = queryClient.getQueryData(proxyKeys.sidecars);
+      queryClient.setQueryData(proxyKeys.sidecars, settings);
+      return { previous };
+    },
+    onError: (_error, _settings, context) => {
+      if (context?.previous !== undefined) {
+        queryClient.setQueryData(proxyKeys.sidecars, context.previous);
+      }
+    },
     onSuccess: (settings) => {
       queryClient.setQueryData(proxyKeys.sidecars, settings);
     },

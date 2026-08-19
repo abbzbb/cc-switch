@@ -32,6 +32,8 @@ pub struct ProviderSelection {
     pub providers: Vec<Provider>,
     /// When set (combo routes), rewrite `body.model` to this id for each attempt.
     pub attempt_upstream_models: Option<Vec<String>>,
+    /// True only for classic failover. Pin / combo / pool must not change current.
+    pub promote_current_on_success: bool,
 }
 
 impl ProviderSelection {
@@ -39,6 +41,7 @@ impl ProviderSelection {
         Self {
             providers,
             attempt_upstream_models: None,
+            promote_current_on_success: true,
         }
     }
 }
@@ -53,6 +56,7 @@ fn selection_from_resolved(targets: Vec<ResolvedComboTarget>) -> ProviderSelecti
     ProviderSelection {
         providers: targets.into_iter().map(|target| target.provider).collect(),
         attempt_upstream_models,
+        promote_current_on_success: false,
     }
 }
 
@@ -157,6 +161,10 @@ impl ProviderRouter {
             combo_rr: Arc::new(RwLock::new(HashMap::new())),
             official_pool,
         }
+    }
+
+    pub fn inbound_capability_tokens(&self) -> Vec<String> {
+        crate::proxy::inbound_auth::inbound_capability_tokens(&self.db)
     }
 
     /// 选择可用的供应商（支持故障转移）
@@ -291,14 +299,22 @@ impl ProviderRouter {
                     .ok_or_else(|| {
                         AppError::InvalidInput(format!("unknown routed provider '{request_model}'"))
                     })?;
-                Ok(ProviderSelection::from_providers(vec![provider]))
+                Ok(ProviderSelection {
+                    providers: vec![provider],
+                    attempt_upstream_models: None,
+                    promote_current_on_success: false,
+                })
             }
             crate::proxy::model_routing::ModelRouteDecision::Default => {
                 if let Some(pooled) = self
                     .try_official_pool(app_type, request_model, &all_providers, session_id)
                     .await
                 {
-                    return Ok(ProviderSelection::from_providers(vec![pooled]));
+                    return Ok(ProviderSelection {
+                        providers: vec![pooled],
+                        attempt_upstream_models: None,
+                        promote_current_on_success: false,
+                    });
                 }
                 self.select_providers(app_type)
                     .await
@@ -1105,6 +1121,7 @@ mod tests {
             .unwrap();
         assert_eq!(pinned.providers.len(), 1);
         assert_eq!(pinned.providers[0].id, "deepseek");
+        assert!(!pinned.promote_current_on_success);
 
         let unique = router
             .select_providers_for_request("codex", "k2")
@@ -1345,6 +1362,7 @@ mod tests {
             selected.attempt_upstream_models.as_deref(),
             Some(["deepseek-v4".to_string(), "k2".to_string()].as_slice())
         );
+        assert!(!selected.promote_current_on_success);
 
         let claude = router
             .select_providers_for_request("codex", "anthropic/combo/main")

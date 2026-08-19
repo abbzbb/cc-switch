@@ -31,6 +31,7 @@ interface KimiOAuthSectionProps {
   selectedAccountId?: string | null;
   onAccountSelect?: (accountId: string | null) => void;
   showAccountQuota?: boolean;
+  pollStatus?: boolean;
 }
 
 export const KimiOAuthSection: React.FC<KimiOAuthSectionProps> = ({
@@ -38,6 +39,7 @@ export const KimiOAuthSection: React.FC<KimiOAuthSectionProps> = ({
   selectedAccountId,
   onAccountSelect,
   showAccountQuota = false,
+  pollStatus = true,
 }) => {
   const { t } = useTranslation();
   const [copied, setCopied] = React.useState(false);
@@ -58,7 +60,7 @@ export const KimiOAuthSection: React.FC<KimiOAuthSectionProps> = ({
     setDefaultAccount,
     cancelAuth,
     logout,
-  } = useKimiOauth();
+  } = useKimiOauth({ pollStatus });
 
   const usableAccounts = accounts.filter((account) => !account.requires_reauth);
 

@@ -108,11 +108,9 @@ interface ClaudeFormFieldsProps {
   selectedXaiAccountId?: string | null;
   onXaiAccountSelect?: (accountId: string | null) => void;
   isKimiOauthPreset?: boolean;
-  isKimiOauthAuthenticated?: boolean;
   selectedKimiAccountId?: string | null;
   onKimiAccountSelect?: (accountId: string | null) => void;
   isAnthropicOauthPreset?: boolean;
-  isAnthropicOauthAuthenticated?: boolean;
   selectedAnthropicAccountId?: string | null;
   onAnthropicAccountSelect?: (accountId: string | null) => void;
 
@@ -700,6 +698,7 @@ export function ClaudeFormFields({
         <XaiOAuthSection
           selectedAccountId={selectedXaiAccountId}
           onAccountSelect={onXaiAccountSelect}
+          pollStatus={false}
         />
       )}
 
@@ -707,6 +706,7 @@ export function ClaudeFormFields({
         <KimiOAuthSection
           selectedAccountId={selectedKimiAccountId}
           onAccountSelect={onKimiAccountSelect}
+          pollStatus={false}
         />
       )}
 
@@ -714,6 +714,7 @@ export function ClaudeFormFields({
         <AnthropicOAuthSection
           selectedAccountId={selectedAnthropicAccountId}
           onAccountSelect={onAnthropicAccountSelect}
+          pollStatus={false}
         />
       )}
 

@@ -275,6 +275,14 @@ fn inference_model_json(spec: &InferenceModelSpec) -> Value {
     }
 }
 
+pub fn existing_gateway_token(db: &Database) -> Option<String> {
+    db.get_setting(GATEWAY_TOKEN_SETTING_KEY)
+        .ok()
+        .flatten()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
 pub fn get_or_create_gateway_token(db: &Database) -> Result<String, AppError> {
     if let Some(token) = db.get_setting(GATEWAY_TOKEN_SETTING_KEY)? {
         let trimmed = token.trim();

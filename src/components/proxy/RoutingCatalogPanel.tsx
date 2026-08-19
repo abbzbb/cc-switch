@@ -1,11 +1,15 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { useProvidersQuery } from "@/lib/query/queries";
 import { useSetProviderRoutingCatalog } from "@/lib/query/proxy";
 import { getAppLabel } from "@/config/appConfig";
-import { preferredRoutingSlug } from "@/utils/routingSlug";
+import {
+  assignRoutingSlugs,
+  providersInAssignOrder,
+} from "@/utils/routingSlug";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import type { Provider } from "@/types";
 import type { ProxyTakeoverStatus } from "@/types/proxy";
@@ -25,14 +29,38 @@ function AppCatalogGroup({
   takeoverOn: boolean;
 }) {
   const { t } = useTranslation();
-  const { data } = useProvidersQuery(appId);
+  const { data, isError, isPending, refetch } = useProvidersQuery(appId);
   const setCatalog = useSetProviderRoutingCatalog();
 
   const providers = useMemo(
-    () => Object.values(data?.providers ?? {}),
+    () => providersInAssignOrder(Object.values(data?.providers ?? {})),
     [data?.providers],
   );
+  const assignedSlugs = useMemo(
+    () => assignRoutingSlugs(providers),
+    [providers],
+  );
   const currentId = data?.currentProviderId ?? "";
+
+  if (isPending && !data) {
+    return null;
+  }
+
+  if (isError && providers.length === 0) {
+    return (
+      <div className="flex items-center justify-between gap-2 px-1">
+        <span className="text-xs text-destructive">
+          {t("proxy.routingCards.loadFailed", {
+            app: getAppLabel(appId),
+            defaultValue: "无法加载 {{app}} 的路由目录",
+          })}
+        </span>
+        <Button size="sm" variant="outline" onClick={() => void refetch()}>
+          {t("common.retry", { defaultValue: "重试" })}
+        </Button>
+      </div>
+    );
+  }
 
   if (providers.length === 0) {
     return null;
@@ -85,15 +113,14 @@ function AppCatalogGroup({
       </div>
       <div className="space-y-1.5">
         {providers.map((provider) => {
-          const slug = preferredRoutingSlug({
-            id: provider.id,
-            name: provider.name,
-            meta: { routingSlug: provider.meta?.routingSlug },
-          });
+          const slug =
+            assignedSlugs.get(provider.id) ?? provider.id.toLowerCase();
           const enabled = isCatalogEnabled(provider);
           const isCurrent = provider.id === currentId;
           const pending =
-            setCatalog.isPending && setCatalog.variables?.id === provider.id;
+            setCatalog.isPending &&
+            setCatalog.variables?.app === appId &&
+            setCatalog.variables?.id === provider.id;
           return (
             <div
               key={provider.id}
@@ -106,7 +133,9 @@ function AppCatalogGroup({
                   </span>
                   {isCurrent && (
                     <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-primary/15 text-primary">
-                      {t("provider.inUse")}
+                      {t("proxy.routingCards.homeCurrent", {
+                        defaultValue: "当前接管",
+                      })}
                     </span>
                   )}
                 </div>
@@ -153,7 +182,7 @@ export function RoutingCatalogPanel({
         <p className="text-xs text-muted-foreground">
           {t("proxy.routingCards.description", {
             defaultValue:
-              "勾选要出现在选择器里的供应商配置。平台开关只决定要不要接管该应用；这里决定合并目录里出现哪几张卡。关闭后仍可用 slug 前缀请求。Gemini / Grok 没有合并目录，继续用当前配置 + 故障转移队列。",
+              "勾选要出现在选择器里的供应商配置。平台开关只决定要不要接管该应用；这里决定合并目录里出现哪几张卡。关闭后仍可用 slug 前缀请求。Gemini / Grok 没有合并目录，继续用当前配置 + 故障转移队列。新卡默认加入。使用中的徽章表示接管当前卡，不是上次 pin/combo 请求。",
           })}
         </p>
       </div>

@@ -43,10 +43,12 @@ pub struct RequestContext {
     providers: Vec<Provider>,
     /// Combo 路由时与 `providers` 等长，按尝试改写上游 model。
     attempt_upstream_models: Option<Vec<String>>,
+    /// Pin / combo / pool must not rewrite the durable current provider.
+    promote_current_on_success: bool,
     /// 请求开始时的"当前供应商"（用于判断是否需要同步 UI/托盘）
     ///
     /// 这里使用本地 settings 的设备级 current provider。
-    /// 代理模式下如果实际使用的 provider 与此不一致，会触发切换以确保 UI 始终准确。
+    /// 仅经典故障转移成功时才会提升当前供应商；pin / combo / pool 不会改写。
     pub current_provider_id: String,
     /// 请求中的模型名称
     pub request_model: String,
@@ -155,6 +157,7 @@ impl RequestContext {
             })?;
         let providers = selection.providers;
         let attempt_upstream_models = selection.attempt_upstream_models;
+        let promote_current_on_success = selection.promote_current_on_success;
 
         let provider = providers
             .first()
@@ -176,6 +179,7 @@ impl RequestContext {
             provider,
             providers,
             attempt_upstream_models,
+            promote_current_on_success,
             current_provider_id,
             request_model,
             outbound_model: None,
@@ -261,6 +265,7 @@ impl RequestContext {
             max_retries,
         )
         .with_attempt_upstream_models(self.attempt_upstream_models.clone())
+        .with_promote_current_on_success(self.promote_current_on_success)
         .with_codex_oauth_manager(state.codex_oauth_manager.clone())
         .with_kimi_oauth_manager(state.kimi_oauth_manager.clone())
         .with_anthropic_oauth_manager(state.anthropic_oauth_manager.clone())

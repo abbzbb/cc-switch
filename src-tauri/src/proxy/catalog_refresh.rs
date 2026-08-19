@@ -7,14 +7,13 @@
 
 use crate::codex_config::{extract_codex_api_key, extract_codex_base_url};
 use crate::provider::Provider;
+use crate::proxy::inbound_auth::is_proxy_auth_placeholder;
 use crate::proxy::model_routing::{
     load_routing_discovery_cache, save_routing_discovery_cache, MAX_DISCOVERED_MODELS_PER_CARD,
 };
 use crate::proxy::providers::is_codex_official_provider;
 use crate::services::model_fetch::{self, FetchedModel};
 use std::collections::HashMap;
-
-const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
 
 pub fn catalog_fetch_disabled() -> bool {
     std::env::var("CC_SWITCH_TEST_HOME").is_ok()
@@ -53,7 +52,7 @@ pub fn provider_fetch_api_key(provider: &Provider) -> Option<String> {
         .get("config")
         .and_then(|value| value.as_str());
     let key = extract_codex_api_key(auth, config)?;
-    if key == PROXY_AUTH_PLACEHOLDER {
+    if is_proxy_auth_placeholder(&key) {
         return None;
     }
     Some(key)

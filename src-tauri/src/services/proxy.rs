@@ -736,6 +736,7 @@ impl ProxyService {
             &proxy_url,
             &effective_provider,
         );
+        self.attach_inbound_to_claude_config(&mut effective_settings);
         self.write_claude_live(&effective_settings)?;
         Ok(())
     }
@@ -2059,6 +2060,7 @@ impl ProxyService {
                 &proxy_url,
                 &claude_provider,
             );
+            self.attach_inbound_to_claude_config(&mut live_config);
             self.write_claude_live(&live_config)?;
             log::info!("Claude Live 配置已接管，代理地址: {proxy_url}");
         }
@@ -2117,6 +2119,7 @@ impl ProxyService {
                     &proxy_url,
                     &claude_provider,
                 );
+                self.attach_inbound_to_claude_config(&mut live_config);
                 self.write_claude_live(&live_config)?;
                 log::info!("Claude Live 配置已接管，代理地址: {proxy_url}");
             }
@@ -2189,6 +2192,7 @@ impl ProxyService {
                             ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken,
                         );
                     }
+                    self.attach_inbound_to_claude_config(&mut live_config);
                     let _ = self.write_claude_live(&live_config);
                 }
             }
@@ -2610,6 +2614,24 @@ impl ProxyService {
             .unwrap_or(false)
         {
             env.remove("ANTHROPIC_BASE_URL");
+        }
+
+        if let Some(headers) = env
+            .get("ANTHROPIC_CUSTOM_HEADERS")
+            .and_then(|value| value.as_str())
+        {
+            let cleaned = headers
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .filter(|line| !line.to_ascii_lowercase().starts_with("x-cc-switch-proxy:"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if cleaned.is_empty() {
+                env.remove("ANTHROPIC_CUSTOM_HEADERS");
+            } else {
+                env.insert("ANTHROPIC_CUSTOM_HEADERS".to_string(), json!(cleaned));
+            }
         }
 
         self.write_claude_live(&config)?;
@@ -3579,6 +3601,19 @@ impl ProxyService {
         Ok(value)
     }
 
+    fn attach_inbound_to_claude_config(&self, config: &mut Value) {
+        if let Ok(token) = crate::proxy::inbound_auth::get_or_create_inbound_token(&self.db) {
+            crate::proxy::inbound_auth::attach_claude_inbound_header(config, &token);
+        }
+    }
+
+    fn attach_inbound_to_codex_toml(&self, config_text: &str) -> Result<String, String> {
+        let token = crate::proxy::inbound_auth::get_or_create_inbound_token(&self.db)
+            .map_err(|error| error.to_string())?;
+        crate::proxy::inbound_auth::attach_codex_inbound_http_header(config_text, &token)
+            .map_err(|error| error.to_string())
+    }
+
     fn write_claude_live(&self, config: &Value) -> Result<(), String> {
         let path = get_claude_settings_path();
         let settings = crate::services::provider::sanitize_claude_settings_for_live(config);
@@ -3678,6 +3713,7 @@ impl ProxyService {
                     config, config_str, profile,
                 )
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
+            let prepared_config = self.attach_inbound_to_codex_toml(&prepared_config)?;
             if managed_official {
                 let auth = config
                     .get("auth")
@@ -3709,7 +3745,14 @@ impl ProxyService {
             return self.write_merged_codex_routing_catalog_from_db();
         }
 
-        self.write_codex_live_for_provider(config, provider)?;
+        let mut config = config.clone();
+        if let Some(toml) = config.get("config").and_then(|value| value.as_str()) {
+            let attached = self.attach_inbound_to_codex_toml(toml)?;
+            if let Some(root) = config.as_object_mut() {
+                root.insert("config".to_string(), json!(attached));
+            }
+        }
+        self.write_codex_live_for_provider(&config, provider)?;
         self.write_merged_codex_routing_catalog_from_db()
     }
 
@@ -10866,12 +10909,15 @@ experimental_bearer_token = "PROXY_MANAGED"
 
         let status = service.get_status().await.expect("proxy status");
         let proxy_base = format!("http://127.0.0.1:{}", status.port);
+        let inbound =
+            crate::proxy::inbound_auth::get_or_create_inbound_token(&db).expect("inbound token");
         let client = reqwest::Client::new();
 
         let pinned = client
             .post(format!("{proxy_base}/v1/responses"))
             .header(header::AUTHORIZATION, "Bearer account-a-session")
             .header("chatgpt-account-id", "account-a")
+            .header("x-cc-switch-proxy", &inbound)
             .json(&json!({
                 "model": "backup/gpt-5.5",
                 "input": "hi"
@@ -10888,6 +10934,7 @@ experimental_bearer_token = "PROXY_MANAGED"
         let managed = client
             .post(format!("{proxy_base}/v1/responses"))
             .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .header("x-cc-switch-proxy", &inbound)
             .json(&json!({
                 "model": "backup/gpt-5.5",
                 "input": "hi"
@@ -10988,9 +11035,12 @@ experimental_bearer_token = "PROXY_MANAGED"
             .expect("enable Codex takeover");
 
         let status = service.get_status().await.expect("proxy status");
+        let inbound =
+            crate::proxy::inbound_auth::get_or_create_inbound_token(&db).expect("inbound token");
         let response = reqwest::Client::new()
             .post(format!("http://127.0.0.1:{}/v1/responses", status.port))
             .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .header("x-cc-switch-proxy", inbound)
             .json(&json!({
                 "model": "gpt-5.5",
                 "input": "hi"

@@ -16,13 +16,13 @@
 //! still hit `backup/gpt-5.5`.
 
 use crate::provider::Provider;
+use crate::proxy::inbound_auth::{is_legacy_placeholder, presents_inbound_secret};
 use crate::proxy::providers::is_codex_official_provider;
 use http::HeaderMap;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
 const AFFINITY_CAP: usize = 1024;
 pub const OFFICIAL_POOL_COOLDOWN: Duration = Duration::from_secs(60);
 /// Hottest-window utilization at or above this may rebind a live thread.
@@ -204,7 +204,7 @@ pub fn pool_card_secret(provider: &Provider) -> Option<String> {
 }
 
 fn is_usable_pool_secret(value: &str) -> bool {
-    !value.is_empty() && !value.contains(PROXY_AUTH_PLACEHOLDER)
+    !value.is_empty() && !crate::proxy::inbound_auth::is_proxy_auth_placeholder(value)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -487,7 +487,15 @@ pub fn pick_official_pool(
 }
 
 /// When set, skip Official passthrough/validate and inject this ChatGPT account.
-pub fn official_pool_inject_account_id(headers: &HeaderMap, provider: &Provider) -> Option<String> {
+///
+/// Missing auth and the public `PROXY_MANAGED` placeholder never inject.
+/// A real ChatGPT session that already matches the card stays passthrough.
+/// Cross-account inject requires the per-install inbound capability token.
+pub fn official_pool_inject_account_id(
+    headers: &HeaderMap,
+    provider: &Provider,
+    inbound_tokens: &[String],
+) -> Option<String> {
     if !is_codex_official_provider(provider) {
         return None;
     }
@@ -497,6 +505,10 @@ pub fn official_pool_inject_account_id(headers: &HeaderMap, provider: &Provider)
         .and_then(|meta| meta.managed_account_id_for("codex_oauth"))
         .map(|account_id| account_id.trim().to_string())
         .filter(|account_id| !account_id.is_empty())?;
+
+    if !presents_inbound_secret(headers, inbound_tokens) {
+        return None;
+    }
 
     let authorization = headers
         .get(http::header::AUTHORIZATION)
@@ -511,7 +523,7 @@ pub fn official_pool_inject_account_id(headers: &HeaderMap, provider: &Provider)
 
     let needs_inject = match authorization {
         None => true,
-        Some(value) if value.contains(PROXY_AUTH_PLACEHOLDER) => true,
+        Some(value) if is_legacy_placeholder(value) => true,
         Some(_) => request_account_id != Some(expected.as_str()),
     };
     needs_inject.then_some(expected)
@@ -593,36 +605,70 @@ mod tests {
         assert!(!is_unprefixed_kimi_native_model("kimi/k2"));
     }
 
+    fn inbound_tokens() -> Vec<String> {
+        vec!["ccs-proxy-test".to_string()]
+    }
+
+    fn secret_headers(authorization: Option<&str>, account_id: Option<&str>) -> HeaderMap {
+        let mut headers = auth_headers(authorization, account_id);
+        headers.insert(
+            crate::proxy::inbound_auth::INBOUND_HEADER,
+            HeaderValue::from_static("ccs-proxy-test"),
+        );
+        headers
+    }
+
     #[test]
     fn inject_passthrough_when_inbound_account_matches() {
         let provider = managed_official("backup", "account-b", None);
-        let headers = auth_headers(Some("Bearer live-token"), Some("account-b"));
-        assert_eq!(official_pool_inject_account_id(&headers, &provider), None);
+        let headers = secret_headers(Some("Bearer live-token"), Some("account-b"));
+        assert_eq!(
+            official_pool_inject_account_id(&headers, &provider, &inbound_tokens()),
+            None
+        );
     }
 
     #[test]
     fn inject_when_inbound_account_mismatches() {
         let provider = managed_official("backup", "account-b", None);
-        let headers = auth_headers(Some("Bearer account-a-token"), Some("account-a"));
+        let headers = secret_headers(Some("Bearer account-a-token"), Some("account-a"));
         assert_eq!(
-            official_pool_inject_account_id(&headers, &provider).as_deref(),
+            official_pool_inject_account_id(&headers, &provider, &inbound_tokens()).as_deref(),
             Some("account-b")
         );
     }
 
     #[test]
-    fn inject_when_proxy_managed_or_missing_auth() {
+    fn inject_when_proxy_managed_or_missing_auth_requires_inbound_secret() {
         let provider = managed_official("backup", "account-b", None);
         assert_eq!(
             official_pool_inject_account_id(
                 &auth_headers(Some("Bearer PROXY_MANAGED"), None),
-                &provider
+                &provider,
+                &inbound_tokens()
+            ),
+            None
+        );
+        assert_eq!(
+            official_pool_inject_account_id(&HeaderMap::new(), &provider, &inbound_tokens()),
+            None
+        );
+        assert_eq!(
+            official_pool_inject_account_id(
+                &secret_headers(Some("Bearer PROXY_MANAGED"), None),
+                &provider,
+                &inbound_tokens()
             )
             .as_deref(),
             Some("account-b")
         );
         assert_eq!(
-            official_pool_inject_account_id(&HeaderMap::new(), &provider).as_deref(),
+            official_pool_inject_account_id(
+                &secret_headers(None, None),
+                &provider,
+                &inbound_tokens()
+            )
+            .as_deref(),
             Some("account-b")
         );
     }
@@ -630,8 +676,11 @@ mod tests {
     #[test]
     fn unbound_official_never_injects() {
         let provider = unbound_official();
-        let headers = auth_headers(Some("Bearer PROXY_MANAGED"), Some("account-a"));
-        assert_eq!(official_pool_inject_account_id(&headers, &provider), None);
+        let headers = secret_headers(Some("Bearer PROXY_MANAGED"), Some("account-a"));
+        assert_eq!(
+            official_pool_inject_account_id(&headers, &provider, &inbound_tokens()),
+            None
+        );
     }
 
     #[test]

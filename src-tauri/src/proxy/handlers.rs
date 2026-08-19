@@ -263,6 +263,7 @@ async fn handle_messages_for_app(
         &ctx.request_model,
         &sidecar_settings,
         &state,
+        &headers,
     )
     .await?;
 
@@ -284,6 +285,7 @@ async fn handle_messages_for_app(
         &body,
         &sidecar_settings,
         &state,
+        &headers,
     )
     .await
     {
@@ -893,6 +895,7 @@ pub async fn handle_chat_completions(
         &ctx.request_model,
         &sidecar_settings,
         &state,
+        &headers,
     )
     .await?;
     if super::sidecar::should_run_web_search_sidecar(
@@ -900,6 +903,7 @@ pub async fn handle_chat_completions(
         &body,
         &sidecar_settings,
         &state,
+        &headers,
     )
     .await
     {
@@ -1013,6 +1017,7 @@ async fn handle_responses_for_app(
         &ctx.request_model,
         &sidecar_settings,
         &state,
+        &headers,
     )
     .await?;
     if super::sidecar::should_run_web_search_sidecar(
@@ -1020,6 +1025,7 @@ async fn handle_responses_for_app(
         &body,
         &sidecar_settings,
         &state,
+        &headers,
     )
     .await
     {
