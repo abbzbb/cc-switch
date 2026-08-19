@@ -78,6 +78,13 @@ describe("xAI OAuth provider presets", () => {
         supportsParallelToolCalls: true,
         inputModalities: ["text", "image"],
       }),
+      expect.objectContaining({
+        model: "grok-4.6",
+        contextWindow: 500000,
+        supportsParallelToolCalls: true,
+        inputModalities: ["text", "image"],
+        reasoningLevels: ["low", "medium", "high", "xhigh"],
+      }),
     ]);
   });
 
@@ -105,6 +112,13 @@ describe("xAI OAuth provider presets", () => {
         contextWindow: 500000,
         supportsParallelToolCalls: true,
         inputModalities: ["text", "image"],
+      }),
+      expect.objectContaining({
+        model: "grok-4.6",
+        contextWindow: 500000,
+        supportsParallelToolCalls: true,
+        inputModalities: ["text", "image"],
+        reasoningLevels: ["low", "medium", "high", "xhigh"],
       }),
     ]);
   });

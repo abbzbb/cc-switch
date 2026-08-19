@@ -259,7 +259,7 @@ pub fn apply_upsert(
         .iter()
         .filter(|existing| {
             !existing.id.eq_ignore_ascii_case(&combo.id)
-                && previous.map_or(true, |prev| !existing.id.eq_ignore_ascii_case(prev))
+                && previous.is_none_or(|prev| !existing.id.eq_ignore_ascii_case(prev))
         })
         .map(|existing| existing.id.clone())
         .collect();
