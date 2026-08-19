@@ -64,12 +64,29 @@ jobs:
 
       - name: Install Linux system deps
         if: runner.os == 'Linux'
+        timeout-minutes: 10
         shell: bash
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           set -euxo pipefail
-          sudo apt-get update
+          # ubuntu-22.04 x64 prefers azure.archive.ubuntu.com, which hangs on
+          # amd64 Packages. ARM uses ports.ubuntu.com and is unaffected.
+          if [ "$(uname -m)" = x86_64 ]; then
+            sudo find /etc/apt -type f \( \
+                -name '*.list' -o -name '*.sources' -o -name 'apt-mirrors.txt' \
+              \) -exec sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' {} +
+          fi
+          apt_get() {
+            sudo apt-get \
+              -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=20 \
+              -o Acquire::https::Timeout=20 \
+              "$@"
+          }
+          apt_get update
           # Core build tools and pkg-config
-          sudo apt-get install -y --no-install-recommends \
+          apt_get install -y --no-install-recommends \
             build-essential \
             pkg-config \
             curl \
@@ -83,16 +100,16 @@ jobs:
             elfutils \
             xdg-utils
           # GTK/GLib stack for gdk-3.0, glib-2.0, gio-2.0
-          sudo apt-get install -y --no-install-recommends \
+          apt_get install -y --no-install-recommends \
             libgtk-3-dev \
             librsvg2-dev \
             libayatana-appindicator3-dev
           # WebKit2GTK (version differs across Ubuntu images; try 4.1 then 4.0)
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
-            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          apt_get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || apt_get install -y --no-install-recommends libwebkit2gtk-4.0-dev
           # libsoup also changed major version; prefer 3.0 with fallback to 2.4
-          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
-            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+          apt_get install -y --no-install-recommends libsoup-3.0-dev \
+            || apt_get install -y --no-install-recommends libsoup2.4-dev
 
       - name: Setup pnpm
         env:
@@ -712,7 +729,20 @@ jobs:
     steps:
       - name: Prepare GH
         run: |
-          gh --version || (type -p curl >/dev/null && sudo apt-get update && sudo apt-get install -y gh || true)
+          gh --version || (
+            type -p curl >/dev/null || exit 0
+            if [ "$(uname -m)" = x86_64 ]; then
+              sudo find /etc/apt -type f \( \
+                  -name '*.list' -o -name '*.sources' -o -name 'apt-mirrors.txt' \
+                \) -exec sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' {} +
+            fi
+            sudo apt-get \
+              -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=20 \
+              -o Acquire::https::Timeout=20 \
+              update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y gh || true
+          )
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Download all release assets
