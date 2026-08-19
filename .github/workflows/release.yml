@@ -275,20 +275,22 @@ jobs:
           SKIP_UPDATER_ARTIFACTS: ${{ steps.signing.outputs.tauri != 'true' }}
         run: |
           set -euo pipefail
-          extra=()
-          if [ "$SKIP_UPDATER_ARTIFACTS" = "true" ]; then
-            extra+=(--config '{"bundle":{"createUpdaterArtifacts":false},"plugins":{"updater":{"pubkey":"","endpoints":[]}}}')
-          fi
           if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
             unset APPLE_SIGNING_IDENTITY
           fi
           if [ -z "${APPLE_ID:-}" ]; then
             unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
           fi
+          # macOS ships bash 3.2; empty "${arr[@]}" is a nounset error there.
+          if [ "$SKIP_UPDATER_ARTIFACTS" = "true" ]; then
+            build_cmd=(pnpm tauri build --target universal-apple-darwin --config '{"bundle":{"createUpdaterArtifacts":false},"plugins":{"updater":{"pubkey":"","endpoints":[]}}}')
+          else
+            build_cmd=(pnpm tauri build --target universal-apple-darwin)
+          fi
           max_attempts=3
           for attempt in $(seq 1 "$max_attempts"); do
             echo "=== macOS build attempt ${attempt}/${max_attempts} ==="
-            if pnpm tauri build --target universal-apple-darwin "${extra[@]}"; then
+            if "${build_cmd[@]}"; then
               echo "✅ macOS build succeeded"
               exit 0
             fi
@@ -327,11 +329,11 @@ jobs:
         env:
           SKIP_UPDATER_ARTIFACTS: ${{ steps.signing.outputs.tauri != 'true' }}
         run: |
-          extra=()
           if [ "$SKIP_UPDATER_ARTIFACTS" = "true" ]; then
-            extra+=(--config '{"bundle":{"createUpdaterArtifacts":false},"plugins":{"updater":{"pubkey":"","endpoints":[]}}}')
+            pnpm tauri build --bundles appimage,deb,rpm --config '{"bundle":{"createUpdaterArtifacts":false},"plugins":{"updater":{"pubkey":"","endpoints":[]}}}'
+          else
+            pnpm tauri build --bundles appimage,deb,rpm
           fi
-          pnpm tauri build --bundles appimage,deb,rpm "${extra[@]}"
 
       - name: Prepare macOS Assets
         if: runner.os == 'macOS'
