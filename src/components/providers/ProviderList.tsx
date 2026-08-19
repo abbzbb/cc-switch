@@ -49,6 +49,10 @@ import { Button } from "@/components/ui/button";
 import { isTextEditableTarget } from "@/utils/domUtils";
 import { usePiCurrentState } from "@/lib/query/pi";
 import { isProxyAppId } from "@/config/appConfig";
+import {
+  assignRoutingSlugs,
+  providersInAssignOrder,
+} from "@/utils/routingSlug";
 
 interface ProviderListProps {
   providers: Record<string, Provider>;
@@ -316,6 +320,10 @@ export function ProviderList({
       );
     });
   }, [searchTerm, sortedProviders]);
+  const assignedRoutingSlugs = useMemo(
+    () => assignRoutingSlugs(providersInAssignOrder(Object.values(providers))),
+    [providers],
+  );
 
   const claudeDesktopStatusMessages = useMemo(() => {
     if (appId !== "claude-desktop" || !claudeDesktopStatus) return [];
@@ -457,6 +465,7 @@ export function ProviderList({
               <SortableProviderCard
                 key={provider.id}
                 provider={provider}
+                assignedRoutingSlug={assignedRoutingSlugs.get(provider.id)}
                 isCurrent={isCurrent}
                 appId={appId}
                 isInConfig={
@@ -647,6 +656,7 @@ interface SortableProviderCardProps {
   isRemovalProtected?: boolean;
   isStateChangeProtected?: boolean;
   onSetAsDefault?: (modelId?: string) => void;
+  assignedRoutingSlug?: string;
 }
 
 function SortableProviderCard({
@@ -679,6 +689,7 @@ function SortableProviderCard({
   isRemovalProtected,
   isStateChangeProtected,
   onSetAsDefault,
+  assignedRoutingSlug,
 }: SortableProviderCardProps) {
   const {
     setNodeRef,
@@ -698,6 +709,7 @@ function SortableProviderCard({
     <div ref={setNodeRef} style={style}>
       <ProviderCard
         provider={provider}
+        assignedRoutingSlug={assignedRoutingSlug}
         isCurrent={isCurrent}
         appId={appId}
         isInConfig={isInConfig}

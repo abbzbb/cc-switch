@@ -12,6 +12,7 @@
 //! - `transform`: 格式转换
 
 mod adapter;
+pub mod anthropic_oauth_auth;
 mod auth;
 mod claude;
 mod codex;
@@ -24,6 +25,7 @@ pub mod copilot_model_map;
 mod gemini;
 pub(crate) mod gemini_schema;
 pub mod gemini_shadow;
+pub mod kimi_oauth_auth;
 pub mod models;
 pub(crate) mod reasoning_bridge;
 pub mod streaming;
@@ -46,6 +48,7 @@ use serde::{Deserialize, Serialize};
 
 pub const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 pub const XAI_API_BASE_URL: &str = "https://api.x.ai/v1";
+pub const KIMI_CODING_API_BASE_URL: &str = kimi_oauth_auth::KIMI_CODING_API_BASE_URL;
 
 // 公开导出
 pub use adapter::ProviderAdapter;

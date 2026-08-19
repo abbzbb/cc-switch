@@ -56,7 +56,12 @@ export interface ClaudeDesktopProviderPreset {
   mode: "direct" | "proxy";
   apiFormat?: ClaudeDesktopApiFormat;
   modelRoutes?: ClaudeDesktopRoutePreset[];
-  providerType?: "github_copilot" | "codex_oauth" | "xai_oauth";
+  providerType?:
+    | "github_copilot"
+    | "codex_oauth"
+    | "xai_oauth"
+    | "kimi_oauth"
+    | "anthropic_oauth";
   requiresOAuth?: boolean;
 
   endpointCandidates?: string[];
@@ -180,6 +185,24 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     mode: "proxy",
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
+    icon: "kimi",
+    iconColor: "#6366F1",
+  },
+  {
+    name: "Kimi For Coding (OAuth)",
+    primePartner: true,
+    websiteUrl: "https://www.kimi.com/code/?aff=cc-switch",
+    category: "cn_official",
+    baseUrl: "https://api.kimi.com/coding/",
+    mode: "proxy",
+    apiFormat: "anthropic",
+    providerType: "kimi_oauth",
+    requiresOAuth: true,
+    modelRoutes: brandedRoutes(
+      "kimi-for-coding",
+      "kimi-for-coding",
+      "kimi-for-coding",
+    ),
     icon: "kimi",
     iconColor: "#6366F1",
   },
@@ -842,6 +865,23 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     modelRoutes: brandedRoutes("grok-4.5", "grok-4.5", "grok-4.5"),
     icon: "xai",
     iconColor: "#000000",
+  },
+  {
+    name: "Claude Pro/Max (OAuth)",
+    websiteUrl: "https://claude.ai",
+    category: "third_party",
+    baseUrl: "https://api.anthropic.com",
+    mode: "proxy",
+    apiFormat: "anthropic",
+    providerType: "anthropic_oauth",
+    requiresOAuth: true,
+    modelRoutes: brandedRoutes(
+      "claude-sonnet-4-6",
+      "claude-opus-4-6",
+      "claude-haiku-4-5",
+    ),
+    icon: "anthropic",
+    iconColor: "#D4915D",
   },
   {
     name: "DeepSeek",

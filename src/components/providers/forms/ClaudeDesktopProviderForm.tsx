@@ -27,10 +27,13 @@ import { BasicFormFields } from "./BasicFormFields";
 import { CodexOAuthSection } from "./CodexOAuthSection";
 import { CopilotAuthSection } from "./CopilotAuthSection";
 import { XaiOAuthSection } from "./XaiOAuthSection";
+import { KimiOAuthSection } from "./KimiOAuthSection";
+import { AnthropicOAuthSection } from "./AnthropicOAuthSection";
 import { ApiKeySection } from "./shared/ApiKeySection";
 import { EndpointField } from "./shared/EndpointField";
 import { ModelDropdown } from "./shared/ModelDropdown";
 import { ProviderPresetSelector } from "./ProviderPresetSelector";
+import { RoutingSlugFields } from "./RoutingSlugFields";
 import { useApiKeyLink } from "./hooks/useApiKeyLink";
 import { providerSchema, type ProviderFormData } from "@/lib/schemas/provider";
 import type {
@@ -57,7 +60,13 @@ import {
 } from "@/lib/api/providers";
 import { resolveManagedAccountId } from "@/lib/authBinding";
 import type { ManagedAuthProvider } from "@/lib/api";
-import { useCopilotAuth, useCodexOauth, useXaiOauth } from "./hooks";
+import {
+  useCopilotAuth,
+  useCodexOauth,
+  useXaiOauth,
+  useKimiOauth,
+  useAnthropicOauth,
+} from "./hooks";
 import { isOAuthProviderType } from "@/config/constants";
 
 export type ClaudeDesktopProviderFormValues = ProviderFormData & {
@@ -82,6 +91,7 @@ export interface ClaudeDesktopProviderFormProps {
   onSubmit: (values: ClaudeDesktopProviderFormValues) => Promise<void> | void;
   onCancel: () => void;
   onSubmittingChange?: (isSubmitting: boolean) => void;
+  providerId?: string;
   initialData?: {
     name?: string;
     websiteUrl?: string;
@@ -244,6 +254,7 @@ export function ClaudeDesktopProviderForm({
   onSubmit,
   onCancel,
   onSubmittingChange,
+  providerId,
   initialData,
   showButtons = true,
   onManageAuthAccounts,
@@ -277,8 +288,17 @@ export function ClaudeDesktopProviderForm({
   const [selectedXaiAccountId, setSelectedXaiAccountId] = useState<
     string | null
   >(() => resolveManagedAccountId(initialData?.meta, "xai_oauth"));
+  const [selectedKimiAccountId, setSelectedKimiAccountId] = useState<
+    string | null
+  >(() => resolveManagedAccountId(initialData?.meta, "kimi_oauth"));
+  const [selectedAnthropicAccountId, setSelectedAnthropicAccountId] = useState<
+    string | null
+  >(() => resolveManagedAccountId(initialData?.meta, "anthropic_oauth"));
   const [codexFastMode, setCodexFastMode] = useState<boolean>(
     () => initialData?.meta?.codexFastMode ?? false,
+  );
+  const [routingSlug, setRoutingSlug] = useState(
+    () => initialData?.meta?.routingSlug ?? "",
   );
   const [selectedPresetId, setSelectedPresetId] = useState<string | null>(
     "custom",
@@ -385,7 +405,15 @@ export function ClaudeDesktopProviderForm({
   const {
     isAuthenticated: isXaiOauthAuthenticated,
     accounts: xaiOauthAccounts,
-  } = useXaiOauth();
+  } = useXaiOauth({ pollStatus: false });
+  const {
+    isAuthenticated: isKimiOauthAuthenticated,
+    accounts: kimiOauthAccounts,
+  } = useKimiOauth({ pollStatus: false });
+  const {
+    isAuthenticated: isAnthropicOauthAuthenticated,
+    accounts: anthropicOauthAccounts,
+  } = useAnthropicOauth({ pollStatus: false });
   const isOfficial =
     initialData?.category === "official" ||
     activePreset?.category === "official";
@@ -586,6 +614,8 @@ export function ClaudeDesktopProviderForm({
       delete meta.apiFormat;
       delete meta.endpointAutoSelect;
       delete meta.isFullUrl;
+      meta.routingSlug = routingSlug.trim() || undefined;
+      delete meta.routingCatalog;
       await onSubmit({
         ...values,
         name: values.name.trim(),
@@ -631,6 +661,16 @@ export function ClaudeDesktopProviderForm({
       xaiOauthAccounts.some(
         (account) => account.id === accountId && !account.requires_reauth,
       );
+    const selectedKimiAccountIsUsable = (accountId: string | null) =>
+      accountId === null ||
+      kimiOauthAccounts.some(
+        (account) => account.id === accountId && !account.requires_reauth,
+      );
+    const selectedAnthropicAccountIsUsable = (accountId: string | null) =>
+      accountId === null ||
+      anthropicOauthAccounts.some(
+        (account) => account.id === accountId && !account.requires_reauth,
+      );
     const managedAuthState =
       activeProviderType === "github_copilot"
         ? {
@@ -659,7 +699,25 @@ export function ClaudeDesktopProviderForm({
                   defaultValue: "请先登录 xAI 账号",
                 }),
               }
-            : null;
+            : activeProviderType === "kimi_oauth"
+              ? {
+                  authenticated: isKimiOauthAuthenticated,
+                  accountId: selectedKimiAccountId,
+                  accounts: kimiOauthAccounts,
+                  loginMessage: t("kimiOauth.loginRequired", {
+                    defaultValue: "请先登录 Kimi 账号",
+                  }),
+                }
+              : activeProviderType === "anthropic_oauth"
+                ? {
+                    authenticated: isAnthropicOauthAuthenticated,
+                    accountId: selectedAnthropicAccountId,
+                    accounts: anthropicOauthAccounts,
+                    loginMessage: t("anthropicOauth.loginRequired", {
+                      defaultValue: "请先从 Claude CLI 导入账号",
+                    }),
+                  }
+                : null;
     if (managedAuthState && !managedAuthState.authenticated) {
       toast.error(managedAuthState.loginMessage);
       return;
@@ -669,12 +727,16 @@ export function ClaudeDesktopProviderForm({
         ? selectedCodexAccountIsUsable(selectedCodexAccountId)
         : activeProviderType === "xai_oauth"
           ? selectedXaiAccountIsUsable(selectedXaiAccountId)
-          : managedAuthState
-            ? selectedAccountExists(
-                managedAuthState.accountId,
-                managedAuthState.accounts,
-              )
-            : true;
+          : activeProviderType === "kimi_oauth"
+            ? selectedKimiAccountIsUsable(selectedKimiAccountId)
+            : activeProviderType === "anthropic_oauth"
+              ? selectedAnthropicAccountIsUsable(selectedAnthropicAccountId)
+              : managedAuthState
+                ? selectedAccountExists(
+                    managedAuthState.accountId,
+                    managedAuthState.accounts,
+                  )
+                : true;
     if (managedAuthState && !selectedManagedAccountIsUsable) {
       toast.error(
         t("managedAuth.selectedAccountUnavailable", {
@@ -803,12 +865,26 @@ export function ClaudeDesktopProviderForm({
                 authProvider: "xai_oauth",
                 accountId: selectedXaiAccountId ?? undefined,
               }
-            : undefined;
+            : activeProviderType === "kimi_oauth"
+              ? {
+                  source: "managed_account",
+                  authProvider: "kimi_oauth",
+                  accountId: selectedKimiAccountId ?? undefined,
+                }
+              : activeProviderType === "anthropic_oauth"
+                ? {
+                    source: "managed_account",
+                    authProvider: "anthropic_oauth",
+                    accountId: selectedAnthropicAccountId ?? undefined,
+                  }
+                : undefined;
     meta.codexFastMode =
       activeProviderType === "codex_oauth" ? codexFastMode : undefined;
+    meta.routingSlug = routingSlug.trim() || undefined;
 
     delete meta.endpointAutoSelect;
     delete meta.isFullUrl;
+    delete meta.routingCatalog;
 
     await onSubmit({
       ...values,
@@ -912,10 +988,41 @@ export function ClaudeDesktopProviderForm({
                     fastModeEnabled={codexFastMode}
                     onFastModeChange={setCodexFastMode}
                   />
+                ) : activeProviderType === "kimi_oauth" ? (
+                  <KimiOAuthSection
+                    mode="select"
+                    selectedAccountId={selectedKimiAccountId}
+                    onAccountSelect={setSelectedKimiAccountId}
+                    onManageAccounts={
+                      onManageAuthAccounts
+                        ? () => onManageAuthAccounts("kimi_oauth")
+                        : undefined
+                    }
+                    pollStatus={false}
+                  />
+                ) : activeProviderType === "anthropic_oauth" ? (
+                  <AnthropicOAuthSection
+                    mode="select"
+                    selectedAccountId={selectedAnthropicAccountId}
+                    onAccountSelect={setSelectedAnthropicAccountId}
+                    onManageAccounts={
+                      onManageAuthAccounts
+                        ? () => onManageAuthAccounts("anthropic_oauth")
+                        : undefined
+                    }
+                    pollStatus={false}
+                  />
                 ) : (
                   <XaiOAuthSection
+                    mode="select"
                     selectedAccountId={selectedXaiAccountId}
                     onAccountSelect={setSelectedXaiAccountId}
+                    onManageAccounts={
+                      onManageAuthAccounts
+                        ? () => onManageAuthAccounts("xai_oauth")
+                        : undefined
+                    }
+                    pollStatus={false}
                   />
                 )}
               </div>
@@ -1012,49 +1119,52 @@ export function ClaudeDesktopProviderForm({
 
               {needsModelMapping && (
                 <div className="space-y-4 border-t border-border-default pt-4">
-                  {activeProviderType !== "xai_oauth" && (
-                    <div className="space-y-2">
-                      <Label>
-                        {t("providerForm.apiFormat", {
-                          defaultValue: "上游格式",
-                        })}
-                      </Label>
-                      <Select
-                        value={apiFormat}
-                        onValueChange={(value) =>
-                          setApiFormat(value as ClaudeApiFormat)
-                        }
-                      >
-                        <SelectTrigger className="w-full">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="anthropic">
-                            {t("providerForm.apiFormatAnthropic", {
-                              defaultValue: "Anthropic Messages (原生)",
-                            })}
-                          </SelectItem>
-                          <SelectItem value="openai_chat">
-                            {t("providerForm.apiFormatOpenAIChat", {
-                              defaultValue:
-                                "OpenAI Chat Completions (需开启路由)",
-                            })}
-                          </SelectItem>
-                          <SelectItem value="openai_responses">
-                            {t("providerForm.apiFormatOpenAIResponses", {
-                              defaultValue: "OpenAI Responses API (需开启路由)",
-                            })}
-                          </SelectItem>
-                          <SelectItem value="gemini_native">
-                            {t("providerForm.apiFormatGeminiNative", {
-                              defaultValue:
-                                "Gemini Native generateContent (需开启路由)",
-                            })}
-                          </SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  )}
+                  {activeProviderType !== "xai_oauth" &&
+                    activeProviderType !== "kimi_oauth" &&
+                    activeProviderType !== "anthropic_oauth" && (
+                      <div className="space-y-2">
+                        <Label>
+                          {t("providerForm.apiFormat", {
+                            defaultValue: "上游格式",
+                          })}
+                        </Label>
+                        <Select
+                          value={apiFormat}
+                          onValueChange={(value) =>
+                            setApiFormat(value as ClaudeApiFormat)
+                          }
+                        >
+                          <SelectTrigger className="w-full">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="anthropic">
+                              {t("providerForm.apiFormatAnthropic", {
+                                defaultValue: "Anthropic Messages (原生)",
+                              })}
+                            </SelectItem>
+                            <SelectItem value="openai_chat">
+                              {t("providerForm.apiFormatOpenAIChat", {
+                                defaultValue:
+                                  "OpenAI Chat Completions (需开启路由)",
+                              })}
+                            </SelectItem>
+                            <SelectItem value="openai_responses">
+                              {t("providerForm.apiFormatOpenAIResponses", {
+                                defaultValue:
+                                  "OpenAI Responses API (需开启路由)",
+                              })}
+                            </SelectItem>
+                            <SelectItem value="gemini_native">
+                              {t("providerForm.apiFormatGeminiNative", {
+                                defaultValue:
+                                  "Gemini Native generateContent (需开启路由)",
+                              })}
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
 
                   <div className="space-y-3">
                     <div className="space-y-1 border-t border-border-default pt-4">
@@ -1307,6 +1417,15 @@ export function ClaudeDesktopProviderForm({
             />
           </>
         )}
+
+        <RoutingSlugFields
+          appId="claude-desktop"
+          providerId={providerId}
+          providerName={form.watch("name")}
+          routingSlug={routingSlug}
+          onRoutingSlugChange={setRoutingSlug}
+          previewModels={routes.map((route) => route.model)}
+        />
 
         {showButtons && (
           <div className="flex justify-end gap-2">

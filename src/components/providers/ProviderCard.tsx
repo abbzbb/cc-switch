@@ -21,6 +21,7 @@ import UsageFooter from "@/components/UsageFooter";
 import SubscriptionQuotaFooter from "@/components/SubscriptionQuotaFooter";
 import CopilotQuotaFooter from "@/components/CopilotQuotaFooter";
 import CodexOauthQuotaFooter from "@/components/CodexOauthQuotaFooter";
+import { ManagedOauthQuotaFooter } from "@/components/ManagedOauthQuota";
 import XaiOauthQuotaFooter from "@/components/XaiOauthQuotaFooter";
 import { PROVIDER_TYPES, TEMPLATE_TYPES } from "@/config/constants";
 import { isHermesReadOnlyProvider } from "@/config/hermesProviderPresets";
@@ -39,6 +40,7 @@ import {
 import { useProviderHealth } from "@/lib/query/failover";
 import { useUsageQuery } from "@/lib/query/queries";
 import { resolveProviderIcon } from "@/utils/providerIcon";
+import { preferredRoutingSlug } from "@/utils/routingSlug";
 import { ProviderStatusBadge } from "@/components/providers/ProviderStatusBadge";
 import { isAdditiveAppId, isProxyAppId } from "@/config/appConfig";
 
@@ -80,6 +82,7 @@ interface ProviderCardProps {
   isRemovalProtected?: boolean;
   isStateChangeProtected?: boolean;
   onSetAsDefault?: (modelId?: string) => void;
+  assignedRoutingSlug?: string;
 }
 
 /** 判断是否为官方供应商（无自定义 base URL / API key，直连官方 API） */
@@ -197,8 +200,10 @@ export function ProviderCard({
   isRemovalProtected,
   isStateChangeProtected,
   onSetAsDefault,
+  assignedRoutingSlug,
 }: ProviderCardProps) {
   const { t } = useTranslation();
+  const routingSlug = assignedRoutingSlug ?? preferredRoutingSlug(provider);
   const codexOfficialIdentity = resolveCodexOfficialIdentity(appId, provider);
   const managedCodexAccountId = resolveManagedAccountId(
     provider.meta,
@@ -305,6 +310,9 @@ export function ProviderCard({
       : provider.meta?.providerType === PROVIDER_TYPES.CODEX_OAUTH;
   // xAI OAuth (SuperGrok 反代)：额度经自管 OAuth token 自动显示，与 codex_oauth 同构
   const isXaiOauth = provider.meta?.providerType === PROVIDER_TYPES.XAI_OAUTH;
+  const isKimiOauth = provider.meta?.providerType === PROVIDER_TYPES.KIMI_OAUTH;
+  const isAnthropicOauth =
+    provider.meta?.providerType === PROVIDER_TYPES.ANTHROPIC_OAUTH;
   // 统一权威谓词（详见 providerNeedsRouting）：以 providerType 为准，不受
   // apiFormat 被改动/缺省影响。此 badge 仅在 Codex 视图渲染，故加 appId 守卫。
   const codexNeedsRouting =
@@ -512,6 +520,19 @@ export function ProviderCard({
                 </span>
               )}
             </div>
+            {(appId === "claude" ||
+              appId === "codex" ||
+              appId === "claude-desktop") && (
+              <p
+                className="text-[11px] font-mono text-muted-foreground truncate"
+                title={routingSlug}
+              >
+                {t("providerForm.routingSlugBadge", {
+                  defaultValue: "路由 {{slug}}",
+                  slug: routingSlug,
+                })}
+              </p>
+            )}
 
             {codexOfficialIdentity && codexOfficialIdentity !== "api_key" ? (
               <div className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
@@ -626,6 +647,20 @@ export function ProviderCard({
                   inline={true}
                   isCurrent={isCurrent}
                 />
+              ) : isKimiOauth ? (
+                <ManagedOauthQuotaFooter
+                  provider="kimi_oauth"
+                  meta={provider.meta}
+                  inline={true}
+                  isCurrent={isCurrent}
+                />
+              ) : isAnthropicOauth ? (
+                <ManagedOauthQuotaFooter
+                  provider="anthropic_oauth"
+                  meta={provider.meta}
+                  inline={true}
+                  isCurrent={isCurrent}
+                />
               ) : isOfficial ? (
                 officialSubscriptionEnabled ? (
                   <SubscriptionQuotaFooter
@@ -707,7 +742,9 @@ export function ProviderCard({
                 (isOfficial && !supportsOfficialSubscription) ||
                 isCopilot ||
                 (isCodexOauth && !isBoundCodexOfficial) ||
-                isXaiOauth
+                isXaiOauth ||
+                isKimiOauth ||
+                isAnthropicOauth
                   ? undefined
                   : () => onConfigureUsage(provider)
               }

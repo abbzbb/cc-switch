@@ -191,3 +191,48 @@ export function useXaiOauthQuota(
 
   return useQuotaKeepLastGood(query, accountId ?? "default");
 }
+
+export type ManagedQuotaProvider = "kimi_oauth" | "anthropic_oauth";
+
+export function useManagedOauthQuotaByAccountId(
+  provider: ManagedQuotaProvider,
+  accountId: string | null,
+  options: UseCodexOauthQuotaOptions = {},
+) {
+  const {
+    enabled = true,
+    autoQuery = false,
+    autoQueryIntervalMinutes = 5,
+  } = options;
+  const refetchInterval =
+    autoQuery && autoQueryIntervalMinutes > 0
+      ? Math.max(autoQueryIntervalMinutes, 1) * 60 * 1000
+      : false;
+  const query = useQuery({
+    queryKey: [provider, "quota", accountId ?? "default"],
+    queryFn: () =>
+      provider === "kimi_oauth"
+        ? subscriptionApi.getKimiOauthQuota(accountId)
+        : subscriptionApi.getAnthropicOauthQuota(accountId),
+    enabled,
+    refetchInterval,
+    refetchIntervalInBackground: Boolean(refetchInterval),
+    refetchOnWindowFocus: Boolean(refetchInterval),
+    staleTime:
+      autoQueryIntervalMinutes > 0
+        ? Math.max(autoQueryIntervalMinutes, 1) * 60 * 1000
+        : REFETCH_INTERVAL,
+    retry: 1,
+  });
+
+  return useQuotaKeepLastGood(query, `${provider}:${accountId ?? "default"}`);
+}
+
+export function useManagedOauthQuota(
+  provider: ManagedQuotaProvider,
+  meta: ProviderMeta | undefined,
+  options: UseCodexOauthQuotaOptions = {},
+) {
+  const accountId = resolveManagedAccountId(meta, provider);
+  return useManagedOauthQuotaByAccountId(provider, accountId, options);
+}

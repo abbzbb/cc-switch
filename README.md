@@ -229,6 +229,9 @@ Modern AI-powered coding relies on tools like Claude Code, Claude Desktop, Codex
 
 - **Local proxy with hot-switching** — Format conversion, auto-failover, circuit breaker, provider health monitoring, and request rectifier
 - **App-level takeover** — Independently proxy Claude, Codex, Gemini, or Grok Build, down to individual providers
+- **`provider/model` routing and Combos** — Merged catalogs in the picker; `combo/{id}` fails over or weighted-round-robins across cards
+- **Managed account pools** — Unprefixed ChatGPT Official, Kimi For Coding, and Claude Pro/Max requests pick the idle account and stay sticky; `{slug}/model` pins the card
+- **Web Search / Vision sidecars** — Hosted search on non-official models and image descriptions for text-only models, via a signed-in Claude Pro/Max or ChatGPT Official account
 
 ### MCP, Prompts & Skills
 
@@ -321,7 +324,7 @@ If you launch from a desktop icon, add it to the `.desktop` `Exec=` line (e.g. `
 
 ## Documentation
 
-For detailed guides on every feature, check out the **[User Manual](docs/user-manual/en/README.md)** — covering provider management, MCP/Prompts/Skills, proxy & failover, and more.
+For detailed guides on every feature, check out the **[User Manual](docs/user-manual/en/README.md)** — covering provider management, MCP/Prompts/Skills, proxy & failover, and more. For v3.20.0 `{slug}/{model}` pinning, account pools, Combo, and Sidecar see [4.6](docs/user-manual/en/4-proxy/4.6-model-routing.md), [4.7](docs/user-manual/en/4-proxy/4.7-combo.md), [4.8](docs/user-manual/en/4-proxy/4.8-sidecar.md). Chinese walkthrough: [代理使用指南](docs/guides/proxy-guide-zh.md).
 
 ## Quick Start
 

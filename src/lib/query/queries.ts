@@ -35,7 +35,7 @@ const sortProviders = (
       const timeA = a.createdAt ?? 0;
       const timeB = b.createdAt ?? 0;
       if (timeA === timeB) {
-        return a.name.localeCompare(b.name, "zh-CN");
+        return a.id.localeCompare(b.id);
       }
       return timeA - timeB;
     })
@@ -66,15 +66,8 @@ export const useProvidersQuery = (
     // 这样可以自动反映后端熔断器自动禁用代理目标的变更
     refetchInterval: isProxyRunning ? 10000 : false,
     queryFn: async () => {
-      let providers: Record<string, Provider> = {};
+      const providers = await providersApi.getAll(appId);
       let currentProviderId = "";
-
-      try {
-        providers = await providersApi.getAll(appId);
-      } catch (error) {
-        console.error("获取供应商列表失败:", error);
-      }
-
       try {
         currentProviderId = await providersApi.getCurrent(appId);
       } catch (error) {

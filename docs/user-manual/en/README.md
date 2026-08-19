@@ -34,7 +34,10 @@ CC Switch User Manual
 │   ├── 4.2 App Takeover
 │   ├── 4.3 Failover
 │   ├── 4.4 Usage Statistics
-│   └── 4.5 Model Test
+│   ├── 4.5 Model Test
+│   ├── 4.6 Pick a Model by Provider
+│   ├── 4.7 Combo Virtual Models
+│   └── 4.8 Web Search / Vision Sidecar
 │
 └── 5. FAQ
     ├── 5.1 Configuration Files
@@ -81,10 +84,13 @@ CC Switch User Manual
 | File | Description |
 |------|-------------|
 | [4.1-service.md](./4-proxy/4.1-service.md) | Start proxy, configuration, running status |
-| [4.2-routing.md](./4-proxy/4.2-routing.md) | App routing, configuration changes, status indicators |
+| [4.2-routing.md](./4-proxy/4.2-routing.md) | App takeover, configuration changes, status indicators |
 | [4.3-failover.md](./4-proxy/4.3-failover.md) | Failover queue, circuit breaker, health status |
 | [4.4-usage.md](./4-proxy/4.4-usage.md) | Usage statistics, trend charts, pricing configuration |
 | [4.5-model-test.md](./4-proxy/4.5-model-test.md) | Model test, health check, latency testing |
+| [4.6-model-routing.md](./4-proxy/4.6-model-routing.md) | `{slug}/{model}` pin, account pools, routing slug |
+| [4.7-combo.md](./4-proxy/4.7-combo.md) | `combo/{id}` failover and weighted round-robin |
+| [4.8-sidecar.md](./4-proxy/4.8-sidecar.md) | Hosted search and text-only vision sidecar |
 
 ### 5. FAQ
 
@@ -102,13 +108,22 @@ CC Switch User Manual
 - **Configure providers**: See [2.1 Add Provider](./2-providers/2.1-add.md)
 - **Use Claude Desktop**: See [2.6 Claude Desktop](./2-providers/2.6-claude-desktop.md)
 - **Using proxy**: See [4.1 Proxy Service](./4-proxy/4.1-service.md)
+- **Provider/model, Combo, Sidecar**: See [4.6](./4-proxy/4.6-model-routing.md), [4.7](./4-proxy/4.7-combo.md), [4.8](./4-proxy/4.8-sidecar.md)
 - **Having trouble**: See [5.2 FAQ](./5-faq/5.2-questions.md)
 
 ## Version Information
 
-- Documentation version: v3.16.0
-- Last updated: 2026-05-29
-- Applicable to CC Switch v3.16.0+
+- Documentation version: v3.20.0
+- Last updated: 2026-08-19
+- Applicable to CC Switch v3.20.0+
+
+### v3.20.0 Highlights
+
+- **`{slug}/{model}` pin**: After Codex / Claude takeover, pickers merge each card; a prefixed request pins that card — see [4.6](./4-proxy/4.6-model-routing.md)
+- **Official-family account pools**: Two or more ChatGPT Official / Kimi For Coding / Claude Pro/Max cards pick the idle account for unprefixed official ids
+- **Combo virtual models**: `combo/{id}` failover or weighted round-robin — see [4.7](./4-proxy/4.7-combo.md)
+- **Kimi / Claude Pro/Max hosted login**: Auth Center device code or browser PKCE / CLI import; tokens stay off the card — see [1.5](./1-getting-started/1.5-settings.md), [2.1](./2-providers/2.1-add.md)
+- **Web Search / Vision Sidecar**: Hosted search on non-official models and images on text-only models, via signed-in Claude Pro/Max or ChatGPT Official — see [4.8](./4-proxy/4.8-sidecar.md)
 
 ### v3.16.0 Highlights
 

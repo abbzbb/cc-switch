@@ -4,18 +4,27 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build (e.g. v3.20.0)'
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
   release:
     runs-on: ${{ matrix.os }}
     environment: release
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    continue-on-error: ${{ matrix.os == 'windows-11-arm' || matrix.os == 'macos-14' }}
     strategy:
       fail-fast: false
       matrix:
@@ -31,6 +40,23 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # Tag pushes build that commit. Manual dispatch builds the named tag,
+          # never the workflow branch, so release assets cannot drift from the tag.
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.sha }}
+
+      - name: Verify checkout matches release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="${{ env.RELEASE_TAG }}"
+          git fetch --tags --force origin "refs/tags/${expected}:refs/tags/${expected}" || true
+          tag_sha="$(git rev-parse "refs/tags/${expected}^{commit}")"
+          head_sha="$(git rev-parse HEAD)"
+          if [ "$tag_sha" != "$head_sha" ]; then
+            echo "Refusing to build $expected: tag is $tag_sha but HEAD is $head_sha" >&2
+            exit 1
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -52,12 +78,29 @@ jobs:
 
       - name: Install Linux system deps
         if: runner.os == 'Linux'
+        timeout-minutes: 10
         shell: bash
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           set -euxo pipefail
-          sudo apt-get update
+          # ubuntu-22.04 x64 prefers azure.archive.ubuntu.com, which hangs on
+          # amd64 Packages. ARM uses ports.ubuntu.com and is unaffected.
+          if [ "$(uname -m)" = x86_64 ]; then
+            sudo find /etc/apt -type f \( \
+                -name '*.list' -o -name '*.sources' -o -name 'apt-mirrors.txt' \
+              \) -exec sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' {} +
+          fi
+          apt_get() {
+            sudo apt-get \
+              -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=20 \
+              -o Acquire::https::Timeout=20 \
+              "$@"
+          }
+          apt_get update
           # Core build tools and pkg-config
-          sudo apt-get install -y --no-install-recommends \
+          apt_get install -y --no-install-recommends \
             build-essential \
             pkg-config \
             curl \
@@ -71,16 +114,16 @@ jobs:
             elfutils \
             xdg-utils
           # GTK/GLib stack for gdk-3.0, glib-2.0, gio-2.0
-          sudo apt-get install -y --no-install-recommends \
+          apt_get install -y --no-install-recommends \
             libgtk-3-dev \
             librsvg2-dev \
             libayatana-appindicator3-dev
           # WebKit2GTK (version differs across Ubuntu images; try 4.1 then 4.0)
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
-            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          apt_get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || apt_get install -y --no-install-recommends libwebkit2gtk-4.0-dev
           # libsoup also changed major version; prefer 3.0 with fallback to 2.4
-          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
-            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+          apt_get install -y --no-install-recommends libsoup-3.0-dev \
+            || apt_get install -y --no-install-recommends libsoup2.4-dev
 
       - name: Setup pnpm
         env:
@@ -122,7 +165,38 @@ jobs:
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
+      - name: Detect signing capabilities
+        id: signing
+        shell: bash
+        env:
+          TAURI_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERT_PW: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PW: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$TAURI_KEY" ]; then
+            echo "tauri=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tauri=false" >> "$GITHUB_OUTPUT"
+            echo "TAURI_SIGNING_PRIVATE_KEY is unset — updater artifacts will be skipped"
+          fi
+          if [ -n "$APPLE_CERT" ] && [ -n "$APPLE_CERT_PW" ] && [ -n "$KEYCHAIN_PW" ]; then
+            echo "apple=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "apple=false" >> "$GITHUB_OUTPUT"
+            echo "Apple certificate secrets are unset — macOS build will be unsigned"
+          fi
+          if [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            echo "notarize=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "notarize=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Prepare Tauri signing key
+        if: steps.signing.outputs.tauri == 'true'
         shell: bash
         run: |
           # 调试：检查 Secret 是否存在
@@ -179,7 +253,7 @@ jobs:
           echo "✅ Tauri signing key prepared"
 
       - name: Import Apple signing certificate
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.signing.outputs.apple == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -223,29 +297,42 @@ jobs:
       - name: Build Tauri App (macOS)
         if: runner.os == 'macOS'
         shell: bash
-        timeout-minutes: 60
+        timeout-minutes: 90
         env:
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ steps.signing.outputs.notarize == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ steps.signing.outputs.notarize == 'true' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ steps.signing.outputs.notarize == 'true' && secrets.APPLE_TEAM_ID || '' }}
+          SKIP_UPDATER_ARTIFACTS: ${{ steps.signing.outputs.tauri != 'true' }}
         run: |
           set -euo pipefail
+          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            unset APPLE_SIGNING_IDENTITY
+          fi
+          if [ -z "${APPLE_ID:-}" ]; then
+            unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+          fi
+          # macOS ships bash 3.2; empty "${arr[@]}" is a nounset error there.
+          if [ "$SKIP_UPDATER_ARTIFACTS" = "true" ]; then
+            build_cmd=(pnpm tauri build --target universal-apple-darwin --config '{"bundle":{"createUpdaterArtifacts":false},"plugins":{"updater":{"pubkey":"","endpoints":[]}}}')
+          else
+            build_cmd=(pnpm tauri build --target universal-apple-darwin)
+          fi
           max_attempts=3
           for attempt in $(seq 1 "$max_attempts"); do
-            echo "=== macOS build/notarization attempt ${attempt}/${max_attempts} ==="
-            if pnpm tauri build --target universal-apple-darwin; then
-              echo "✅ macOS build/notarization succeeded"
+            echo "=== macOS build attempt ${attempt}/${max_attempts} ==="
+            if "${build_cmd[@]}"; then
+              echo "✅ macOS build succeeded"
               exit 0
             fi
 
             if [ "$attempt" -eq "$max_attempts" ]; then
-              echo "❌ macOS build/notarization failed after ${max_attempts} attempts" >&2
+              echo "❌ macOS build failed after ${max_attempts} attempts" >&2
               exit 1
             fi
 
             sleep_seconds=$((attempt * 60))
-            echo "⚠️ macOS build/notarization failed, retrying in ${sleep_seconds}s..."
+            echo "⚠️ macOS build failed, retrying in ${sleep_seconds}s..."
             sleep "$sleep_seconds"
           done
 
@@ -254,17 +341,30 @@ jobs:
         shell: pwsh
         env:
           WINDOWS_RELEASE_ARCH: ${{ matrix.arch || 'x86_64' }}
+          SKIP_UPDATER_ARTIFACTS: ${{ steps.signing.outputs.tauri != 'true' }}
         run: |
           $ErrorActionPreference = 'Stop'
+          $extra = @()
+          if ($env:SKIP_UPDATER_ARTIFACTS -eq 'true') {
+            $extra += '--config'
+            $extra += '{"bundle":{"createUpdaterArtifacts":false},"plugins":{"updater":{"pubkey":"","endpoints":[]}}}'
+          }
           if ($env:WINDOWS_RELEASE_ARCH -eq 'arm64') {
-            pnpm tauri build --target aarch64-pc-windows-msvc --bundles msi
+            pnpm tauri build --target aarch64-pc-windows-msvc --bundles msi @extra
           } else {
-            pnpm tauri build
+            pnpm tauri build @extra
           }
 
       - name: Build Tauri App (Linux)
         if: runner.os == 'Linux'
-        run: pnpm tauri build --bundles appimage,deb,rpm
+        env:
+          SKIP_UPDATER_ARTIFACTS: ${{ steps.signing.outputs.tauri != 'true' }}
+        run: |
+          if [ "$SKIP_UPDATER_ARTIFACTS" = "true" ]; then
+            pnpm tauri build --bundles appimage,deb,rpm --config '{"bundle":{"createUpdaterArtifacts":false},"plugins":{"updater":{"pubkey":"","endpoints":[]}}}'
+          else
+            pnpm tauri build --bundles appimage,deb,rpm
+          fi
 
       - name: Prepare macOS Assets
         if: runner.os == 'macOS'
@@ -272,7 +372,7 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p release-assets
-          VERSION="${GITHUB_REF_NAME}"  # e.g., v3.5.0
+          VERSION="${RELEASE_TAG}"  # e.g., v3.5.0
 
           # Locate bundle artifacts
           TAR_GZ=""; APP_PATH=""
@@ -287,24 +387,27 @@ jobs:
             fi
           done
 
-          if [ -z "$TAR_GZ" ]; then
-            echo "❌ No macOS .tar.gz updater artifact found" >&2
-            exit 1
-          fi
           if [ -z "$APP_PATH" ]; then
             echo "❌ No .app found" >&2
             exit 1
           fi
+          if [ -z "$TAR_GZ" ]; then
+            echo "No macOS .tar.gz updater artifact (expected when Tauri signing is skipped)"
+          fi
 
-          # Staple notarization ticket to .app (Tauri already notarized it)
-          xcrun stapler staple "$APP_PATH"
-          echo "✅ .app stapled"
+          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            xcrun stapler staple "$APP_PATH" || echo "⚠️ stapler staple skipped (app is not notarized)"
+          else
+            echo "Unsigned macOS build — skipping stapler"
+          fi
 
           # 1) Collect .tar.gz (updater artifact)
-          NEW_TAR_GZ="CC-Switch-${VERSION}-macOS.tar.gz"
-          cp "$TAR_GZ" "release-assets/$NEW_TAR_GZ"
-          [ -f "$TAR_GZ.sig" ] && cp "$TAR_GZ.sig" "release-assets/$NEW_TAR_GZ.sig" || echo ".sig for macOS not found yet"
-          echo "macOS updater artifact copied: $NEW_TAR_GZ"
+          if [ -n "$TAR_GZ" ]; then
+            NEW_TAR_GZ="CC-Switch-${VERSION}-macOS.tar.gz"
+            cp "$TAR_GZ" "release-assets/$NEW_TAR_GZ"
+            [ -f "$TAR_GZ.sig" ] && cp "$TAR_GZ.sig" "release-assets/$NEW_TAR_GZ.sig" || echo ".sig for macOS not found yet"
+            echo "macOS updater artifact copied: $NEW_TAR_GZ"
+          fi
 
           # 2) Collect .app as zip
           NEW_ZIP="CC-Switch-${VERSION}-macOS.zip"
@@ -312,11 +415,6 @@ jobs:
           echo "macOS zip ready: $NEW_ZIP"
 
           # 3) Create styled DMG with create-dmg (Tauri's built-in DMG styling doesn't work on CI)
-          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            echo "❌ APPLE_SIGNING_IDENTITY is missing before DMG creation" >&2
-            exit 1
-          fi
-
           HOMEBREW_NO_AUTO_UPDATE=1 brew install create-dmg
           NEW_DMG="CC-Switch-${VERSION}-macOS.dmg"
           DMG_STAGE_DIR="$RUNNER_TEMP/dmg-stage"
@@ -324,17 +422,25 @@ jobs:
           mkdir -p "$DMG_STAGE_DIR"
           ditto "$APP_PATH" "$DMG_STAGE_DIR/CC Switch.app"
 
+          dmg_args=(
+            --volname "CC Switch"
+            --background "src-tauri/icons/dmg-background.png"
+            --window-size 660 400
+            --window-pos 200 120
+            --icon-size 80
+            --icon "CC Switch.app" 180 220
+            --hide-extension "CC Switch.app"
+            --app-drop-link 480 220
+            --no-internet-enable
+          )
+          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            dmg_args+=(--codesign "$APPLE_SIGNING_IDENTITY")
+          else
+            echo "Creating unsigned DMG (no Apple signing identity)"
+          fi
+
           create-dmg \
-            --volname "CC Switch" \
-            --background "src-tauri/icons/dmg-background.png" \
-            --window-size 660 400 \
-            --window-pos 200 120 \
-            --icon-size 80 \
-            --icon "CC Switch.app" 180 220 \
-            --hide-extension "CC Switch.app" \
-            --app-drop-link 480 220 \
-            --codesign "$APPLE_SIGNING_IDENTITY" \
-            --no-internet-enable \
+            "${dmg_args[@]}" \
             "release-assets/$NEW_DMG" \
             "$DMG_STAGE_DIR"
 
@@ -342,7 +448,7 @@ jobs:
           echo "✅ Styled DMG created: $NEW_DMG"
 
       - name: Notarize macOS DMG
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.signing.outputs.apple == 'true' && steps.signing.outputs.notarize == 'true'
         shell: bash
         timeout-minutes: 30
         env:
@@ -384,7 +490,7 @@ jobs:
           done
 
       - name: Verify macOS code signing and notarization
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.signing.outputs.apple == 'true' && steps.signing.outputs.notarize == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -436,7 +542,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path release-assets | Out-Null
-          $VERSION = $env:GITHUB_REF_NAME  # e.g., v3.5.0
+          $VERSION = $env:RELEASE_TAG  # e.g., v3.5.0
           $isArm64 = $env:WINDOWS_RELEASE_ARCH -eq 'arm64'
           $targetRoot = if ($isArm64) { 'src-tauri/target/aarch64-pc-windows-msvc/release' } else { 'src-tauri/target/release' }
           $assetSuffix = if ($isArm64) { '-arm64' } else { '' }
@@ -455,8 +561,6 @@ jobs:
             if (Test-Path $sigPath) {
               Copy-Item $sigPath (Join-Path release-assets ("$dest.sig"))
               Write-Host "Signature copied: $dest.sig"
-            } elseif ($isArm64) {
-              throw "Signature not found for $($msi.Name)"
             } else {
               Write-Warning "Signature not found for $($msi.Name)"
             }
@@ -510,7 +614,7 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p release-assets
-          VERSION="${GITHUB_REF_NAME}"  # e.g., v3.5.0
+          VERSION="${RELEASE_TAG}"  # e.g., v3.5.0
           ARCH="${{ matrix.arch || 'x86_64' }}"
           # Updater artifact: AppImage（含对应 .sig）
           APPIMAGE=$(find src-tauri/target/release/bundle -name "*.AppImage" | head -1 || true)
@@ -566,7 +670,7 @@ jobs:
           find src-tauri/target -maxdepth 4 -type f -name "*.*" 2>/dev/null || true
 
       - name: Clean up Apple signing keychain
-        if: runner.os == 'macOS' && always()
+        if: runner.os == 'macOS' && always() && steps.signing.outputs.apple == 'true'
         shell: bash
         run: |
           if [ -n "${ORIGINAL_DEFAULT_KEYCHAIN:-}" ]; then
@@ -580,6 +684,10 @@ jobs:
     name: Publish GitHub Release
     runs-on: ubuntu-22.04
     needs: release
+    environment: release
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     permissions:
       contents: write
     steps:
@@ -596,31 +704,41 @@ jobs:
           set -euo pipefail
           ls -la release-assets
 
+      - name: Decide prerelease
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if find release-assets -name '*.sig' | grep -q .; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.ref_name }}
-          name: CC Switch ${{ github.ref_name }}
-          prerelease: true
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: CC Switch ${{ env.RELEASE_TAG }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
           body: |
-            ## CC Switch ${{ github.ref_name }}
+            ## CC Switch ${{ env.RELEASE_TAG }}
 
-            🌐 **Only Official Website / 唯一官方网站 / 唯一の公式サイト**: [ccswitch.io](https://ccswitch.io)
-
-            Claude Code 供应商切换工具
+            Claude Code / Codex / Gemini 供应商切换工具（abbzbb fork）。
 
             ### 下载
 
-            - **macOS**: `CC-Switch-${{ github.ref_name }}-macOS.dmg`（推荐）或 `CC-Switch-${{ github.ref_name }}-macOS.zip`（解压即用）
-            - **Windows (x86_64)**: `CC-Switch-${{ github.ref_name }}-Windows.msi`（安装版）或 `CC-Switch-${{ github.ref_name }}-Windows-Portable.zip`（绿色版）
-            - **Windows (ARM64)**: `CC-Switch-${{ github.ref_name }}-Windows-arm64.msi`（安装版）或 `CC-Switch-${{ github.ref_name }}-Windows-arm64-Portable.zip`（绿色版）
-            - **Linux (x86_64)**: `CC-Switch-${{ github.ref_name }}-Linux-x86_64.AppImage` / `.deb` / `.rpm`
-            - **Linux (ARM64)**: `CC-Switch-${{ github.ref_name }}-Linux-arm64.AppImage` / `.deb` / `.rpm`
+            - **macOS**: `CC-Switch-${{ env.RELEASE_TAG }}-macOS.dmg`（推荐）或 `CC-Switch-${{ env.RELEASE_TAG }}-macOS.zip`（解压即用）
+            - **Windows (x86_64)**: `CC-Switch-${{ env.RELEASE_TAG }}-Windows.msi`（安装版）或 `CC-Switch-${{ env.RELEASE_TAG }}-Windows-Portable.zip`（绿色版）
+            - **Windows (ARM64)**: `CC-Switch-${{ env.RELEASE_TAG }}-Windows-arm64.msi`（安装版）或 `CC-Switch-${{ env.RELEASE_TAG }}-Windows-arm64-Portable.zip`（绿色版）
+            - **Linux (x86_64)**: `CC-Switch-${{ env.RELEASE_TAG }}-Linux-x86_64.AppImage` / `.deb` / `.rpm`
+            - **Linux (ARM64)**: `CC-Switch-${{ env.RELEASE_TAG }}-Linux-arm64.AppImage` / `.deb` / `.rpm`
 
-            > `.tar.gz` 为 Tauri updater 自动更新专用，无需手动下载。
+            ### Signing
 
-            ---
-            macOS 版本已通过 Apple 代码签名和公证，可直接安装使用。
+            This fork release is built **without Apple Developer ID or Tauri updater keys** unless those secrets are configured on the repo. macOS Gatekeeper will warn on first open (right-click → Open). In-app auto-update signatures are omitted when `TAURI_SIGNING_PRIVATE_KEY` is unset.
+
+            > `.tar.gz` 为 Tauri updater 自动更新专用；未配置 updater 密钥时不会上传。
           files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -629,12 +747,28 @@ jobs:
     name: Assemble latest.json
     runs-on: ubuntu-22.04
     needs: publish-release
+    if: ${{ always() && !cancelled() && needs.publish-release.result == 'success' }}
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     permissions:
       contents: write
     steps:
       - name: Prepare GH
         run: |
-          gh --version || (type -p curl >/dev/null && sudo apt-get update && sudo apt-get install -y gh || true)
+          gh --version || (
+            type -p curl >/dev/null || exit 0
+            if [ "$(uname -m)" = x86_64 ]; then
+              sudo find /etc/apt -type f \( \
+                  -name '*.list' -o -name '*.sources' -o -name 'apt-mirrors.txt' \
+                \) -exec sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' {} +
+            fi
+            sudo apt-get \
+              -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=20 \
+              -o Acquire::https::Timeout=20 \
+              update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y gh || true
+          )
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Download all release assets
@@ -642,14 +776,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${RELEASE_TAG}"
           mkdir -p dl
           gh release download "$TAG" --dir dl --repo "$GITHUB_REPOSITORY"
           ls -la dl || true
       - name: Generate latest.json
         env:
           REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
@@ -728,4 +862,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
-          gh release upload "$GITHUB_REF_NAME" latest.json --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "$RELEASE_TAG" latest.json --clobber --repo "$GITHUB_REPOSITORY"

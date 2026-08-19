@@ -22,8 +22,14 @@ use super::{
     types::{CopilotOptimizerConfig, OptimizerConfig, ProxyStatus, RectifierConfig},
     ProxyError,
 };
-use crate::commands::{CodexOAuthState, CopilotAuthState, XaiOAuthState};
+use crate::commands::{
+    AnthropicOAuthState, CodexOAuthState, CopilotAuthState, KimiOAuthState, XaiOAuthState,
+};
+use crate::proxy::official_pool::official_pool_inject_account_id;
+use crate::proxy::providers::anthropic_oauth_auth::AnthropicOAuthManager;
+use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
 use crate::proxy::providers::copilot_auth::CopilotAuthManager;
+use crate::proxy::providers::kimi_oauth_auth::KimiOAuthManager;
 use crate::proxy::providers::xai_oauth_auth::XaiOAuthManager;
 use crate::{
     app_config::AppType,
@@ -37,8 +43,6 @@ use std::sync::Arc;
 use tauri::Manager;
 use tokio::sync::RwLock;
 
-const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
-
 fn validate_codex_official_authorization(
     headers: &http::HeaderMap,
     provider: &Provider,
@@ -51,9 +55,11 @@ fn validate_codex_official_authorization(
         None | Some("") => Err(ProxyError::AuthError(
             "Codex 官方登录不可用，请先在 Codex 中完成 ChatGPT 登录".to_string(),
         )),
-        Some(value) if value.contains(PROXY_AUTH_PLACEHOLDER) => Err(ProxyError::AuthError(
-            "已切换到 OpenAI 官方供应商，请重启 Codex 或新建会话以加载官方登录配置".to_string(),
-        )),
+        Some(value) if crate::proxy::inbound_auth::is_proxy_auth_placeholder(value) => {
+            Err(ProxyError::AuthError(
+                "已切换到 OpenAI 官方供应商，请重启 Codex 或新建会话以加载官方登录配置".to_string(),
+            ))
+        }
         Some(_) => {
             let expected_account_id = provider
                 .meta
@@ -169,6 +175,14 @@ pub struct RequestForwarder {
     /// `max_attempts = max_retries + 1`，所以 max_retries=0 表示仅尝试一家、
     /// max_retries=3（默认）表示最多 4 家。loop 同时受 providers.len() 自然限制。
     max_attempts: usize,
+    /// Combo 路由时按尝试改写 `body.model`。
+    attempt_upstream_models: Option<Vec<String>>,
+    /// Pin / combo / official-pool successes must not rewrite current provider.
+    promote_current_on_success: bool,
+    /// Inject ChatGPT Official / Codex OAuth tokens without requiring AppHandle.
+    codex_oauth_manager: Option<Arc<CodexOAuthManager>>,
+    kimi_oauth_manager: Option<Arc<KimiOAuthManager>>,
+    anthropic_oauth_manager: Option<Arc<AnthropicOAuthManager>>,
 }
 
 impl RequestForwarder {
@@ -259,7 +273,238 @@ impl RequestForwarder {
                 streaming_first_byte_timeout,
             ),
             max_attempts,
+            attempt_upstream_models: None,
+            promote_current_on_success: true,
+            codex_oauth_manager: None,
+            kimi_oauth_manager: None,
+            anthropic_oauth_manager: None,
         }
+    }
+
+    pub fn with_promote_current_on_success(mut self, promote: bool) -> Self {
+        self.promote_current_on_success = promote;
+        self
+    }
+
+    pub fn with_attempt_upstream_models(mut self, models: Option<Vec<String>>) -> Self {
+        self.attempt_upstream_models = models;
+        self
+    }
+
+    pub fn with_codex_oauth_manager(mut self, manager: Option<Arc<CodexOAuthManager>>) -> Self {
+        self.codex_oauth_manager = manager;
+        self
+    }
+
+    pub fn with_kimi_oauth_manager(mut self, manager: Option<Arc<KimiOAuthManager>>) -> Self {
+        self.kimi_oauth_manager = manager;
+        self
+    }
+
+    pub fn with_anthropic_oauth_manager(
+        mut self,
+        manager: Option<Arc<AnthropicOAuthManager>>,
+    ) -> Self {
+        self.anthropic_oauth_manager = manager;
+        self
+    }
+
+    fn maybe_promote_current_after_success(
+        &self,
+        status: &mut ProxyStatus,
+        provider: &Provider,
+        app_type_str: &str,
+    ) {
+        if !self.promote_current_on_success
+            || self.current_provider_id_at_start.as_str() == provider.id.as_str()
+        {
+            return;
+        }
+        status.failover_count += 1;
+        let failover_manager = self.failover_manager.clone();
+        let app_handle = self.app_handle.clone();
+        let provider_id = provider.id.clone();
+        let provider_name = provider.name.clone();
+        let app_type = app_type_str.to_string();
+        tokio::spawn(async move {
+            let _ = failover_manager
+                .try_switch(app_handle.as_ref(), &app_type, &provider_id, &provider_name)
+                .await;
+        });
+    }
+
+    fn official_pool_should_rotate(error: &ProxyError) -> bool {
+        matches!(
+            error,
+            ProxyError::AuthError(_)
+                | ProxyError::UpstreamError {
+                    status: 401 | 403 | 429,
+                    ..
+                }
+        )
+    }
+
+    async fn note_official_pool_outcome(
+        &self,
+        provider: &Provider,
+        error: Option<&ProxyError>,
+        response_headers: Option<&http::HeaderMap>,
+    ) {
+        if !super::official_pool::is_subscription_pool_provider(provider) {
+            return;
+        }
+        match error {
+            None => {
+                if self.session_client_provided && !self.session_id.trim().is_empty() {
+                    self.router
+                        .bind_official_affinity(&self.session_id, &provider.id)
+                        .await;
+                }
+                if super::providers::is_codex_official_provider(provider) {
+                    if let Some(headers) = response_headers {
+                        self.router
+                            .note_official_quota_from_headers(provider, headers)
+                            .await;
+                    }
+                    if let Some(account_id) =
+                        crate::proxy::official_pool::provider_chatgpt_account_id(provider)
+                    {
+                        if let Some(manager) = self.codex_oauth_manager.clone() {
+                            self.router
+                                .schedule_official_quota_refresh(account_id, manager)
+                                .await;
+                        }
+                    }
+                } else {
+                    self.router
+                        .schedule_subscription_pool_quota_refresh(
+                            provider,
+                            self.kimi_oauth_manager.clone(),
+                            self.anthropic_oauth_manager.clone(),
+                        )
+                        .await;
+                }
+            }
+            Some(error) if Self::official_pool_should_rotate(error) => {
+                self.router.note_official_cooldown(&provider.id).await;
+                if self.session_client_provided {
+                    self.router.clear_official_affinity(&self.session_id).await;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn resolve_codex_oauth_token(
+        &self,
+        preferred_account_id: Option<&str>,
+    ) -> Result<(String, Option<String>), ProxyError> {
+        if let Some(manager) = &self.codex_oauth_manager {
+            return Self::fetch_codex_oauth_token(manager.as_ref(), preferred_account_id).await;
+        }
+        if let Some(app_handle) = &self.app_handle {
+            let codex_state = app_handle.state::<CodexOAuthState>();
+            return Self::fetch_codex_oauth_token(codex_state.0.as_ref(), preferred_account_id)
+                .await;
+        }
+        Err(ProxyError::AuthError(
+            "Codex OAuth 认证不可用（无 AppHandle）".to_string(),
+        ))
+    }
+
+    async fn fetch_codex_oauth_token(
+        manager: &CodexOAuthManager,
+        preferred_account_id: Option<&str>,
+    ) -> Result<(String, Option<String>), ProxyError> {
+        let token_result = match preferred_account_id {
+            Some(id) => {
+                log::debug!("[CodexOAuth] 使用指定账号 {id} 获取 token");
+                manager.get_valid_token_for_account(id).await
+            }
+            None => {
+                log::debug!("[CodexOAuth] 使用默认账号获取 token");
+                manager.get_valid_token().await
+            }
+        };
+        match token_result {
+            Ok(token) => {
+                let account_id = match preferred_account_id {
+                    Some(id) => Some(id.to_string()),
+                    None => manager.default_account_id().await,
+                };
+                log::debug!(
+                    "[CodexOAuth] 成功获取 access_token (account={})",
+                    account_id.as_deref().unwrap_or("default")
+                );
+                Ok((token, account_id))
+            }
+            Err(error) => {
+                log::error!("[CodexOAuth] 获取 access_token 失败: {error}");
+                Err(ProxyError::AuthError(format!(
+                    "Codex OAuth 认证失败: {error}"
+                )))
+            }
+        }
+    }
+
+    async fn resolve_kimi_oauth_token(
+        &self,
+        preferred_account_id: Option<&str>,
+    ) -> Result<String, ProxyError> {
+        if let Some(manager) = &self.kimi_oauth_manager {
+            return Self::fetch_kimi_oauth_token(manager.as_ref(), preferred_account_id).await;
+        }
+        if let Some(app_handle) = &self.app_handle {
+            let state = app_handle.state::<KimiOAuthState>();
+            return Self::fetch_kimi_oauth_token(state.0.as_ref(), preferred_account_id).await;
+        }
+        Err(ProxyError::AuthError(
+            "Kimi OAuth 认证不可用（无 AppHandle）".to_string(),
+        ))
+    }
+
+    async fn fetch_kimi_oauth_token(
+        manager: &KimiOAuthManager,
+        preferred_account_id: Option<&str>,
+    ) -> Result<String, ProxyError> {
+        let token_result = match preferred_account_id {
+            Some(id) => manager.get_valid_token_for_account(id).await,
+            None => manager.get_valid_token().await,
+        };
+        token_result.map_err(|error| {
+            log::error!("[KimiOAuth] 获取 access_token 失败: {error}");
+            ProxyError::AuthError(format!("Kimi OAuth 认证失败: {error}"))
+        })
+    }
+
+    async fn resolve_anthropic_oauth_token(
+        &self,
+        preferred_account_id: Option<&str>,
+    ) -> Result<String, ProxyError> {
+        if let Some(manager) = &self.anthropic_oauth_manager {
+            return Self::fetch_anthropic_oauth_token(manager.as_ref(), preferred_account_id).await;
+        }
+        if let Some(app_handle) = &self.app_handle {
+            let state = app_handle.state::<AnthropicOAuthState>();
+            return Self::fetch_anthropic_oauth_token(state.0.as_ref(), preferred_account_id).await;
+        }
+        Err(ProxyError::AuthError(
+            "Anthropic OAuth 认证不可用（无 AppHandle）".to_string(),
+        ))
+    }
+
+    async fn fetch_anthropic_oauth_token(
+        manager: &AnthropicOAuthManager,
+        preferred_account_id: Option<&str>,
+    ) -> Result<String, ProxyError> {
+        let token_result = match preferred_account_id {
+            Some(id) => manager.get_valid_token_for_account(id).await,
+            None => manager.get_valid_token().await,
+        };
+        token_result.map_err(|error| {
+            log::error!("[AnthropicOAuth] 获取 access_token 失败: {error}");
+            ProxyError::AuthError(format!("Anthropic OAuth 认证失败: {error}"))
+        })
     }
 
     async fn record_success_result(
@@ -442,7 +687,7 @@ impl RequestForwarder {
         let bypass_circuit_breaker = providers.len() == 1;
 
         // 依次尝试每个供应商
-        for provider in providers.iter() {
+        for (attempt_index, provider) in providers.iter().enumerate() {
             // 整流器重试标记：每个 provider 独立持有，避免标记跨 provider 短路故障转移
             // —— 首家 provider 整流后被 5xx/timeout 击落时，下家仍能用整流后的请求体走整流流程
             let mut rectifier_retried = false;
@@ -491,6 +736,13 @@ impl RequestForwarder {
                 } else {
                     body.clone()
                 };
+            if let Some(model) = self
+                .attempt_upstream_models
+                .as_ref()
+                .and_then(|models| models.get(attempt_index))
+            {
+                provider_body["model"] = serde_json::json!(model);
+            }
 
             attempted_providers += 1;
 
@@ -524,6 +776,8 @@ impl RequestForwarder {
                     // HalfOpen 探测仍同步等待，保证 permit 与熔断状态及时释放。
                     self.record_success_result(&provider.id, app_type_str, used_half_open_permit)
                         .await;
+                    self.note_official_pool_outcome(provider, None, Some(response.headers()))
+                        .await;
 
                     // 更新当前应用类型使用的 provider
                     {
@@ -539,22 +793,11 @@ impl RequestForwarder {
                         let mut status = self.status.write().await;
                         status.success_requests += 1;
                         status.last_error = None;
-                        let should_switch =
-                            self.current_provider_id_at_start.as_str() != provider.id.as_str();
-                        if should_switch {
-                            status.failover_count += 1;
-
-                            // 异步触发供应商切换，更新 UI/托盘，并把“当前供应商”同步为实际使用的 provider
-                            let fm = self.failover_manager.clone();
-                            let ah = self.app_handle.clone();
-                            let pid = provider.id.clone();
-                            let pname = provider.name.clone();
-                            let at = app_type_str.to_string();
-
-                            tokio::spawn(async move {
-                                let _ = fm.try_switch(ah.as_ref(), &at, &pid, &pname).await;
-                            });
-                        }
+                        self.maybe_promote_current_after_success(
+                            &mut status,
+                            provider,
+                            app_type_str,
+                        );
                         // 重新计算成功率
                         if status.total_requests > 0 {
                             status.success_rate = (status.success_requests as f32
@@ -642,23 +885,11 @@ impl RequestForwarder {
                                         let mut status = self.status.write().await;
                                         status.success_requests += 1;
                                         status.last_error = None;
-                                        let should_switch =
-                                            self.current_provider_id_at_start.as_str()
-                                                != provider.id.as_str();
-                                        if should_switch {
-                                            status.failover_count += 1;
-                                            let fm = self.failover_manager.clone();
-                                            let ah = self.app_handle.clone();
-                                            let pid = provider.id.clone();
-                                            let pname = provider.name.clone();
-                                            let at = app_type_str.to_string();
-
-                                            tokio::spawn(async move {
-                                                let _ = fm
-                                                    .try_switch(ah.as_ref(), &at, &pid, &pname)
-                                                    .await;
-                                            });
-                                        }
+                                        self.maybe_promote_current_after_success(
+                                            &mut status,
+                                            provider,
+                                            app_type_str,
+                                        );
                                         if status.total_requests > 0 {
                                             status.success_rate = (status.success_requests as f32
                                                 / status.total_requests as f32)
@@ -788,25 +1019,11 @@ impl RequestForwarder {
                                             let mut status = self.status.write().await;
                                             status.success_requests += 1;
                                             status.last_error = None;
-                                            let should_switch =
-                                                self.current_provider_id_at_start.as_str()
-                                                    != provider.id.as_str();
-                                            if should_switch {
-                                                status.failover_count += 1;
-
-                                                // 异步触发供应商切换，更新 UI/托盘
-                                                let fm = self.failover_manager.clone();
-                                                let ah = self.app_handle.clone();
-                                                let pid = provider.id.clone();
-                                                let pname = provider.name.clone();
-                                                let at = app_type_str.to_string();
-
-                                                tokio::spawn(async move {
-                                                    let _ = fm
-                                                        .try_switch(ah.as_ref(), &at, &pid, &pname)
-                                                        .await;
-                                                });
-                                            }
+                                            self.maybe_promote_current_after_success(
+                                                &mut status,
+                                                provider,
+                                                app_type_str,
+                                            );
                                             if status.total_requests > 0 {
                                                 status.success_rate = (status.success_requests
                                                     as f32
@@ -952,22 +1169,11 @@ impl RequestForwarder {
                                         let mut status = self.status.write().await;
                                         status.success_requests += 1;
                                         status.last_error = None;
-                                        let should_switch =
-                                            self.current_provider_id_at_start.as_str()
-                                                != provider.id.as_str();
-                                        if should_switch {
-                                            status.failover_count += 1;
-                                            let fm = self.failover_manager.clone();
-                                            let ah = self.app_handle.clone();
-                                            let pid = provider.id.clone();
-                                            let pname = provider.name.clone();
-                                            let at = app_type_str.to_string();
-                                            tokio::spawn(async move {
-                                                let _ = fm
-                                                    .try_switch(ah.as_ref(), &at, &pid, &pname)
-                                                    .await;
-                                            });
-                                        }
+                                        self.maybe_promote_current_after_success(
+                                            &mut status,
+                                            provider,
+                                            app_type_str,
+                                        );
                                         if status.total_requests > 0 {
                                             status.success_rate = (status.success_requests as f32
                                                 / status.total_requests as f32)
@@ -1069,6 +1275,8 @@ impl RequestForwarder {
                         }
                         ErrorCategory::NonRetryable | ErrorCategory::ClientAbort => {
                             // 不可重试：客户端层错误或客户端断连 → 不污染健康度，仅释放 HalfOpen permit
+                            self.note_official_pool_outcome(provider, Some(&e), None)
+                                .await;
                             self.router
                                 .release_permit_neutral(
                                     &provider.id,
@@ -1161,7 +1369,8 @@ impl RequestForwarder {
             .and_then(|meta| meta.is_full_url)
             .unwrap_or(false)
             && !provider.is_codex_oauth()
-            && !provider.is_xai_oauth();
+            && !provider.is_xai_oauth()
+            && !provider.is_kimi_oauth();
 
         // GitHub Copilot API 使用 /chat/completions（无 /v1 前缀）
         let is_copilot = provider
@@ -1178,12 +1387,21 @@ impl RequestForwarder {
             && super::providers::should_convert_codex_responses_to_chat(provider, endpoint);
         let codex_responses_to_anthropic = matches!(app_type, AppType::Codex | AppType::GrokBuild)
             && super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint);
+        let inbound_tokens = self.router.inbound_capability_tokens();
+        let inject_official_account =
+            official_pool_inject_account_id(headers, provider, &inbound_tokens);
         let codex_official_auth_passthrough = matches!(app_type, AppType::Codex)
-            && super::providers::is_codex_official_provider(provider);
+            && super::providers::is_codex_official_provider(provider)
+            && inject_official_account.is_none();
 
         if codex_official_auth_passthrough {
             validate_codex_official_authorization(headers, provider)?;
         }
+
+        // Strip OpenCodex-style `{slug}/` so mapping / upstream conversion see
+        // the real model id. Unknown first segments (e.g. anthropic/claude-*)
+        // are left intact.
+        let body = super::model_routing::strip_routing_prefix_from_body(body.clone(), provider);
 
         // 应用模型映射（独立于格式转换）
         // Claude Desktop proxy 模式必须先把 Desktop 可见的 claude-* route
@@ -1654,7 +1872,12 @@ impl RequestForwarder {
         // 获取认证头（提前准备，用于内联替换），同时保留仅用于日志脱敏的
         // 精确认证材料。实际日志永远不输出这些值。
         let mut log_secrets: Vec<String> = Vec::new();
-        let mut auth_headers = if let Some(mut auth) = adapter.extract_auth(provider) {
+        let extracted_auth = adapter.extract_auth(provider).or_else(|| {
+            inject_official_account
+                .as_ref()
+                .map(|_| AuthInfo::new(String::new(), AuthStrategy::CodexOAuth))
+        });
+        let mut auth_headers = if let Some(mut auth) = extracted_auth {
             // GitHub Copilot 特殊处理：从 CopilotAuthManager 获取真实 token
             if auth.strategy == AuthStrategy::GitHubCopilot {
                 if let Some(app_handle) = &self.app_handle {
@@ -1706,56 +1929,49 @@ impl RequestForwarder {
                 }
             }
 
-            // Codex OAuth 特殊处理：从 CodexOAuthManager 获取真实 access_token
+            // Codex OAuth / Official pool inject: resolve access_token from the
+            // manager on ProxyState when present, else AppHandle CodexOAuthState.
             if auth.strategy == AuthStrategy::CodexOAuth {
-                if let Some(app_handle) = &self.app_handle {
-                    let codex_state = app_handle.state::<CodexOAuthState>();
-                    let codex_auth = &codex_state.0;
-
-                    // 从 provider.meta 获取关联的 ChatGPT 账号 ID
-                    let account_id = provider
+                let account_id = inject_official_account.clone().or_else(|| {
+                    provider
                         .meta
                         .as_ref()
-                        .and_then(|m| m.managed_account_id_for("codex_oauth"));
+                        .and_then(|m| m.managed_account_id_for("codex_oauth"))
+                });
+                let (token, resolved_account_id) = self
+                    .resolve_codex_oauth_token(account_id.as_deref())
+                    .await?;
+                auth = AuthInfo::new(token, AuthStrategy::CodexOAuth);
+                should_send_codex_oauth_session_headers = true;
+                codex_oauth_account_id = resolved_account_id;
+            }
 
-                    let token_result = match &account_id {
-                        Some(id) => {
-                            log::debug!("[CodexOAuth] 使用指定账号 {id} 获取 token");
-                            codex_auth.get_valid_token_for_account(id).await
-                        }
-                        None => {
-                            log::debug!("[CodexOAuth] 使用默认账号获取 token");
-                            codex_auth.get_valid_token().await
-                        }
-                    };
+            if auth.strategy == AuthStrategy::KimiOAuth {
+                let account_id = provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.managed_account_id_for("kimi_oauth"));
+                let token = self.resolve_kimi_oauth_token(account_id.as_deref()).await?;
+                auth = AuthInfo::new(token, AuthStrategy::KimiOAuth);
+                log::debug!(
+                    "[KimiOAuth] 成功获取 access_token (account={})",
+                    account_id.as_deref().unwrap_or("default")
+                );
+            }
 
-                    match token_result {
-                        Ok(token) => {
-                            auth = AuthInfo::new(token, AuthStrategy::CodexOAuth);
-                            should_send_codex_oauth_session_headers = true;
-                            // 解析使用的 account_id（用于注入 ChatGPT-Account-Id header）
-                            codex_oauth_account_id = match account_id {
-                                Some(id) => Some(id),
-                                None => codex_auth.default_account_id().await,
-                            };
-                            log::debug!(
-                                "[CodexOAuth] 成功获取 access_token (account={})",
-                                codex_oauth_account_id.as_deref().unwrap_or("default")
-                            );
-                        }
-                        Err(e) => {
-                            log::error!("[CodexOAuth] 获取 access_token 失败: {e}");
-                            return Err(ProxyError::AuthError(format!(
-                                "Codex OAuth 认证失败: {e}"
-                            )));
-                        }
-                    }
-                } else {
-                    log::error!("[CodexOAuth] AppHandle 不可用");
-                    return Err(ProxyError::AuthError(
-                        "Codex OAuth 认证不可用（无 AppHandle）".to_string(),
-                    ));
-                }
+            if auth.strategy == AuthStrategy::AnthropicOAuth {
+                let account_id = provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.managed_account_id_for("anthropic_oauth"));
+                let token = self
+                    .resolve_anthropic_oauth_token(account_id.as_deref())
+                    .await?;
+                auth = AuthInfo::new(token, AuthStrategy::AnthropicOAuth);
+                log::debug!(
+                    "[AnthropicOAuth] 成功获取 access_token (account={})",
+                    account_id.as_deref().unwrap_or("default")
+                );
             }
 
             // xAI OAuth: resolve a managed account token immediately before
@@ -2109,6 +2325,19 @@ impl RequestForwarder {
                 .iter()
                 .any(|h| key_str.eq_ignore_ascii_case(h))
             {
+                continue;
+            }
+
+            // Injected ChatGPT-Account-Id must replace the inbound session account.
+            if key_str.eq_ignore_ascii_case("chatgpt-account-id")
+                && auth_headers
+                    .iter()
+                    .any(|(name, _)| name.as_str() == "chatgpt-account-id")
+            {
+                continue;
+            }
+
+            if key_str.eq_ignore_ascii_case(crate::proxy::inbound_auth::INBOUND_HEADER) {
                 continue;
             }
 
@@ -2698,6 +2927,11 @@ impl RequestForwarder {
         // would silently move the conversation off the selected Grok account
         // and poison the provider's health state for an account-level issue.
         if provider.is_xai_oauth() && matches!(error, ProxyError::AuthError(_)) {
+            return ErrorCategory::NonRetryable;
+        }
+        if (provider.is_kimi_oauth() || provider.is_anthropic_oauth())
+            && matches!(error, ProxyError::AuthError(_))
+        {
             return ErrorCategory::NonRetryable;
         }
 
@@ -3339,13 +3573,15 @@ fn is_managed_account_upstream_url(url: &str) -> bool {
         || host.ends_with(".githubcopilot.com")
         || (host == "chatgpt.com" && uri.path().starts_with("/backend-api/codex"))
         || (host == "api.x.ai" && uri.path().starts_with("/v1/"))
+        || (host == "api.kimi.com" && uri.path().starts_with("/coding/"))
+        || host == "api.anthropic.com"
 }
 
 fn headers_contain_proxy_placeholder(headers: &http::HeaderMap) -> bool {
     headers.values().any(|value| {
         value
             .to_str()
-            .map(|value| value.contains(PROXY_AUTH_PLACEHOLDER))
+            .map(crate::proxy::inbound_auth::is_proxy_auth_placeholder)
             .unwrap_or(false)
     })
 }
@@ -3360,7 +3596,12 @@ fn should_preserve_exact_header_case(
         return false;
     }
 
-    if is_copilot || provider.is_codex_oauth() || provider.is_xai_oauth() {
+    if is_copilot
+        || provider.is_codex_oauth()
+        || provider.is_xai_oauth()
+        || provider.is_kimi_oauth()
+        || provider.is_anthropic_oauth()
+    {
         return false;
     }
 
@@ -3533,6 +3774,7 @@ fn is_protected_local_proxy_override_header(name: &http::HeaderName) -> bool {
             | "accept-encoding"
             | "content-type"
             | "authorization"
+            | "x-cc-switch-proxy"
             | "x-api-key"
             | "x-goog-api-key"
             | "chatgpt-account-id"
@@ -3725,6 +3967,11 @@ mod tests {
             non_streaming_timeout,
             streaming_first_byte_timeout,
             max_attempts: 1,
+            attempt_upstream_models: None,
+            promote_current_on_success: true,
+            codex_oauth_manager: None,
+            kimi_oauth_manager: None,
+            anthropic_oauth_manager: None,
         }
     }
 
@@ -4154,6 +4401,35 @@ mod tests {
     }
 
     #[test]
+    fn kimi_and_anthropic_oauth_upstreams_reject_proxy_managed_placeholder_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer PROXY_MANAGED"),
+        );
+
+        let kimi_err = reject_proxy_placeholder_for_managed_account_upstream(
+            "https://api.kimi.com/coding/v1/responses",
+            &headers,
+        )
+        .expect_err("Kimi placeholder should be rejected before upstream");
+        assert!(matches!(
+            kimi_err,
+            ProxyError::AuthError(message) if message.contains("PROXY_MANAGED")
+        ));
+
+        let anthropic_err = reject_proxy_placeholder_for_managed_account_upstream(
+            "https://api.anthropic.com/v1/messages",
+            &headers,
+        )
+        .expect_err("Anthropic placeholder should be rejected before upstream");
+        assert!(matches!(
+            anthropic_err,
+            ProxyError::AuthError(message) if message.contains("PROXY_MANAGED")
+        ));
+    }
+
+    #[test]
     fn exact_header_case_preserved_for_native_claude_only() {
         let provider = test_provider_with_type(None);
 
@@ -4553,6 +4829,7 @@ mod tests {
     fn managed_codex_official_rejects_a_different_session_account() {
         let mut provider = test_provider_with_type(Some("codex_oauth"));
         provider.category = Some("official".to_string());
+        provider.settings_config = serde_json::json!({ "auth": {}, "config": "" });
         provider.meta.as_mut().expect("provider meta").auth_binding =
             Some(crate::provider::AuthBinding {
                 source: crate::provider::AuthBindingSource::ManagedAccount,
@@ -4573,6 +4850,39 @@ mod tests {
         headers.insert("chatgpt-account-id", HeaderValue::from_static("account-b"));
         validate_codex_official_authorization(&headers, &provider)
             .expect("the selected account may pass through");
+
+        let inbound_tokens = vec!["ccs-proxy-test".to_string()];
+        assert_eq!(
+            official_pool_inject_account_id(
+                &{
+                    let mut mismatched = headers.clone();
+                    mismatched.insert("chatgpt-account-id", HeaderValue::from_static("account-a"));
+                    mismatched
+                },
+                &provider,
+                &inbound_tokens,
+            ),
+            None
+        );
+
+        headers.insert(
+            crate::proxy::inbound_auth::INBOUND_HEADER,
+            HeaderValue::from_static("ccs-proxy-test"),
+        );
+        let mismatch = official_pool_inject_account_id(
+            &{
+                let mut mismatched = headers.clone();
+                mismatched.insert("chatgpt-account-id", HeaderValue::from_static("account-a"));
+                mismatched
+            },
+            &provider,
+            &inbound_tokens,
+        );
+        assert_eq!(mismatch.as_deref(), Some("account-b"));
+        assert_eq!(
+            official_pool_inject_account_id(&headers, &provider, &inbound_tokens),
+            None
+        );
     }
 
     #[test]

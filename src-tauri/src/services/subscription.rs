@@ -336,16 +336,29 @@ const KNOWN_TIERS: &[&str] = &[
     TIER_SEVEN_DAY_SONNET,
 ];
 
+fn claude_usage_url() -> String {
+    #[cfg(test)]
+    {
+        if let Ok(url) = std::env::var("CC_SWITCH_TEST_CLAUDE_USAGE_URL") {
+            let url = url.trim();
+            if !url.is_empty() {
+                return url.to_string();
+            }
+        }
+    }
+    "https://api.anthropic.com/api/oauth/usage".to_string()
+}
+
 /// 查询 Claude 官方订阅额度
 ///
 /// 瞬时传输失败（网络/超时/读体中断）返回 `Err`（前端 reject → retry + 保留上次
 /// 成功值）；确定性失败（鉴权/非 2xx/响应体非法 JSON）返回 `Ok(success:false)`。
 /// codex/gemini 两个查询函数遵守同一约定。
-async fn query_claude_quota(access_token: &str) -> Result<SubscriptionQuota, String> {
+pub(crate) async fn query_claude_quota(access_token: &str) -> Result<SubscriptionQuota, String> {
     let client = crate::proxy::http_client::get();
 
     let resp = client
-        .get("https://api.anthropic.com/api/oauth/usage")
+        .get(claude_usage_url())
         .header("Authorization", format!("Bearer {access_token}"))
         .header("anthropic-beta", "oauth-2025-04-20")
         .header("Accept", "application/json")

@@ -75,6 +75,16 @@ impl Provider {
         self.provider_type() == Some("xai_oauth")
     }
 
+    pub fn is_kimi_oauth(&self) -> bool {
+        self.provider_type() == Some("kimi_oauth")
+            || self.auth_binding_provider() == Some("kimi_oauth")
+    }
+
+    pub fn is_anthropic_oauth(&self) -> bool {
+        self.provider_type() == Some("anthropic_oauth")
+            || self.auth_binding_provider() == Some("anthropic_oauth")
+    }
+
     pub fn is_github_copilot(&self) -> bool {
         self.provider_type() == Some("github_copilot")
             || self.claude_base_url_contains("githubcopilot.com")
@@ -84,6 +94,8 @@ impl Provider {
         self.is_github_copilot()
             || self.is_codex_oauth()
             || self.is_xai_oauth()
+            || self.is_kimi_oauth()
+            || self.is_anthropic_oauth()
             || self.claude_base_url_contains("chatgpt.com/backend-api/codex")
     }
 
@@ -100,6 +112,13 @@ impl Provider {
 
     fn provider_type(&self) -> Option<&str> {
         self.meta.as_ref().and_then(|m| m.provider_type.as_deref())
+    }
+
+    fn auth_binding_provider(&self) -> Option<&str> {
+        self.meta
+            .as_ref()
+            .and_then(|meta| meta.auth_binding.as_ref())
+            .and_then(|binding| binding.auth_provider.as_deref())
     }
 
     fn claude_base_url_contains(&self, needle: &str) -> bool {
@@ -544,6 +563,21 @@ pub struct ProviderMeta {
     /// `None` 表示旧数据/未知状态，`Some(false)` 表示明确仅存在于数据库中。
     #[serde(rename = "liveConfigManaged", skip_serializing_if = "Option::is_none")]
     pub live_config_managed: Option<bool>,
+    /// Optional OpenCodex-style routing slug override (`{slug}/{model}`).
+    #[serde(rename = "routingSlug", skip_serializing_if = "Option::is_none")]
+    pub routing_slug: Option<String>,
+    /// Whether this card contributes models to the merged proxy catalog.
+    /// `None` means participate when the card advertises models; `Some(false)` opts out.
+    #[serde(rename = "routingCatalog", skip_serializing_if = "Option::is_none")]
+    pub routing_catalog: Option<bool>,
+    /// Models on this card that cannot accept image input. Vision sidecar
+    /// describes those images as text before the main call.
+    #[serde(
+        rename = "noVisionModels",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub no_vision_models: Vec<String>,
     /// 供应商类型标识（用于特殊供应商检测）
     /// - "github_copilot": GitHub Copilot 供应商
     #[serde(rename = "providerType", skip_serializing_if = "Option::is_none")]
@@ -1154,6 +1188,32 @@ mod tests {
             None,
         );
         assert!(codex_endpoint.uses_managed_account_auth());
+
+        let mut kimi = Provider::with_id(
+            "kimi".to_string(),
+            "Kimi".to_string(),
+            json!({ "env": {} }),
+            None,
+        );
+        kimi.meta = Some(ProviderMeta {
+            provider_type: Some("kimi_oauth".to_string()),
+            ..Default::default()
+        });
+        assert!(kimi.is_kimi_oauth());
+        assert!(kimi.uses_managed_account_auth());
+
+        let mut anthropic = Provider::with_id(
+            "anthropic".to_string(),
+            "Anthropic".to_string(),
+            json!({ "env": {} }),
+            None,
+        );
+        anthropic.meta = Some(ProviderMeta {
+            provider_type: Some("anthropic_oauth".to_string()),
+            ..Default::default()
+        });
+        assert!(anthropic.is_anthropic_oauth());
+        assert!(anthropic.uses_managed_account_auth());
 
         copilot.meta = Some(ProviderMeta {
             provider_type: Some("github_copilot".to_string()),

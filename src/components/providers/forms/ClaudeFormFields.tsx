@@ -34,6 +34,8 @@ import {
 import { CopilotAuthSection } from "./CopilotAuthSection";
 import { CodexOAuthSection } from "./CodexOAuthSection";
 import { XaiOAuthSection } from "./XaiOAuthSection";
+import { KimiOAuthSection } from "./KimiOAuthSection";
+import { AnthropicOAuthSection } from "./AnthropicOAuthSection";
 import {
   copilotGetModels,
   copilotGetModelsForAccount,
@@ -100,11 +102,17 @@ interface ClaudeFormFieldsProps {
   codexFastMode?: boolean;
   onCodexFastModeChange?: (enabled: boolean) => void;
 
-  // xAI OAuth
+  // xAI / Kimi / Anthropic OAuth
   isXaiOauthPreset?: boolean;
   isXaiOauthAuthenticated?: boolean;
   selectedXaiAccountId?: string | null;
   onXaiAccountSelect?: (accountId: string | null) => void;
+  isKimiOauthPreset?: boolean;
+  selectedKimiAccountId?: string | null;
+  onKimiAccountSelect?: (accountId: string | null) => void;
+  isAnthropicOauthPreset?: boolean;
+  selectedAnthropicAccountId?: string | null;
+  onAnthropicAccountSelect?: (accountId: string | null) => void;
 
   // Template Values
   templateValueEntries: Array<[string, TemplateValueConfig]>;
@@ -187,6 +195,12 @@ export function ClaudeFormFields({
   isXaiOauthAuthenticated,
   selectedXaiAccountId,
   onXaiAccountSelect,
+  isKimiOauthPreset,
+  selectedKimiAccountId,
+  onKimiAccountSelect,
+  isAnthropicOauthPreset,
+  selectedAnthropicAccountId,
+  onAnthropicAccountSelect,
   templateValueEntries,
   templateValues,
   templatePresetName,
@@ -227,6 +241,8 @@ export function ClaudeFormFields({
   onLocalProxyBodyOverrideChange,
 }: ClaudeFormFieldsProps) {
   const { t } = useTranslation();
+  const isManagedOauthPreset =
+    isXaiOauthPreset || isKimiOauthPreset || isAnthropicOauthPreset;
   const hasRequestOverrides = Boolean(
     localProxyHeadersOverride.trim() || localProxyBodyOverride.trim(),
   );
@@ -237,23 +253,23 @@ export function ClaudeFormFields({
     defaultOpusModel ||
     defaultFableModel ||
     subagentModel ||
-    (!isXaiOauthPreset && apiFormat !== "anthropic") ||
+    (!isManagedOauthPreset && apiFormat !== "anthropic") ||
     apiKeyField !== "ANTHROPIC_AUTH_TOKEN" ||
     customUserAgent ||
     hasRequestOverrides
   );
   const [advancedExpanded, setAdvancedExpanded] = useState(
-    isXaiOauthPreset ? false : hasAnyAdvancedValue,
+    isManagedOauthPreset ? false : hasAnyAdvancedValue,
   );
 
   // 预设填充高级值后自动展开（仅从折叠→展开，不会自动折叠）
   useEffect(() => {
-    if (isXaiOauthPreset) {
+    if (isManagedOauthPreset) {
       setAdvancedExpanded(false);
     } else if (hasAnyAdvancedValue) {
       setAdvancedExpanded(true);
     }
-  }, [hasAnyAdvancedValue, isXaiOauthPreset]);
+  }, [hasAnyAdvancedValue, isManagedOauthPreset]);
 
   // Copilot 可用模型列表
   const [copilotModels, setCopilotModels] = useState<CopilotModel[]>([]);
@@ -680,8 +696,43 @@ export function ClaudeFormFields({
 
       {isXaiOauthPreset && (
         <XaiOAuthSection
+          mode="select"
           selectedAccountId={selectedXaiAccountId}
           onAccountSelect={onXaiAccountSelect}
+          onManageAccounts={
+            onManageAuthAccounts
+              ? () => onManageAuthAccounts("xai_oauth")
+              : undefined
+          }
+          pollStatus={false}
+        />
+      )}
+
+      {isKimiOauthPreset && (
+        <KimiOAuthSection
+          mode="select"
+          selectedAccountId={selectedKimiAccountId}
+          onAccountSelect={onKimiAccountSelect}
+          onManageAccounts={
+            onManageAuthAccounts
+              ? () => onManageAuthAccounts("kimi_oauth")
+              : undefined
+          }
+          pollStatus={false}
+        />
+      )}
+
+      {isAnthropicOauthPreset && (
+        <AnthropicOAuthSection
+          mode="select"
+          selectedAccountId={selectedAnthropicAccountId}
+          onAccountSelect={onAnthropicAccountSelect}
+          onManageAccounts={
+            onManageAuthAccounts
+              ? () => onManageAuthAccounts("anthropic_oauth")
+              : undefined
+          }
+          pollStatus={false}
         />
       )}
 
@@ -759,7 +810,7 @@ export function ClaudeFormFields({
           onManageClick={
             showEndpointTools ? () => onEndpointModalToggle(true) : undefined
           }
-          showFullUrlToggle={showEndpointTools && !isXaiOauthPreset}
+          showFullUrlToggle={showEndpointTools && !isManagedOauthPreset}
           isFullUrl={isFullUrl}
           onFullUrlChange={onFullUrlChange}
         />
@@ -809,7 +860,7 @@ export function ClaudeFormFields({
           )}
           <CollapsibleContent className="space-y-4 pt-2">
             {/* 上游格式选择（仅非云服务商显示） */}
-            {category !== "cloud_provider" && !isXaiOauthPreset && (
+            {category !== "cloud_provider" && !isManagedOauthPreset && (
               <div className="space-y-2">
                 <FormLabel htmlFor="apiFormat">
                   {t("providerForm.apiFormat", { defaultValue: "上游格式" })}

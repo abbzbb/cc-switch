@@ -84,6 +84,7 @@ import { ClaudeFormFields } from "./ClaudeFormFields";
 import { ClaudeDesktopProviderForm } from "./ClaudeDesktopProviderForm";
 import { GrokBuildProviderForm } from "./GrokBuildProviderForm";
 import { CodexFormFields } from "./CodexFormFields";
+import { RoutingSlugFields } from "./RoutingSlugFields";
 import { GeminiFormFields } from "./GeminiFormFields";
 import { PiProviderForm } from "./PiProviderForm";
 import { OmoFormFields } from "./OmoFormFields";
@@ -114,6 +115,8 @@ import {
   useCopilotAuth,
   useCodexOauth,
   useXaiOauth,
+  useKimiOauth,
+  useAnthropicOauth,
 } from "./hooks";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useSettingsQuery } from "@/lib/query";
@@ -142,13 +145,22 @@ type PresetEntry = {
     | HermesProviderPreset;
 };
 
+type PresetManagedAuthType =
+  | "github_copilot"
+  | "codex_oauth"
+  | "xai_oauth"
+  | "kimi_oauth"
+  | "anthropic_oauth";
+
 function getPresetProviderType(
   preset: PresetEntry["preset"] | null | undefined,
-): "github_copilot" | "codex_oauth" | "xai_oauth" | undefined {
+): PresetManagedAuthType | undefined {
   if (!preset || !("providerType" in preset)) return undefined;
   return preset.providerType === "github_copilot" ||
     preset.providerType === "codex_oauth" ||
-    preset.providerType === "xai_oauth"
+    preset.providerType === "xai_oauth" ||
+    preset.providerType === "kimi_oauth" ||
+    preset.providerType === "anthropic_oauth"
     ? preset.providerType
     : undefined;
 }
@@ -432,6 +444,7 @@ function ProviderFormFull({
         initialData?.meta?.localProxyRequestOverrides?.body,
       ),
     );
+    setRoutingSlug(initialData?.meta?.routingSlug ?? "");
   }, [appId, initialData, supportsFullUrl]);
 
   const defaultValues: ProviderFormData = useMemo(
@@ -591,7 +604,15 @@ function ProviderFormFull({
   const {
     isAuthenticated: isXaiOauthAuthenticated,
     accounts: xaiOauthAccounts,
-  } = useXaiOauth();
+  } = useXaiOauth({ pollStatus: false });
+  const {
+    isAuthenticated: isKimiOauthAuthenticated,
+    accounts: kimiOauthAccounts,
+  } = useKimiOauth({ pollStatus: false });
+  const {
+    isAuthenticated: isAnthropicOauthAuthenticated,
+    accounts: anthropicOauthAccounts,
+  } = useAnthropicOauth({ pollStatus: false });
 
   // 选中的 GitHub 账号 ID（多账号支持）
   const [selectedGitHubAccountId, setSelectedGitHubAccountId] = useState<
@@ -607,6 +628,12 @@ function ProviderFormFull({
   const [selectedXaiAccountId, setSelectedXaiAccountId] = useState<
     string | null
   >(() => resolveManagedAccountId(initialData?.meta, "xai_oauth"));
+  const [selectedKimiAccountId, setSelectedKimiAccountId] = useState<
+    string | null
+  >(() => resolveManagedAccountId(initialData?.meta, "kimi_oauth"));
+  const [selectedAnthropicAccountId, setSelectedAnthropicAccountId] = useState<
+    string | null
+  >(() => resolveManagedAccountId(initialData?.meta, "anthropic_oauth"));
   const [codexFastMode, setCodexFastMode] = useState<boolean>(
     () => initialData?.meta?.codexFastMode ?? false,
   );
@@ -632,6 +659,9 @@ function ProviderFormFull({
       formatRequestOverrideObject(
         initialData?.meta?.localProxyRequestOverrides?.body,
       ),
+  );
+  const [routingSlug, setRoutingSlug] = useState(
+    () => initialData?.meta?.routingSlug ?? "",
   );
 
   const {
@@ -804,6 +834,22 @@ function ProviderFormFull({
   const isXaiOauthProvider =
     (appId === "claude" || appId === "codex") &&
     (presetProviderType === "xai_oauth" || initialProviderType === "xai_oauth");
+  const isKimiOauthProvider =
+    (appId === "claude" || appId === "codex") &&
+    (presetProviderType === "kimi_oauth" ||
+      initialProviderType === "kimi_oauth");
+  const isAnthropicOauthProvider =
+    (appId === "claude" || appId === "codex") &&
+    (presetProviderType === "anthropic_oauth" ||
+      initialProviderType === "anthropic_oauth");
+  const skipsManagedApiKey =
+    isCopilotProvider ||
+    isClaudeCodexOauthProvider ||
+    isXaiOauthProvider ||
+    isKimiOauthProvider ||
+    isAnthropicOauthProvider;
+  const skipsForcedOauthEndpoint =
+    isClaudeCodexOauthProvider || isXaiOauthProvider || isKimiOauthProvider;
   const wasCodexOfficialManagedOauthBound =
     appId === "codex" &&
     Boolean(resolveManagedAccountId(initialData?.meta, "codex_oauth"));
@@ -1319,6 +1365,22 @@ function ProviderFormFull({
       );
       return;
     }
+    if (isKimiOauthProvider && !isKimiOauthAuthenticated) {
+      toast.error(
+        t("kimiOauth.loginRequired", {
+          defaultValue: "请先登录 Kimi 账号",
+        }),
+      );
+      return;
+    }
+    if (isAnthropicOauthProvider && !isAnthropicOauthAuthenticated) {
+      toast.error(
+        t("anthropicOauth.loginRequired", {
+          defaultValue: "请先从 Claude CLI 导入账号",
+        }),
+      );
+      return;
+    }
 
     const selectedAccountExists = (
       accountId: string | null,
@@ -1343,6 +1405,16 @@ function ProviderFormFull({
     const selectedXaiAccountIsUsable = (accountId: string | null) =>
       accountId === null ||
       xaiOauthAccounts.some(
+        (account) => account.id === accountId && !account.requires_reauth,
+      );
+    const selectedKimiAccountIsUsable = (accountId: string | null) =>
+      accountId === null ||
+      kimiOauthAccounts.some(
+        (account) => account.id === accountId && !account.requires_reauth,
+      );
+    const selectedAnthropicAccountIsUsable = (accountId: string | null) =>
+      accountId === null ||
+      anthropicOauthAccounts.some(
         (account) => account.id === accountId && !account.requires_reauth,
       );
     if (
@@ -1374,6 +1446,28 @@ function ProviderFormFull({
       toast.error(
         t("managedAuth.selectedAccountNeedsReauth", {
           defaultValue: "已绑定 xAI 账号不存在或需要重新登录",
+        }),
+      );
+      return;
+    }
+    if (
+      isKimiOauthProvider &&
+      !selectedKimiAccountIsUsable(selectedKimiAccountId)
+    ) {
+      toast.error(
+        t("managedAuth.selectedAccountNeedsReauth", {
+          defaultValue: "已绑定 Kimi 账号不存在或需要重新登录",
+        }),
+      );
+      return;
+    }
+    if (
+      isAnthropicOauthProvider &&
+      !selectedAnthropicAccountIsUsable(selectedAnthropicAccountId)
+    ) {
+      toast.error(
+        t("managedAuth.selectedAccountNeedsReauth", {
+          defaultValue: "已绑定 Claude 账号不存在或需要重新导入",
         }),
       );
       return;
@@ -1414,23 +1508,14 @@ function ProviderFormFull({
     // cloud_provider（如 Bedrock）通过模板变量处理认证，跳过通用校验
     if (category !== "official" && category !== "cloud_provider") {
       if (appId === "claude") {
-        if (
-          !isClaudeCodexOauthProvider &&
-          !isXaiOauthProvider &&
-          !baseUrl.trim()
-        ) {
+        if (!skipsForcedOauthEndpoint && !baseUrl.trim()) {
           issues.push(
             t("providerForm.endpointRequired", {
               defaultValue: "非官方供应商请填写 API 端点",
             }),
           );
         }
-        if (
-          !isCopilotProvider &&
-          !isClaudeCodexOauthProvider &&
-          !isXaiOauthProvider &&
-          !apiKey.trim()
-        ) {
+        if (!skipsManagedApiKey && !apiKey.trim()) {
           issues.push(
             t("providerForm.apiKeyRequired", {
               defaultValue: "非官方供应商请填写 API Key",
@@ -1438,16 +1523,16 @@ function ProviderFormFull({
           );
         }
       } else if (appId === "codex") {
-        // 托管 OAuth 预设（xAI）：端点由 adapter 硬定向、token 由代理注入，
+        // 托管 OAuth 预设（xAI / Kimi）：端点由 adapter 硬定向、token 由代理注入，
         // 两项都不需要用户填写
-        if (!isXaiOauthProvider && !codexBaseUrl.trim()) {
+        if (!skipsForcedOauthEndpoint && !codexBaseUrl.trim()) {
           issues.push(
             t("providerForm.endpointRequired", {
               defaultValue: "非官方供应商请填写 API 端点",
             }),
           );
         }
-        if (!isXaiOauthProvider && !codexApiKey.trim()) {
+        if (!skipsManagedApiKey && !codexApiKey.trim()) {
           issues.push(
             t("providerForm.apiKeyRequired", {
               defaultValue: "非官方供应商请填写 API Key",
@@ -1701,6 +1786,7 @@ function ProviderFormFull({
     // dedicated commands and remain safe from stale form snapshots.
     if (isEditMode && baseMeta) {
       delete baseMeta.custom_endpoints;
+      delete baseMeta.routingCatalog;
     }
 
     const providerType = isCopilotProvider
@@ -1709,7 +1795,11 @@ function ProviderFormFull({
         ? "codex_oauth"
         : isXaiOauthProvider
           ? "xai_oauth"
-          : undefined;
+          : isKimiOauthProvider
+            ? "kimi_oauth"
+            : isAnthropicOauthProvider
+              ? "anthropic_oauth"
+              : undefined;
 
     const nextMeta: ProviderMeta = {
       ...(baseMeta ?? {}),
@@ -1749,7 +1839,19 @@ function ProviderFormFull({
                   authProvider: "xai_oauth",
                   accountId: selectedXaiAccountId ?? undefined,
                 }
-              : undefined,
+              : isKimiOauthProvider
+                ? {
+                    source: "managed_account",
+                    authProvider: "kimi_oauth",
+                    accountId: selectedKimiAccountId ?? undefined,
+                  }
+                : isAnthropicOauthProvider
+                  ? {
+                      source: "managed_account",
+                      authProvider: "anthropic_oauth",
+                      accountId: selectedAnthropicAccountId ?? undefined,
+                    }
+                  : undefined,
       // GitHub Copilot 多账号：保存关联的账号 ID
       githubAccountId:
         isCopilotProvider && selectedGitHubAccountId
@@ -1825,6 +1927,7 @@ function ProviderFormFull({
         supportsFullUrl &&
         category !== "official" &&
         !isXaiOauthProvider &&
+        !isKimiOauthProvider &&
         localIsFullUrl
           ? true
           : undefined,
@@ -1842,6 +1945,12 @@ function ProviderFormFull({
     if (!nextMeta.githubAccountId && "githubAccountId" in nextMeta) {
       delete nextMeta.githubAccountId;
     }
+    if (routingSlug.trim()) {
+      nextMeta.routingSlug = routingSlug.trim();
+    } else {
+      delete nextMeta.routingSlug;
+    }
+    delete nextMeta.routingCatalog;
 
     payload.meta = nextMeta;
 
@@ -2376,11 +2485,15 @@ function ProviderFormFull({
               isCopilotPreset={isCopilotProvider}
               isCodexOauthPreset={isClaudeCodexOauthProvider}
               isXaiOauthPreset={isXaiOauthProvider}
+              isKimiOauthPreset={isKimiOauthProvider}
+              isAnthropicOauthPreset={isAnthropicOauthProvider}
               usesOAuth={
                 templatePreset?.requiresOAuth === true ||
                 isCopilotProvider ||
                 isClaudeCodexOauthProvider ||
-                isXaiOauthProvider
+                isXaiOauthProvider ||
+                isKimiOauthProvider ||
+                isAnthropicOauthProvider
               }
               isCopilotAuthenticated={isCopilotAuthenticated}
               selectedGitHubAccountId={selectedGitHubAccountId}
@@ -2394,6 +2507,10 @@ function ProviderFormFull({
               isXaiOauthAuthenticated={isXaiOauthAuthenticated}
               selectedXaiAccountId={selectedXaiAccountId}
               onXaiAccountSelect={setSelectedXaiAccountId}
+              selectedKimiAccountId={selectedKimiAccountId}
+              onKimiAccountSelect={setSelectedKimiAccountId}
+              selectedAnthropicAccountId={selectedAnthropicAccountId}
+              onAnthropicAccountSelect={setSelectedAnthropicAccountId}
               templateValueEntries={templateValueEntries}
               templateValues={templateValues}
               templatePresetName={templatePreset?.name || ""}
@@ -2437,16 +2554,34 @@ function ProviderFormFull({
             />
           )}
 
+          {appId === "claude" && (
+            <RoutingSlugFields
+              appId="claude"
+              providerId={providerId}
+              providerName={form.watch("name")}
+              routingSlug={routingSlug}
+              onRoutingSlugChange={setRoutingSlug}
+              previewModels={[
+                claudeModel,
+                defaultSonnetModel,
+                defaultOpusModel,
+                defaultHaikuModel,
+                defaultFableModel,
+                subagentModel,
+              ]}
+            />
+          )}
+
           {appId === "codex" && (
             <CodexFormFields
               providerId={providerId}
-              isXaiOauthPreset={
-                presetProviderType === "xai_oauth" ||
-                initialData?.meta?.providerType === "xai_oauth"
-              }
+              isXaiOauthPreset={isXaiOauthProvider}
               isXaiOauthAuthenticated={isXaiOauthAuthenticated}
               selectedXaiAccountId={selectedXaiAccountId}
               onXaiAccountSelect={setSelectedXaiAccountId}
+              isKimiOauthPreset={isKimiOauthProvider}
+              selectedKimiAccountId={selectedKimiAccountId}
+              onKimiAccountSelect={setSelectedKimiAccountId}
               codexApiKey={codexApiKey}
               onApiKeyChange={handleCodexApiKeyChange}
               category={category}
@@ -2509,6 +2644,20 @@ function ProviderFormFull({
               onLocalProxyHeadersOverrideChange={setLocalProxyHeadersOverride}
               localProxyBodyOverride={localProxyBodyOverride}
               onLocalProxyBodyOverrideChange={setLocalProxyBodyOverride}
+            />
+          )}
+
+          {appId === "codex" && (
+            <RoutingSlugFields
+              appId="codex"
+              providerId={providerId}
+              providerName={form.watch("name")}
+              routingSlug={routingSlug}
+              onRoutingSlugChange={setRoutingSlug}
+              previewModels={[
+                ...(codexCatalogModels ?? []).map((row) => row.model),
+                codexModel,
+              ]}
             />
           )}
 

@@ -48,6 +48,12 @@ pub struct ProxyState {
     pub app_handle: Option<tauri::AppHandle>,
     /// 故障转移切换管理器
     pub failover_manager: Arc<FailoverSwitchManager>,
+    /// Optional Codex OAuth manager for Official pool inject (tests may omit it).
+    pub codex_oauth_manager:
+        Option<Arc<crate::proxy::providers::codex_oauth_auth::CodexOAuthManager>>,
+    pub kimi_oauth_manager: Option<Arc<crate::proxy::providers::kimi_oauth_auth::KimiOAuthManager>>,
+    pub anthropic_oauth_manager:
+        Option<Arc<crate::proxy::providers::anthropic_oauth_auth::AnthropicOAuthManager>>,
 }
 
 /// 代理HTTP服务器
@@ -60,13 +66,63 @@ pub struct ProxyServer {
 }
 
 impl ProxyServer {
+    #[cfg(test)]
     pub fn new(
         config: ProxyConfig,
         db: Arc<Database>,
         app_handle: Option<tauri::AppHandle>,
     ) -> Self {
+        Self::new_with_managed_auth(config, db, app_handle, None, None, None, None)
+    }
+
+    #[cfg(test)]
+    pub fn new_with_codex_oauth(
+        config: ProxyConfig,
+        db: Arc<Database>,
+        app_handle: Option<tauri::AppHandle>,
+        codex_oauth_manager: Option<
+            Arc<crate::proxy::providers::codex_oauth_auth::CodexOAuthManager>,
+        >,
+        official_pool: Option<
+            Arc<tokio::sync::RwLock<crate::proxy::official_pool::OfficialPoolState>>,
+        >,
+    ) -> Self {
+        Self::new_with_managed_auth(
+            config,
+            db,
+            app_handle,
+            codex_oauth_manager,
+            official_pool,
+            None,
+            None,
+        )
+    }
+
+    pub fn new_with_managed_auth(
+        config: ProxyConfig,
+        db: Arc<Database>,
+        app_handle: Option<tauri::AppHandle>,
+        codex_oauth_manager: Option<
+            Arc<crate::proxy::providers::codex_oauth_auth::CodexOAuthManager>,
+        >,
+        official_pool: Option<
+            Arc<tokio::sync::RwLock<crate::proxy::official_pool::OfficialPoolState>>,
+        >,
+        kimi_oauth_manager: Option<Arc<crate::proxy::providers::kimi_oauth_auth::KimiOAuthManager>>,
+        anthropic_oauth_manager: Option<
+            Arc<crate::proxy::providers::anthropic_oauth_auth::AnthropicOAuthManager>,
+        >,
+    ) -> Self {
+        let official_pool = official_pool.unwrap_or_else(|| {
+            Arc::new(tokio::sync::RwLock::new(
+                crate::proxy::official_pool::OfficialPoolState::default(),
+            ))
+        });
         // 创建共享的 ProviderRouter（熔断器状态将跨所有请求保持）
-        let provider_router = Arc::new(ProviderRouter::new(db.clone()));
+        let provider_router = Arc::new(ProviderRouter::with_official_pool(
+            db.clone(),
+            official_pool,
+        ));
         // 创建故障转移切换管理器
         let failover_manager = Arc::new(FailoverSwitchManager::new(db.clone()));
 
@@ -81,6 +137,9 @@ impl ProxyServer {
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             app_handle,
             failover_manager,
+            codex_oauth_manager,
+            kimi_oauth_manager,
+            anthropic_oauth_manager,
         };
 
         Self {
@@ -296,6 +355,10 @@ impl ProxyServer {
             // Claude API (支持带前缀和不带前缀两种格式)
             .route("/v1/messages", post(handlers::handle_messages))
             .route("/claude/v1/messages", post(handlers::handle_messages))
+            .route(
+                "/claude/v1/models",
+                get(handlers::handle_claude_gateway_models_route),
+            )
             // Claude Desktop 3P 本地 gateway（独立 provider namespace）
             .route(
                 "/claude-desktop/v1/models",
@@ -624,5 +687,110 @@ mod tests {
             full_url_request.body["commands"]["search_query"][0]["q"],
             "full URL"
         );
+    }
+
+    #[tokio::test]
+    async fn claude_gateway_models_list_uses_anthropic_format() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let kimi = Provider::with_id(
+            "kimi".to_string(),
+            "Kimi".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://kimi.example/v1",
+                    "ANTHROPIC_API_KEY": "kimi-key",
+                    "ANTHROPIC_MODEL": "k2"
+                }
+            }),
+            None,
+        );
+        let deepseek = Provider::with_id(
+            "deepseek".to_string(),
+            "DeepSeek".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://deepseek.example/v1",
+                    "ANTHROPIC_API_KEY": "deepseek-key",
+                    "ANTHROPIC_MODEL": "deepseek-v4"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &kimi).expect("save kimi");
+        db.save_provider("claude", &deepseek)
+            .expect("save deepseek");
+        db.set_current_provider("claude", "kimi")
+            .expect("set current kimi");
+
+        let proxy = ProxyServer::new(
+            ProxyConfig {
+                listen_port: 0,
+                enable_logging: false,
+                non_streaming_timeout: 10,
+                ..ProxyConfig::default()
+            },
+            db,
+            None,
+        );
+        let proxy_info = proxy.start().await.expect("start test proxy");
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{}", proxy_info.port);
+
+        let discovered: Value = client
+            .get(format!("{base}/v1/models?limit=1000"))
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+            .expect("GET Claude discovery")
+            .json()
+            .await
+            .expect("parse Claude discovery");
+        let ids: Vec<&str> = discovered["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .filter_map(|item| item.get("id").and_then(Value::as_str))
+            .collect();
+        assert!(ids.contains(&"anthropic/kimi/k2"), "{ids:?}");
+        assert!(ids.contains(&"anthropic/deepseek/deepseek-v4"), "{ids:?}");
+
+        let prefixed: Value = client
+            .get(format!("{base}/claude/v1/models"))
+            .send()
+            .await
+            .expect("GET /claude/v1/models")
+            .json()
+            .await
+            .expect("parse /claude/v1/models");
+        let prefixed_ids: Vec<&str> = prefixed["data"]
+            .as_array()
+            .expect("prefixed data")
+            .iter()
+            .filter_map(|item| item.get("id").and_then(Value::as_str))
+            .collect();
+        assert!(
+            prefixed_ids.contains(&"anthropic/kimi/k2")
+                && prefixed_ids.contains(&"anthropic/deepseek/deepseek-v4"),
+            "{prefixed_ids:?}"
+        );
+
+        let codex_probe: Value = client
+            .get(format!("{base}/v1/models"))
+            .send()
+            .await
+            .expect("GET Codex catalog probe")
+            .json()
+            .await
+            .expect("parse Codex catalog probe");
+        assert!(
+            codex_probe.get("models").is_some(),
+            "Codex probe must keep catalog shape, got {codex_probe}"
+        );
+        assert!(
+            codex_probe.get("data").is_none(),
+            "Codex probe must not receive the Anthropic list"
+        );
+
+        let _ = proxy.stop().await;
     }
 }

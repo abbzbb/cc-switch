@@ -12,10 +12,24 @@ import type {
 
 type PollingState = "idle" | "polling" | "success" | "error";
 
+type ManagedAuthOptions = {
+  githubDomain?: string;
+  /** When false, skip the 15s status refresh. Default true for Auth Center. */
+  pollStatus?: boolean;
+};
+
 export function useManagedAuth(
   authProvider: ManagedAuthProvider,
-  githubDomain?: string,
+  githubDomainOrOptions?: string | ManagedAuthOptions,
 ) {
+  const githubDomain =
+    typeof githubDomainOrOptions === "string"
+      ? githubDomainOrOptions
+      : githubDomainOrOptions?.githubDomain;
+  const pollStatus =
+    typeof githubDomainOrOptions === "string"
+      ? true
+      : (githubDomainOrOptions?.pollStatus ?? true);
   const queryClient = useQueryClient();
   const { t } = useTranslation();
   const queryKey = ["managed-auth-status", authProvider];
@@ -29,6 +43,8 @@ export function useManagedAuth(
     null,
   );
   const pollingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollingStateRef = useRef<PollingState>("idle");
+  const ownsLoginRef = useRef(false);
 
   const {
     data: authStatus,
@@ -43,7 +59,13 @@ export function useManagedAuth(
     // A rejected xAI refresh token is persisted as `requires_reauth` by the
     // proxy hot path. Periodically refresh local status so an already-open Auth
     // Center stops showing the account as logged in without requiring a reload.
-    refetchInterval: authProvider === "xai_oauth" ? 15_000 : false,
+    refetchInterval:
+      pollStatus &&
+      (authProvider === "xai_oauth" ||
+        authProvider === "kimi_oauth" ||
+        authProvider === "anthropic_oauth")
+        ? 15_000
+        : false,
   });
 
   const stopPolling = useCallback(() => {
@@ -58,23 +80,31 @@ export function useManagedAuth(
   }, []);
 
   useEffect(() => {
+    pollingStateRef.current = pollingState;
+  }, [pollingState]);
+
+  useEffect(() => {
     return () => {
       stopPolling();
+      if (ownsLoginRef.current && authProvider === "anthropic_oauth") {
+        ownsLoginRef.current = false;
+        void authApi.authCancelLogin(authProvider).catch(() => undefined);
+      }
     };
-  }, [stopPolling]);
+  }, [authProvider, stopPolling]);
 
   const startLoginMutation = useMutation({
     mutationFn: () => authApi.authStartLogin(authProvider, githubDomain),
     onSuccess: async (response) => {
+      if (!ownsLoginRef.current) {
+        if (authProvider === "anthropic_oauth") {
+          void authApi.authCancelLogin(authProvider).catch(() => undefined);
+        }
+        return;
+      }
       setDeviceCode(response);
       setPollingState("polling");
       setError(null);
-
-      try {
-        await copyText(response.user_code);
-      } catch (e) {
-        console.debug("[ManagedAuth] Failed to copy user code:", e);
-      }
 
       try {
         await settingsApi.openExternal(response.verification_uri);
@@ -82,16 +112,29 @@ export function useManagedAuth(
         console.debug("[ManagedAuth] Failed to open browser:", e);
       }
 
-      // Add a small buffer on top of GitHub's suggested interval to avoid
-      // hitting slow_down responses too aggressively during device polling.
-      const interval = Math.max((response.interval || 5) + 3, 8) * 1000;
+      const isBrowserPkce =
+        authProvider === "anthropic_oauth" || response.user_code === "BROWSER";
+      if (!isBrowserPkce) {
+        try {
+          await copyText(response.user_code);
+        } catch (e) {
+          console.debug("[ManagedAuth] Failed to copy user code:", e);
+        }
+      }
+      const interval = isBrowserPkce
+        ? Math.max(response.interval || 2, 2) * 1000
+        : Math.max((response.interval || 5) + 3, 8) * 1000;
       const expiresAt = Date.now() + response.expires_in * 1000;
 
       const pollOnce = async () => {
         if (Date.now() > expiresAt) {
           stopPolling();
           setPollingState("error");
-          setError("Device code expired. Please try again.");
+          setError(
+            t("managedAuth.deviceCodeExpired", {
+              defaultValue: "Device code expired. Please try again.",
+            }),
+          );
           return;
         }
 
@@ -102,6 +145,7 @@ export function useManagedAuth(
             githubDomain,
           );
           if (newAccount) {
+            ownsLoginRef.current = false;
             stopPolling();
             setPollingState("success");
             await refetchStatus();
@@ -127,10 +171,15 @@ export function useManagedAuth(
       pollingTimeoutRef.current = setTimeout(() => {
         stopPolling();
         setPollingState("error");
-        setError("Device code expired. Please try again.");
+        setError(
+          t("managedAuth.deviceCodeExpired", {
+            defaultValue: "Device code expired. Please try again.",
+          }),
+        );
       }, response.expires_in * 1000);
     },
     onError: (e) => {
+      ownsLoginRef.current = false;
       setPollingState("error");
       setError(e instanceof Error ? e.message : String(e));
     },
@@ -192,6 +241,7 @@ export function useManagedAuth(
   });
 
   const startAuth = useCallback(() => {
+    ownsLoginRef.current = true;
     setPollingState("idle");
     setDeviceCode(null);
     setError(null);
@@ -200,11 +250,16 @@ export function useManagedAuth(
   }, [startLoginMutation, stopPolling]);
 
   const cancelAuth = useCallback(() => {
+    const owned = ownsLoginRef.current;
+    ownsLoginRef.current = false;
     stopPolling();
     setPollingState("idle");
     setDeviceCode(null);
     setError(null);
-  }, [stopPolling]);
+    if (owned && authProvider === "anthropic_oauth") {
+      void authApi.authCancelLogin(authProvider).catch(() => undefined);
+    }
+  }, [authProvider, stopPolling]);
 
   const logout = useCallback(() => {
     logoutMutation.mutate();

@@ -8,6 +8,12 @@ export const subscriptionApi = {
     invoke("get_codex_oauth_quota", { accountId }),
   getXaiOauthQuota: (accountId: string | null): Promise<SubscriptionQuota> =>
     invoke("get_xai_oauth_quota", { accountId }),
+  getKimiOauthQuota: (accountId: string | null): Promise<SubscriptionQuota> =>
+    invoke("get_kimi_oauth_quota", { accountId }),
+  getAnthropicOauthQuota: (
+    accountId: string | null,
+  ): Promise<SubscriptionQuota> =>
+    invoke("get_anthropic_oauth_quota", { accountId }),
   getCodingPlanQuota: (
     baseUrl: string,
     apiKey: string,

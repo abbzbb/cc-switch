@@ -13,6 +13,8 @@ export const proxyKeys = {
   takeoverStatus: ["proxyTakeoverStatus"] as const,
   globalConfig: ["globalProxyConfig"] as const,
   appConfig: (appType: string) => ["appProxyConfig", appType] as const,
+  combos: ["modelCombos"] as const,
+  sidecars: ["sidecarSettings"] as const,
 };
 
 // ========== 代理服务器状态 Hooks ==========
@@ -136,6 +138,86 @@ export function useUpdateAppProxyConfig() {
       toast.error(
         t("proxy.settings.toast.saveFailed", { error: error.message }),
       );
+    },
+  });
+}
+
+export function useModelCombos() {
+  return useQuery({
+    queryKey: proxyKeys.combos,
+    queryFn: () => proxyApi.listModelCombos(),
+  });
+}
+
+export function useUpsertModelCombo() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      combo,
+      previousId,
+    }: {
+      combo: import("@/types/proxy").ModelCombo;
+      previousId?: string;
+    }) => proxyApi.upsertModelCombo(combo, previousId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: proxyKeys.combos });
+    },
+  });
+}
+
+export function useDeleteModelCombo() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => proxyApi.deleteModelCombo(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: proxyKeys.combos });
+    },
+  });
+}
+
+export function useSetProviderRoutingCatalog() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      app,
+      id,
+      enabled,
+    }: {
+      app: string;
+      id: string;
+      enabled: boolean;
+    }) => proxyApi.setProviderRoutingCatalog(app, id, enabled),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["providers", variables.app] });
+    },
+  });
+}
+
+export function useSidecarSettings() {
+  return useQuery({
+    queryKey: proxyKeys.sidecars,
+    queryFn: () => proxyApi.getSidecarSettings(),
+  });
+}
+
+export function useUpdateSidecarSettings() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (settings: import("@/types/proxy").SidecarSettings) =>
+      proxyApi.updateSidecarSettings(settings),
+    onMutate: async (settings) => {
+      await queryClient.cancelQueries({ queryKey: proxyKeys.sidecars });
+      const previous = queryClient.getQueryData(proxyKeys.sidecars);
+      queryClient.setQueryData(proxyKeys.sidecars, settings);
+      return { previous };
+    },
+    onError: (_error, _settings, context) => {
+      if (context?.previous !== undefined) {
+        queryClient.setQueryData(proxyKeys.sidecars, context.previous);
+      }
+    },
+    onSuccess: (settings) => {
+      queryClient.setQueryData(proxyKeys.sidecars, settings);
     },
   });
 }

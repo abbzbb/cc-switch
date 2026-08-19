@@ -41,10 +41,14 @@ pub struct RequestContext {
     pub provider: Provider,
     /// 完整的 Provider 列表（用于故障转移）
     providers: Vec<Provider>,
+    /// Combo 路由时与 `providers` 等长，按尝试改写上游 model。
+    attempt_upstream_models: Option<Vec<String>>,
+    /// Pin / combo / pool must not rewrite the durable current provider.
+    promote_current_on_success: bool,
     /// 请求开始时的"当前供应商"（用于判断是否需要同步 UI/托盘）
     ///
     /// 这里使用本地 settings 的设备级 current provider。
-    /// 代理模式下如果实际使用的 provider 与此不一致，会触发切换以确保 UI 始终准确。
+    /// 仅经典故障转移成功时才会提升当前供应商；pin / combo / pool 不会改写。
     pub current_provider_id: String,
     /// 请求中的模型名称
     pub request_model: String,
@@ -131,17 +135,29 @@ impl RequestContext {
 
         // 使用共享的 ProviderRouter 选择 Provider（熔断器状态跨请求保持）
         // 注意：只在这里调用一次，结果传递给 forwarder，避免重复消耗 HalfOpen 名额
-        let providers = state
+        let selection = state
             .provider_router
-            .select_providers(app_type_str)
+            .select_providers_for_request_with_session(
+                app_type_str,
+                &request_model,
+                session_result
+                    .client_provided
+                    .then_some(session_result.session_id.as_str()),
+            )
             .await
             .map_err(|e| match e {
                 crate::error::AppError::AllProvidersCircuitOpen => {
                     ProxyError::AllProvidersCircuitOpen
                 }
                 crate::error::AppError::NoProvidersConfigured => ProxyError::NoProvidersConfigured,
+                crate::error::AppError::InvalidInput(message) => {
+                    ProxyError::InvalidRequest(message)
+                }
                 _ => ProxyError::DatabaseError(e.to_string()),
             })?;
+        let providers = selection.providers;
+        let attempt_upstream_models = selection.attempt_upstream_models;
+        let promote_current_on_success = selection.promote_current_on_success;
 
         let provider = providers
             .first()
@@ -162,6 +178,8 @@ impl RequestContext {
             app_config,
             provider,
             providers,
+            attempt_upstream_models,
+            promote_current_on_success,
             current_provider_id,
             request_model,
             outbound_model: None,
@@ -199,25 +217,29 @@ impl RequestContext {
     /// - 故障转移开启：超时配置正常生效（0 表示禁用超时）
     /// - 故障转移关闭：超时配置不生效（全部传入 0）
     pub fn create_forwarder(&self, state: &ProxyState) -> RequestForwarder {
-        let (non_streaming_timeout, first_byte_timeout, idle_timeout) =
-            if self.app_config.auto_failover_enabled {
-                // 故障转移开启：使用配置的值（0 = 禁用超时）
-                (
-                    self.app_config.non_streaming_timeout as u64,
-                    self.app_config.streaming_first_byte_timeout as u64,
-                    self.app_config.streaming_idle_timeout as u64,
-                )
-            } else {
-                // 故障转移关闭：不启用超时配置
-                log::debug!(
-                    "[{}] Failover disabled, timeout configs are bypassed",
-                    self.tag
-                );
-                (0, 0, 0)
-            };
+        let combo_failover = self
+            .attempt_upstream_models
+            .as_ref()
+            .is_some_and(|models| models.len() > 1);
+        let enable_hop = self.app_config.auto_failover_enabled || combo_failover;
 
-        // 故障转移关闭时强制 max_retries=0（仅尝试 1 个 provider），与「不超时 + 不切换」语义一致。
-        let max_retries = if self.app_config.auto_failover_enabled {
+        let (non_streaming_timeout, first_byte_timeout, idle_timeout) = if enable_hop {
+            (
+                self.app_config.non_streaming_timeout as u64,
+                self.app_config.streaming_first_byte_timeout as u64,
+                self.app_config.streaming_idle_timeout as u64,
+            )
+        } else {
+            log::debug!(
+                "[{}] Failover disabled, timeout configs are bypassed",
+                self.tag
+            );
+            (0, 0, 0)
+        };
+
+        let max_retries = if combo_failover {
+            (self.providers.len().saturating_sub(1) as u32).max(self.app_config.max_retries)
+        } else if self.app_config.auto_failover_enabled {
             self.app_config.max_retries
         } else {
             0
@@ -242,6 +264,11 @@ impl RequestContext {
             self.copilot_optimizer_config.clone(),
             max_retries,
         )
+        .with_attempt_upstream_models(self.attempt_upstream_models.clone())
+        .with_promote_current_on_success(self.promote_current_on_success)
+        .with_codex_oauth_manager(state.codex_oauth_manager.clone())
+        .with_kimi_oauth_manager(state.kimi_oauth_manager.clone())
+        .with_anthropic_oauth_manager(state.anthropic_oauth_manager.clone())
     }
 
     /// 获取 Provider 列表（用于故障转移）
@@ -264,14 +291,16 @@ impl RequestContext {
     /// - 故障转移关闭：返回 0（禁用超时检查）
     #[inline]
     pub fn streaming_timeout_config(&self) -> StreamingTimeoutConfig {
-        if self.app_config.auto_failover_enabled {
-            // 故障转移开启：使用配置的值（0 = 禁用超时）
+        let combo_failover = self
+            .attempt_upstream_models
+            .as_ref()
+            .is_some_and(|models| models.len() > 1);
+        if self.app_config.auto_failover_enabled || combo_failover {
             StreamingTimeoutConfig {
                 first_byte_timeout: self.app_config.streaming_first_byte_timeout as u64,
                 idle_timeout: self.app_config.streaming_idle_timeout as u64,
             }
         } else {
-            // 故障转移关闭：禁用流式超时检查
             StreamingTimeoutConfig {
                 first_byte_timeout: 0,
                 idle_timeout: 0,

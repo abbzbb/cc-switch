@@ -466,3 +466,132 @@ pub async fn get_circuit_breaker_stats(
     let _ = (state, provider_id, app_type);
     Ok(None)
 }
+
+fn reserved_provider_routing_slugs(
+    db: &crate::database::Database,
+) -> std::collections::HashSet<String> {
+    let mut slugs = std::collections::HashSet::new();
+    for app in ["claude", "codex", "gemini", "grokbuild", "claude-desktop"] {
+        if let Ok(map) = db.get_all_providers(app) {
+            let providers: Vec<_> = map.into_values().collect();
+            slugs.extend(
+                crate::proxy::model_routing::assign_routing_slugs(&providers).into_values(),
+            );
+        }
+    }
+    slugs
+}
+
+/// List virtual combo models (`combo/{id}`).
+#[tauri::command]
+pub async fn list_model_combos(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<crate::proxy::combo::ModelCombo>, String> {
+    state.db.list_model_combos().map_err(|e| e.to_string())
+}
+
+/// Create or replace one combo definition. `previous_id` renames in one save.
+#[tauri::command]
+pub async fn upsert_model_combo(
+    state: tauri::State<'_, AppState>,
+    combo: crate::proxy::combo::ModelCombo,
+    previous_id: Option<String>,
+) -> Result<crate::proxy::combo::ModelCombo, String> {
+    let mut combos = state.db.list_model_combos().map_err(|e| e.to_string())?;
+    let saved = crate::proxy::combo::apply_upsert(
+        &mut combos,
+        combo,
+        previous_id.as_deref(),
+        &reserved_provider_routing_slugs(&state.db),
+    )
+    .map_err(|e| e.to_string())?;
+    state
+        .db
+        .save_model_combos(&combos)
+        .map_err(|e| e.to_string())?;
+    state
+        .proxy_service
+        .refresh_codex_routing_catalog_if_takeover()
+        .await?;
+    Ok(saved)
+}
+
+/// Delete a combo by id.
+#[tauri::command]
+pub async fn delete_model_combo(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let mut combos = state.db.list_model_combos().map_err(|e| e.to_string())?;
+    let before = combos.len();
+    combos.retain(|combo| !combo.id.eq_ignore_ascii_case(id.trim()));
+    if combos.len() == before {
+        return Err(format!("unknown combo '{id}'"));
+    }
+    state
+        .db
+        .save_model_combos(&combos)
+        .map_err(|e| e.to_string())?;
+    state
+        .proxy_service
+        .refresh_codex_routing_catalog_if_takeover()
+        .await?;
+    Ok(())
+}
+
+fn routing_catalog_app(app: &str) -> Result<crate::app_config::AppType, String> {
+    let app_type = crate::app_config::AppType::from_str(app)
+        .map_err(|error| format!("无效的应用类型: {error}"))?;
+    if !matches!(
+        app_type,
+        crate::app_config::AppType::Codex
+            | crate::app_config::AppType::Claude
+            | crate::app_config::AppType::ClaudeDesktop
+    ) {
+        return Err("只有 Codex / Claude / Claude Desktop 的配置能加入路由目录".into());
+    }
+    Ok(app_type)
+}
+
+/// Toggle whether one provider card appears in the merged routing picker.
+#[tauri::command]
+pub async fn set_provider_routing_catalog(
+    state: tauri::State<'_, AppState>,
+    app: String,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let app_type = routing_catalog_app(&app)?;
+    let mut provider = state
+        .db
+        .get_provider_by_id(&id, app_type.as_str())
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("供应商不存在: {id}"))?;
+    crate::proxy::model_routing::set_routing_catalog_enabled(&mut provider, enabled);
+    state
+        .db
+        .save_provider(app_type.as_str(), &provider)
+        .map_err(|e| e.to_string())?;
+    if matches!(app_type, crate::app_config::AppType::Codex) {
+        state
+            .proxy_service
+            .refresh_codex_routing_catalog_if_takeover()
+            .await?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_sidecar_settings(
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::proxy::sidecar::SidecarSettings, String> {
+    Ok(crate::proxy::sidecar::load_sidecar_settings(&state.db))
+}
+
+#[tauri::command]
+pub async fn update_sidecar_settings(
+    state: tauri::State<'_, AppState>,
+    settings: crate::proxy::sidecar::SidecarSettings,
+) -> Result<crate::proxy::sidecar::SidecarSettings, String> {
+    crate::proxy::sidecar::save_sidecar_settings(&state.db, &settings).map_err(|e| e.to_string())
+}

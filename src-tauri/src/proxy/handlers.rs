@@ -47,10 +47,16 @@ use super::{
 };
 use crate::app_config::AppType;
 use crate::database::PRICING_SOURCE_REQUEST;
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::{Query, State},
+    http::{header, HeaderMap, StatusCode},
+    response::IntoResponse,
+    Json,
+};
 use bytes::Bytes;
 use futures::StreamExt;
 use http_body_util::BodyExt;
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 // ============================================================================
@@ -74,44 +80,99 @@ pub async fn get_status(State(state): State<ProxyState>) -> Result<Json<ProxySta
     Ok(Json(status))
 }
 
-/// GET /v1/models — Codex model list (reachability check)
+/// GET /v1/models
 ///
-/// Codex CLI probes this endpoint at startup and deserializes the response as a
-/// catalog with a top-level `models` field.  Return the cc-switch–managed model
-/// catalog file directly so the format always matches what the current version
-/// of Codex expects.
+/// Shared by Codex and Claude Code on the same listen port:
+/// - Codex expects a catalog object with top-level `models`.
+/// - Claude Code gateway discovery (`GET /v1/models?limit=1000`, often with
+///   `anthropic-version` / `x-api-key`) expects Anthropic `{data:[{id,display_name}]}`.
 ///
-/// Only serves the catalog when the live config.toml still references the
-/// cc-switch–owned `model_catalog_json`, using the same path ownership rules as
-/// Codex live-setting import.
-pub async fn handle_models() -> Result<Json<Value>, ProxyError> {
-    let config_dir = crate::codex_config::get_codex_config_dir();
-    let active_catalog_path = match crate::codex_config::read_codex_config_text() {
-        Ok(config_text) => {
-            crate::codex_config::resolve_cc_switch_catalog_path(&config_text, &config_dir)
-        }
-        Err(_) => None,
-    };
+/// Codex is served only when live `model_catalog_json` still points at the
+/// cc-switch–owned catalog file. The HTTP payload is built from the DB
+/// (same builder as the on-disk takeover projection).
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ModelsListQuery {
+    limit: Option<u32>,
+}
 
-    let catalog = if let Some(catalog_path) =
-        active_catalog_path.as_ref().filter(|path| path.exists())
-    {
-        match crate::codex_config::read_codex_model_catalog_text(catalog_path) {
-            Ok(text) => serde_json::from_str(&text).unwrap_or(json!({"models": []})),
-            Err(error) => {
-                log::warn!("[models] 拒绝读取越界或过大的目录文件: {error}");
-                json!({"models": []})
-            }
-        }
+pub async fn handle_models(
+    State(state): State<ProxyState>,
+    headers: HeaderMap,
+    Query(query): Query<ModelsListQuery>,
+) -> Result<Json<Value>, ProxyError> {
+    if wants_anthropic_models_list(&headers, &query) {
+        handle_claude_gateway_models(state).await
     } else {
-        if active_catalog_path.is_none() {
-            log::debug!(
-                "[models] stale guard: catalog not served (model_catalog_json not set to cc-switch catalog)"
-            );
+        handle_codex_gateway_models(state).await
+    }
+}
+
+pub async fn handle_claude_gateway_models_route(
+    State(state): State<ProxyState>,
+) -> Result<Json<Value>, ProxyError> {
+    handle_claude_gateway_models(state).await
+}
+
+fn wants_anthropic_models_list(headers: &HeaderMap, query: &ModelsListQuery) -> bool {
+    if query.limit.is_some() {
+        return true;
+    }
+    if headers.contains_key("anthropic-version") || headers.contains_key("x-api-key") {
+        return true;
+    }
+    headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|ua| ua.to_ascii_lowercase().contains("claude"))
+}
+
+fn live_codex_catalog_is_cc_switch() -> bool {
+    let config_dir = crate::codex_config::get_codex_config_dir();
+    match crate::codex_config::read_codex_config_text() {
+        Ok(config_text) => {
+            crate::codex_config::resolve_cc_switch_catalog_path(&config_text, &config_dir).is_some()
         }
-        json!({"models": []})
-    };
-    Ok(Json(catalog))
+        Err(_) => false,
+    }
+}
+
+async fn handle_codex_gateway_models(state: ProxyState) -> Result<Json<Value>, ProxyError> {
+    if !live_codex_catalog_is_cc_switch() {
+        log::debug!(
+            "[models] stale guard: catalog not served (model_catalog_json not set to cc-switch catalog)"
+        );
+        return Ok(Json(json!({"models": []})));
+    }
+    let providers: Vec<_> = state
+        .db
+        .get_all_providers("codex")
+        .map_err(|e| ProxyError::DatabaseError(e.to_string()))?
+        .into_values()
+        .collect();
+    let combos = state.db.list_model_combos().unwrap_or_default();
+    super::model_routing::build_merged_codex_routing_catalog_with_combos(&providers, &combos)
+        .map(Json)
+        .map_err(|error| {
+            log::warn!("[models] failed to build Codex catalog from db: {error}");
+            ProxyError::Internal(error.to_string())
+        })
+}
+
+async fn handle_claude_gateway_models(state: ProxyState) -> Result<Json<Value>, ProxyError> {
+    let current = state
+        .provider_router
+        .select_providers("claude")
+        .await
+        .map_err(|e| ProxyError::DatabaseError(e.to_string()))?;
+    let all = state
+        .db
+        .get_all_providers("claude")
+        .map_err(|e| ProxyError::DatabaseError(e.to_string()))?;
+    let providers = super::model_routing::providers_current_first(&current, all.into_values());
+    let combos = state.db.list_model_combos().unwrap_or_default();
+    Ok(Json(
+        super::model_routing::build_claude_gateway_model_list_with_combos(&providers, &combos),
+    ))
 }
 
 // ============================================================================
@@ -151,14 +212,30 @@ pub async fn handle_claude_desktop_models(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<Value>, ProxyError> {
     validate_claude_desktop_gateway_auth(&state, &headers)?;
-    let providers = state
+    let current = state
         .provider_router
         .select_providers("claude-desktop")
         .await
         .map_err(|e| ProxyError::DatabaseError(e.to_string()))?;
-    let provider = providers.first().ok_or(ProxyError::NoAvailableProvider)?;
-    let response = crate::claude_desktop_config::model_list_response(provider)
-        .map_err(|e| ProxyError::ConfigError(e.to_string()))?;
+    let all = state
+        .db
+        .get_all_providers("claude-desktop")
+        .map_err(|e| ProxyError::DatabaseError(e.to_string()))?;
+    if all.is_empty() {
+        return Err(ProxyError::NoAvailableProvider);
+    }
+
+    let providers =
+        crate::proxy::model_routing::providers_current_first(&current, all.into_values());
+    if providers.is_empty() {
+        return Err(ProxyError::NoAvailableProvider);
+    }
+
+    let response = crate::claude_desktop_config::model_list_response_for_providers_with_combos(
+        &providers,
+        &state.db.list_model_combos().unwrap_or_default(),
+    )
+    .map_err(|e| ProxyError::ConfigError(e.to_string()))?;
     Ok(Json(response))
 }
 
@@ -185,6 +262,16 @@ async fn handle_messages_for_app(
 
     let mut ctx =
         RequestContext::new(&state, &body, &headers, app_type.clone(), tag, app_type_str).await?;
+    let sidecar_settings = super::sidecar::load_sidecar_settings(&state.db);
+    let body = super::sidecar::rewrite_vision_if_needed(
+        &body,
+        &ctx.provider,
+        &ctx.request_model,
+        &sidecar_settings,
+        &state,
+        &headers,
+    )
+    .await?;
 
     let raw_endpoint = uri
         .path_and_query()
@@ -198,6 +285,29 @@ async fn handle_messages_for_app(
         .get("stream")
         .and_then(|s| s.as_bool())
         .unwrap_or(false);
+
+    if super::sidecar::should_run_web_search_sidecar(
+        &ctx.provider,
+        &body,
+        &sidecar_settings,
+        &state,
+        &headers,
+    )
+    .await
+    {
+        return super::sidecar::run_messages_web_search_loop(
+            state,
+            ctx,
+            method,
+            endpoint,
+            body,
+            headers,
+            extensions,
+            sidecar_settings,
+            is_stream,
+        )
+        .await;
+    }
 
     // 转发请求
     let forwarder = ctx.create_forwarder(&state);
@@ -784,6 +894,38 @@ pub async fn handle_chat_completions(
         .get("stream")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let sidecar_settings = super::sidecar::load_sidecar_settings(&state.db);
+    let body = super::sidecar::rewrite_vision_if_needed(
+        &body,
+        &ctx.provider,
+        &ctx.request_model,
+        &sidecar_settings,
+        &state,
+        &headers,
+    )
+    .await?;
+    if super::sidecar::should_run_web_search_sidecar(
+        &ctx.provider,
+        &body,
+        &sidecar_settings,
+        &state,
+        &headers,
+    )
+    .await
+    {
+        return super::sidecar::run_chat_web_search_loop(
+            state,
+            ctx,
+            method,
+            &endpoint,
+            body,
+            headers,
+            extensions,
+            sidecar_settings,
+            is_stream,
+        )
+        .await;
+    }
 
     let forwarder = ctx.create_forwarder(&state);
     let mut result = match forwarder
@@ -874,6 +1016,38 @@ async fn handle_responses_for_app(
         .get("stream")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let sidecar_settings = super::sidecar::load_sidecar_settings(&state.db);
+    let body = super::sidecar::rewrite_vision_if_needed(
+        &body,
+        &ctx.provider,
+        &ctx.request_model,
+        &sidecar_settings,
+        &state,
+        &headers,
+    )
+    .await?;
+    if super::sidecar::should_run_web_search_sidecar(
+        &ctx.provider,
+        &body,
+        &sidecar_settings,
+        &state,
+        &headers,
+    )
+    .await
+    {
+        return super::sidecar::run_responses_web_search_loop(
+            state,
+            ctx,
+            method,
+            &endpoint,
+            body,
+            headers,
+            extensions,
+            sidecar_settings,
+            is_stream,
+        )
+        .await;
+    }
     let codex_tool_context = transform_codex_chat::build_codex_tool_context_from_request(&body);
     // Captured before `body` is moved into the forwarder: the flat-name →
     // {namespace, name} map used to restore the native Responses upstream's

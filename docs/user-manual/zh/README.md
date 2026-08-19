@@ -34,7 +34,10 @@
 │   ├── 4.2 应用接管
 │   ├── 4.3 故障转移
 │   ├── 4.4 用量统计
-│   └── 4.5 模型检查
+│   ├── 4.5 模型检查
+│   ├── 4.6 按供应商选择模型
+│   ├── 4.7 Combo 虚拟模型
+│   └── 4.8 Web Search / Vision Sidecar
 │
 └── 5. 常见问题
     ├── 5.1 配置文件说明
@@ -81,10 +84,13 @@
 | 文件 | 内容 |
 |------|------|
 | [4.1-service.md](./4-proxy/4.1-service.md) | 启动代理、配置项、运行状态 |
-| [4.2-routing.md](./4-proxy/4.2-routing.md) | 应用路由、配置修改、状态指示 |
+| [4.2-routing.md](./4-proxy/4.2-routing.md) | 应用接管、配置修改、状态指示 |
 | [4.3-failover.md](./4-proxy/4.3-failover.md) | 故障转移队列、熔断器、健康状态 |
 | [4.4-usage.md](./4-proxy/4.4-usage.md) | 用量统计、趋势图表、定价配置 |
 | [4.5-model-test.md](./4-proxy/4.5-model-test.md) | 模型检查、健康检测、延迟测试 |
+| [4.6-model-routing.md](./4-proxy/4.6-model-routing.md) | `{slug}/{model}` 钉卡、账号池、路由 slug |
+| [4.7-combo.md](./4-proxy/4.7-combo.md) | `combo/{id}` 故障转移与加权轮询 |
+| [4.8-sidecar.md](./4-proxy/4.8-sidecar.md) | hosted 搜索与纯文本识图 Sidecar |
 
 ### 5. 常见问题
 
@@ -102,13 +108,22 @@
 - **配置供应商**：查看 [2.1 添加供应商](./2-providers/2.1-add.md)
 - **使用 Claude Desktop**：查看 [2.6 Claude Desktop](./2-providers/2.6-claude-desktop.md)
 - **使用代理**：查看 [4.1 代理服务](./4-proxy/4.1-service.md)
+- **按供应商选模型 / Combo / Sidecar**：查看 [4.6](./4-proxy/4.6-model-routing.md)、[4.7](./4-proxy/4.7-combo.md)、[4.8](./4-proxy/4.8-sidecar.md)
 - **遇到问题**：查看 [5.2 FAQ](./5-faq/5.2-questions.md)
 
 ## 版本信息
 
-- 文档版本：v3.16.0
-- 最后更新：2026-05-29
-- 适用于 CC Switch v3.16.0+
+- 文档版本：v3.20.0
+- 最后更新：2026-08-19
+- 适用于 CC Switch v3.20.0+
+
+### v3.20.0 亮点
+
+- **`{slug}/{model}` 钉卡**：接管 Codex / Claude 后，选择器合并各卡模型；带前缀的请求钉到对应卡 — 详见 [4.6 按供应商选择模型](./4-proxy/4.6-model-routing.md)
+- **官方族账号池**：多张 ChatGPT Official / Kimi For Coding / Claude Pro/Max 卡时，未加前缀的官方 id 选闲号并粘会话
+- **Combo 虚拟模型**：`combo/{id}` 按 failover 或加权轮询跨卡 — 详见 [4.7 Combo](./4-proxy/4.7-combo.md)
+- **Kimi / Claude Pro/Max 托管登录**：认证中心设备码或浏览器 PKCE / 导入 CLI，token 不写进卡片 — 详见 [1.5](./1-getting-started/1.5-settings.md)、[2.1](./2-providers/2.1-add.md)
+- **Web Search / Vision Sidecar**：非官方模型的 hosted 搜索和纯文本识图，交给已登录的 Claude Pro/Max 或 ChatGPT Official — 详见 [4.8](./4-proxy/4.8-sidecar.md)
 
 ### v3.16.0 亮点
 

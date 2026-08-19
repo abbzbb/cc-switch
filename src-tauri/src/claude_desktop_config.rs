@@ -275,6 +275,14 @@ fn inference_model_json(spec: &InferenceModelSpec) -> Value {
     }
 }
 
+pub fn existing_gateway_token(db: &Database) -> Option<String> {
+    db.get_setting(GATEWAY_TOKEN_SETTING_KEY)
+        .ok()
+        .flatten()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
 pub fn get_or_create_gateway_token(db: &Database) -> Result<String, AppError> {
     if let Some(token) = db.get_setting(GATEWAY_TOKEN_SETTING_KEY)? {
         let trimmed = token.trim();
@@ -647,8 +655,73 @@ fn next_catalog_safe_route_id(
     }
 }
 
+#[cfg(test)]
 pub fn model_list_response(provider: &Provider) -> Result<Value, AppError> {
-    let routes = proxy_model_routes(provider)?;
+    model_list_response_for_providers(std::slice::from_ref(provider))
+}
+
+#[cfg(test)]
+pub fn model_list_response_for_providers(providers: &[Provider]) -> Result<Value, AppError> {
+    model_list_response_for_providers_with_combos(providers, &[])
+}
+
+/// Merge Claude Desktop `/v1/models` across routing-participating cards.
+/// The first provider still supplies the built-in claude-* routes; other cards
+/// contribute `{slug}/{model}` ids so the picker can target them.
+pub fn model_list_response_for_providers_with_combos(
+    providers: &[Provider],
+    combos: &[crate::proxy::combo::ModelCombo],
+) -> Result<Value, AppError> {
+    let Some(primary) = providers.first() else {
+        return Err(AppError::localized(
+            "claude_desktop.provider.missing",
+            "Claude Desktop 没有可用的供应商",
+            "Claude Desktop has no available providers",
+        ));
+    };
+    let mut routes = proxy_model_routes(primary)?;
+    let slugs = crate::proxy::model_routing::assign_routing_slugs(providers);
+    let mut seen: std::collections::HashSet<String> =
+        routes.iter().map(|route| route.route_id.clone()).collect();
+
+    for provider in providers {
+        if !crate::proxy::model_routing::participates_in_routing_catalog(provider) {
+            continue;
+        }
+        let Some(slug) = slugs.get(&provider.id) else {
+            continue;
+        };
+        for model in crate::proxy::model_routing::provider_upstream_model_ids(provider) {
+            let routed = format!(
+                "{slug}/{}",
+                crate::proxy::model_routing::alias_inner_slashes(&model)
+            );
+            if seen.insert(routed.clone()) {
+                routes.push(ResolvedModelRoute {
+                    route_id: routed,
+                    upstream_model: model,
+                    label_override: Some(format!("{} / {slug}", provider.name)),
+                    supports_1m: false,
+                });
+            }
+        }
+    }
+
+    for combo in combos {
+        if crate::proxy::combo::resolve_combo_targets(combo, providers).is_empty() {
+            continue;
+        }
+        let routed = combo.canonical_model_id();
+        if seen.insert(routed.clone()) {
+            routes.push(ResolvedModelRoute {
+                route_id: routed,
+                upstream_model: combo.canonical_model_id(),
+                label_override: Some(format!("Combo / {}", combo.id)),
+                supports_1m: false,
+            });
+        }
+    }
+
     let data: Vec<Value> = routes
         .iter()
         .map(|route| {
@@ -737,6 +810,14 @@ pub fn map_proxy_request_model(mut body: Value, provider: &Provider) -> Result<V
                         .flatten()
                 })
                 .map(|route| route.upstream_model.clone())
+        })
+        .or_else(|| {
+            // Routed `{slug}/upstream` ids are stripped before this mapper runs.
+            // Accept only this card's advertised upstream ids (e.g. `kimi-k2`).
+            // Bare `gpt-*` that are not on the card stay fail-closed.
+            crate::proxy::model_routing::provider_upstream_model_ids(provider)
+                .into_iter()
+                .find(|id| id == requested)
         })
         .ok_or_else(|| {
             AppError::localized(
@@ -1628,6 +1709,40 @@ mod tests {
         let err = map_proxy_request_model(json!({"model": "claude-opus-4-8"}), &provider)
             .expect_err("unknown route should fail");
         assert!(err.to_string().contains("claude-opus-4-8"));
+
+        let passthrough = map_proxy_request_model(json!({"model": "kimi-k2"}), &provider)
+            .expect("stripped upstream model should pass through");
+        assert_eq!(passthrough["model"], json!("kimi-k2"));
+    }
+
+    #[test]
+    fn claude_desktop_model_list_merges_routed_ids() {
+        let primary = proxy_provider("kimi");
+        let mut secondary = proxy_provider("deepseek");
+        secondary.name = "DeepSeek".to_string();
+        secondary
+            .meta
+            .as_mut()
+            .expect("meta")
+            .claude_desktop_model_routes = std::collections::HashMap::from([(
+            "claude-sonnet-4-6".to_string(),
+            ClaudeDesktopModelRoute {
+                model: "deepseek-v4".to_string(),
+                label_override: Some("DeepSeek V4".to_string()),
+                supports_1m: None,
+            },
+        )]);
+
+        let models = model_list_response_for_providers(&[primary, secondary]).expect("merged list");
+        let ids: Vec<&str> = models["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .filter_map(|item| item.get("id").and_then(Value::as_str))
+            .collect();
+        assert_eq!(ids[0], "claude-sonnet-4-6");
+        assert!(ids.contains(&"kimi/kimi-k2"), "{ids:?}");
+        assert!(ids.contains(&"deepseek/deepseek-v4"), "{ids:?}");
     }
 
     #[test]

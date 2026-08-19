@@ -29,6 +29,14 @@ vi.mock("@/components/providers/forms/XaiOAuthSection", () => ({
   XaiOAuthSection: () => <div />,
 }));
 
+vi.mock("@/components/providers/forms/KimiOAuthSection", () => ({
+  KimiOAuthSection: () => <div />,
+}));
+
+vi.mock("@/components/providers/forms/AnthropicOAuthSection", () => ({
+  AnthropicOAuthSection: () => <div />,
+}));
+
 describe("CodexOAuthSection", () => {
   let scrollIntoViewDescriptor: PropertyDescriptor | undefined;
 

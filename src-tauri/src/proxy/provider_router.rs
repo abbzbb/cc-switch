@@ -7,10 +7,58 @@ use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
 use crate::proxy::circuit_breaker::{AllowResult, CircuitBreaker, CircuitBreakerConfig};
+use crate::proxy::combo::{
+    combo_id_from_request_model, find_combo, order_failover, order_round_robin,
+    resolve_combo_targets, ComboRoundRobinState, ComboStrategy, ResolvedComboTarget,
+};
+use crate::proxy::official_pool::{
+    hottest_quota_from_response_headers, hottest_quota_utilization, keep_official_affinity,
+    pick_official_pool, pool_card_secret, pool_family_for_unprefixed_model,
+    provider_chatgpt_account_id, provider_pool_family, quota_identity,
+    subscription_pool_candidates, OfficialPoolState, SubscriptionPoolFamily,
+    OFFICIAL_POOL_AUTO_SWITCH_THRESHOLD,
+};
+use crate::proxy::providers::anthropic_oauth_auth::AnthropicOAuthManager;
+use crate::proxy::providers::kimi_oauth_auth::KimiOAuthManager;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::RwLock;
+
+/// Providers selected for one request, optionally with per-attempt upstream models.
+#[derive(Debug, Clone)]
+pub struct ProviderSelection {
+    pub providers: Vec<Provider>,
+    /// When set (combo routes), rewrite `body.model` to this id for each attempt.
+    pub attempt_upstream_models: Option<Vec<String>>,
+    /// True only for classic failover. Pin / combo / pool must not change current.
+    pub promote_current_on_success: bool,
+}
+
+impl ProviderSelection {
+    pub fn from_providers(providers: Vec<Provider>) -> Self {
+        Self {
+            providers,
+            attempt_upstream_models: None,
+            promote_current_on_success: true,
+        }
+    }
+}
+
+fn selection_from_resolved(targets: Vec<ResolvedComboTarget>) -> ProviderSelection {
+    let attempt_upstream_models = Some(
+        targets
+            .iter()
+            .map(|target| target.upstream_model.clone())
+            .collect(),
+    );
+    ProviderSelection {
+        providers: targets.into_iter().map(|target| target.provider).collect(),
+        attempt_upstream_models,
+        promote_current_on_success: false,
+    }
+}
 
 /// Codex Official requests carry the selected account's native Authorization
 /// header. Reusing that request against another account card would cross the
@@ -20,21 +68,103 @@ pub(crate) fn provider_supports_failover(app_type: &str, provider: &Provider) ->
         || !crate::proxy::providers::is_codex_official_provider(provider)
 }
 
+async fn resolve_subscription_pool_secret(
+    provider: &Provider,
+    family: SubscriptionPoolFamily,
+    kimi: Option<&KimiOAuthManager>,
+    anthropic: Option<&AnthropicOAuthManager>,
+) -> Option<String> {
+    if let Some(secret) = pool_card_secret(provider) {
+        return Some(secret);
+    }
+    match family {
+        SubscriptionPoolFamily::CodexOfficial => None,
+        SubscriptionPoolFamily::KimiCoding => {
+            let account_id = provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.managed_account_id_for("kimi_oauth"))?;
+            kimi?.get_valid_token_for_account(&account_id).await.ok()
+        }
+        SubscriptionPoolFamily::AnthropicOauth => {
+            let account_id = provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.managed_account_id_for("anthropic_oauth"))?;
+            anthropic?
+                .get_valid_token_for_account(&account_id)
+                .await
+                .ok()
+        }
+    }
+}
+
+async fn fetch_subscription_pool_quota(
+    provider: &Provider,
+    kimi: Option<&KimiOAuthManager>,
+    anthropic: Option<&AnthropicOAuthManager>,
+) -> Option<(String, f64)> {
+    let family = provider_pool_family(provider)?;
+    if matches!(family, SubscriptionPoolFamily::CodexOfficial) {
+        return None;
+    }
+    let identity = quota_identity(provider)?;
+    let secret = resolve_subscription_pool_secret(provider, family, kimi, anthropic).await?;
+    let quota = match family {
+        SubscriptionPoolFamily::CodexOfficial => return None,
+        SubscriptionPoolFamily::AnthropicOauth => {
+            crate::services::subscription::query_claude_quota(&secret)
+                .await
+                .ok()?
+        }
+        SubscriptionPoolFamily::KimiCoding => crate::services::coding_plan::get_coding_plan_quota(
+            crate::proxy::providers::KIMI_CODING_API_BASE_URL,
+            &secret,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .ok()?,
+    };
+    hottest_quota_utilization(&quota).map(|score| (identity, score))
+}
+
 /// 供应商路由器
 pub struct ProviderRouter {
     /// 数据库连接
     db: Arc<Database>,
     /// 熔断器管理器 - key 格式: "app_type:provider_id"
     circuit_breakers: Arc<RwLock<HashMap<String, Arc<CircuitBreaker>>>>,
+    /// Smooth weighted round-robin counters keyed by combo id.
+    combo_rr: Arc<RwLock<HashMap<String, ComboRoundRobinState>>>,
+    /// ChatGPT Official account-pool affinity + cooldown (process-local).
+    official_pool: Arc<RwLock<OfficialPoolState>>,
 }
 
 impl ProviderRouter {
     /// 创建新的供应商路由器
+    #[cfg(test)]
     pub fn new(db: Arc<Database>) -> Self {
+        Self::with_official_pool(db, Arc::new(RwLock::new(OfficialPoolState::default())))
+    }
+
+    pub fn with_official_pool(
+        db: Arc<Database>,
+        official_pool: Arc<RwLock<OfficialPoolState>>,
+    ) -> Self {
         Self {
             db,
             circuit_breakers: Arc::new(RwLock::new(HashMap::new())),
+            combo_rr: Arc::new(RwLock::new(HashMap::new())),
+            official_pool,
         }
+    }
+
+    pub fn inbound_capability_tokens(&self) -> Vec<String> {
+        crate::proxy::inbound_auth::inbound_capability_tokens(&self.db)
     }
 
     /// 选择可用的供应商（支持故障转移）
@@ -128,6 +258,294 @@ impl ProviderRouter {
         }
 
         Ok(result)
+    }
+
+    /// Select providers for a request, honouring `combo/{id}` then `provider/model`.
+    ///
+    /// A matching routing slug pins that card (no failover). An unprefixed model
+    /// that uniquely belongs to one card is also pinned. Two or more subscription
+    /// cards of the same family advertising the same native id form an account
+    /// pool. Otherwise this falls back to [`Self::select_providers`].
+    #[cfg(test)]
+    pub async fn select_providers_for_request(
+        &self,
+        app_type: &str,
+        request_model: &str,
+    ) -> Result<ProviderSelection, AppError> {
+        self.select_providers_for_request_with_session(app_type, request_model, None)
+            .await
+    }
+
+    pub async fn select_providers_for_request_with_session(
+        &self,
+        app_type: &str,
+        request_model: &str,
+        session_id: Option<&str>,
+    ) -> Result<ProviderSelection, AppError> {
+        let all_providers: Vec<Provider> =
+            self.db.get_all_providers(app_type)?.into_values().collect();
+        let combos = self.db.list_model_combos()?;
+        if let Some(combo_id) = combo_id_from_request_model(request_model, !combos.is_empty()) {
+            return self
+                .select_combo_targets(&all_providers, &combos, combo_id)
+                .await;
+        }
+
+        match crate::proxy::model_routing::decide_model_route(&all_providers, request_model) {
+            crate::proxy::model_routing::ModelRouteDecision::Pinned { provider_id, .. } => {
+                let provider = all_providers
+                    .into_iter()
+                    .find(|provider| provider.id == provider_id)
+                    .ok_or_else(|| {
+                        AppError::InvalidInput(format!("unknown routed provider '{request_model}'"))
+                    })?;
+                Ok(ProviderSelection {
+                    providers: vec![provider],
+                    attempt_upstream_models: None,
+                    promote_current_on_success: false,
+                })
+            }
+            crate::proxy::model_routing::ModelRouteDecision::Default => {
+                if let Some(pooled) = self
+                    .try_official_pool(app_type, request_model, &all_providers, session_id)
+                    .await
+                {
+                    return Ok(ProviderSelection {
+                        providers: vec![pooled],
+                        attempt_upstream_models: None,
+                        promote_current_on_success: false,
+                    });
+                }
+                self.select_providers(app_type)
+                    .await
+                    .map(ProviderSelection::from_providers)
+            }
+        }
+    }
+
+    async fn try_official_pool(
+        &self,
+        app_type: &str,
+        request_model: &str,
+        providers: &[Provider],
+        session_id: Option<&str>,
+    ) -> Option<Provider> {
+        let family = pool_family_for_unprefixed_model(request_model)?;
+        let candidates = subscription_pool_candidates(providers, request_model, family);
+        if candidates.len() < 2 {
+            return None;
+        }
+
+        let current_id = AppType::from_str(app_type)
+            .ok()
+            .and_then(|app_enum| {
+                crate::settings::get_effective_current_provider(&self.db, &app_enum)
+                    .ok()
+                    .flatten()
+            })
+            .or_else(|| self.db.get_current_provider(app_type).ok().flatten());
+        let now = Instant::now();
+        let state = self.official_pool.read().await;
+        let usage = state.quota_map().clone();
+
+        let eligible: Vec<&Provider> = candidates
+            .iter()
+            .copied()
+            .filter(|provider| !state.is_cooling(&provider.id, now))
+            .collect();
+        let affinity_pool = if eligible.is_empty() {
+            candidates.as_slice()
+        } else {
+            eligible.as_slice()
+        };
+
+        if let Some(session_id) = session_id.map(str::trim).filter(|id| !id.is_empty()) {
+            if let Some(bound_id) = state.bound_provider(session_id) {
+                if !state.is_cooling(bound_id, now) {
+                    if let Some(bound) = affinity_pool
+                        .iter()
+                        .find(|provider| provider.id == bound_id)
+                    {
+                        if keep_official_affinity(
+                            bound,
+                            affinity_pool,
+                            &usage,
+                            OFFICIAL_POOL_AUTO_SWITCH_THRESHOLD,
+                        ) {
+                            return Some((*bound).clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        pick_official_pool(
+            current_id.as_deref(),
+            &candidates,
+            state.cooldown_map(),
+            now,
+            &usage,
+        )
+    }
+
+    pub async fn bind_official_affinity(&self, session_id: &str, provider_id: &str) {
+        self.official_pool
+            .write()
+            .await
+            .bind(session_id, provider_id);
+    }
+
+    pub async fn clear_official_affinity(&self, session_id: &str) {
+        self.official_pool.write().await.clear_session(session_id);
+    }
+
+    pub async fn note_official_cooldown(&self, provider_id: &str) {
+        self.official_pool
+            .write()
+            .await
+            .note_cooldown(provider_id, Instant::now());
+    }
+
+    pub async fn note_official_quota(&self, account_id: &str, utilization: f64) {
+        self.official_pool
+            .write()
+            .await
+            .note_quota(account_id, utilization);
+    }
+
+    pub async fn note_official_quota_from_headers(
+        &self,
+        provider: &Provider,
+        headers: &http::HeaderMap,
+    ) {
+        let Some(account_id) = provider_chatgpt_account_id(provider) else {
+            return;
+        };
+        if let Some(utilization) = hottest_quota_from_response_headers(headers) {
+            self.note_official_quota(&account_id, utilization).await;
+        }
+    }
+
+    pub async fn schedule_official_quota_refresh(
+        &self,
+        account_id: String,
+        manager: Arc<crate::proxy::providers::codex_oauth_auth::CodexOAuthManager>,
+    ) {
+        #[cfg(test)]
+        {
+            let _ = (account_id, manager);
+            return;
+        }
+        #[cfg(not(test))]
+        {
+            let mut state = self.official_pool.write().await;
+            if !state.try_begin_wham_poll(&account_id, Instant::now()) {
+                return;
+            }
+            drop(state);
+            let pool = self.official_pool.clone();
+            tokio::spawn(async move {
+                let token = match manager.get_valid_token_for_account(&account_id).await {
+                    Ok(token) => token,
+                    Err(_) => return,
+                };
+                if let Ok(quota) = crate::services::subscription::query_codex_quota(
+                    &token,
+                    Some(&account_id),
+                    "codex_oauth",
+                    "Codex OAuth access token expired or rejected. Please re-login via cc-switch.",
+                )
+                .await
+                {
+                    if let Some(score) = hottest_quota_utilization(&quota) {
+                        pool.write().await.note_quota(&account_id, score);
+                    }
+                }
+            });
+        }
+    }
+
+    pub async fn schedule_subscription_pool_quota_refresh(
+        &self,
+        provider: &Provider,
+        kimi: Option<Arc<KimiOAuthManager>>,
+        anthropic: Option<Arc<AnthropicOAuthManager>>,
+    ) {
+        #[cfg(test)]
+        {
+            let _ = (provider, kimi, anthropic);
+            return;
+        }
+        #[cfg(not(test))]
+        {
+            let Some(identity) = quota_identity(provider) else {
+                return;
+            };
+            let mut state = self.official_pool.write().await;
+            if !state.try_begin_wham_poll(&identity, Instant::now()) {
+                return;
+            }
+            drop(state);
+            let provider = provider.clone();
+            let pool = self.official_pool.clone();
+            tokio::spawn(async move {
+                if let Some((account_id, score)) =
+                    fetch_subscription_pool_quota(&provider, kimi.as_deref(), anthropic.as_deref())
+                        .await
+                {
+                    pool.write().await.note_quota(&account_id, score);
+                }
+            });
+        }
+    }
+
+    /// Resolve and query pool quota immediately (no spawn, no WHAM throttle).
+    #[cfg(test)]
+    pub(crate) async fn refresh_subscription_pool_quota_now(
+        &self,
+        provider: &Provider,
+        kimi: Option<&KimiOAuthManager>,
+        anthropic: Option<&AnthropicOAuthManager>,
+    ) -> bool {
+        let Some((identity, score)) =
+            fetch_subscription_pool_quota(provider, kimi, anthropic).await
+        else {
+            return false;
+        };
+        self.note_official_quota(&identity, score).await;
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn quota_for_test(&self, account_id: &str) -> Option<f64> {
+        self.official_pool
+            .read()
+            .await
+            .quota_map()
+            .get(account_id)
+            .copied()
+    }
+
+    async fn select_combo_targets(
+        &self,
+        providers: &[Provider],
+        combos: &[crate::proxy::combo::ModelCombo],
+        combo_id: &str,
+    ) -> Result<ProviderSelection, AppError> {
+        let combo = find_combo(combos, combo_id)
+            .ok_or_else(|| AppError::InvalidInput(format!("unknown combo '{combo_id}'")))?;
+        let resolved = resolve_combo_targets(combo, providers);
+        if resolved.is_empty() {
+            return Err(AppError::NoProvidersConfigured);
+        }
+        let ordered = match combo.strategy {
+            ComboStrategy::Failover => order_failover(resolved),
+            ComboStrategy::RoundRobin => {
+                let mut state = self.combo_rr.write().await;
+                order_round_robin(&combo.id, resolved, combo.sticky_limit, &mut state)
+            }
+        };
+        Ok(selection_from_resolved(ordered))
     }
 
     /// 请求执行前获取熔断器“放行许可”
@@ -319,6 +737,36 @@ mod tests {
             ..Default::default()
         });
         provider
+    }
+
+    fn anthropic_oauth_card(id: &str, token: &str) -> Provider {
+        Provider::with_id(
+            id.to_string(),
+            format!("Claude {id}"),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": token,
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_MODEL": "claude-sonnet-4-6"
+                }
+            }),
+            None,
+        )
+    }
+
+    fn kimi_coding_card(id: &str, key: &str) -> Provider {
+        Provider::with_id(
+            id.to_string(),
+            format!("Kimi {id}"),
+            json!({
+                "auth": { "OPENAI_API_KEY": key },
+                "config": format!(
+                    "model = \"kimi-for-coding\"\n\n[model_providers.{id}]\nbase_url = \"https://api.kimi.com/coding/v1\"\n"
+                ),
+                "modelCatalog": { "models": [{ "model": "kimi-for-coding" }] }
+            }),
+            None,
+        )
     }
 
     struct TempHome {
@@ -633,5 +1081,453 @@ mod tests {
         let third = router.allow_provider_request("a", "claude").await;
         assert!(third.allowed);
         assert!(third.used_half_open_permit);
+    }
+
+    fn catalog_provider(id: &str, name: &str, model: &str) -> Provider {
+        Provider::with_id(
+            id.to_string(),
+            name.to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-test" },
+                "config": format!(
+                    "model_provider = \"{id}\"\nmodel = \"{model}\"\n\n[model_providers.{id}]\nbase_url = \"https://example.com/v1\"\nwire_api = \"chat\"\n"
+                ),
+                "modelCatalog": { "models": [{ "model": model }] }
+            }),
+            None,
+        )
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn request_prefix_pins_card_and_skips_failover() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let kimi = catalog_provider("kimi", "Kimi", "k2");
+        let deepseek = catalog_provider("deepseek", "DeepSeek", "deepseek-v4");
+        db.save_provider("codex", &kimi).unwrap();
+        db.save_provider("codex", &deepseek).unwrap();
+        db.set_current_provider("codex", "kimi").unwrap();
+        db.add_to_failover_queue("codex", "kimi").unwrap();
+        db.add_to_failover_queue("codex", "deepseek").unwrap();
+        let mut config = db.get_proxy_config_for_app("codex").await.unwrap();
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        let pinned = router
+            .select_providers_for_request("codex", "deepseek/deepseek-v4")
+            .await
+            .unwrap();
+        assert_eq!(pinned.providers.len(), 1);
+        assert_eq!(pinned.providers[0].id, "deepseek");
+        assert!(!pinned.promote_current_on_success);
+
+        let unique = router
+            .select_providers_for_request("codex", "k2")
+            .await
+            .unwrap();
+        assert_eq!(unique.providers.len(), 1);
+        assert_eq!(unique.providers[0].id, "kimi");
+
+        let unknown = router
+            .select_providers_for_request("codex", "anthropic/claude-sonnet-5")
+            .await
+            .unwrap();
+        assert!(unknown
+            .providers
+            .iter()
+            .any(|provider| provider.id == "kimi"));
+        assert!(!unknown.providers.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn official_prefix_does_not_failover() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let official = managed_codex_official("codex-official", "acct-1");
+        let kimi = catalog_provider("kimi", "Kimi", "k2");
+        db.save_provider("codex", &official).unwrap();
+        db.save_provider("codex", &kimi).unwrap();
+        db.set_current_provider("codex", "kimi").unwrap();
+        db.add_to_failover_queue("codex", "kimi").unwrap();
+        db.add_to_failover_queue("codex", "codex-official").unwrap();
+        let mut config = db.get_proxy_config_for_app("codex").await.unwrap();
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+
+        let router = ProviderRouter::new(db);
+        let pinned = router
+            .select_providers_for_request("codex", "codex-official/gpt-5.5")
+            .await
+            .unwrap();
+        assert_eq!(pinned.providers.len(), 1);
+        assert_eq!(pinned.providers[0].id, "codex-official");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn official_pool_picks_current_then_affinity_then_skips_cooldown() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let mut main = managed_codex_official("main", "account-a");
+        main.sort_index = Some(0);
+        let mut backup = managed_codex_official("backup", "account-b");
+        backup.sort_index = Some(1);
+        db.save_provider("codex", &main).unwrap();
+        db.save_provider("codex", &backup).unwrap();
+        db.set_current_provider("codex", "main").unwrap();
+
+        let router = ProviderRouter::new(db);
+        let selected = router
+            .select_providers_for_request("codex", "gpt-5.5")
+            .await
+            .unwrap();
+        assert_eq!(selected.providers.len(), 1);
+        assert_eq!(selected.providers[0].id, "main");
+
+        router
+            .bind_official_affinity("codex_thread-1", "backup")
+            .await;
+        let sticky = router
+            .select_providers_for_request_with_session("codex", "gpt-5.5", Some("codex_thread-1"))
+            .await
+            .unwrap();
+        assert_eq!(sticky.providers[0].id, "backup");
+
+        router.note_official_cooldown("backup").await;
+        let after_cooldown = router
+            .select_providers_for_request_with_session("codex", "gpt-5.5", Some("codex_thread-1"))
+            .await
+            .unwrap();
+        assert_eq!(after_cooldown.providers[0].id, "main");
+
+        router.note_official_cooldown("backup").await;
+        let pinned_while_cooling = router
+            .select_providers_for_request("codex", "backup/gpt-5.5")
+            .await
+            .unwrap();
+        assert_eq!(pinned_while_cooling.providers[0].id, "backup");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn official_pool_picks_lowest_quota_and_auto_switches_hot_thread() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let mut main = managed_codex_official("main", "account-a");
+        main.sort_index = Some(0);
+        let mut backup = managed_codex_official("backup", "account-b");
+        backup.sort_index = Some(1);
+        db.save_provider("codex", &main).unwrap();
+        db.save_provider("codex", &backup).unwrap();
+        db.set_current_provider("codex", "main").unwrap();
+
+        let router = ProviderRouter::new(db);
+        router.note_official_quota("account-a", 90.0).await;
+        router.note_official_quota("account-b", 12.0).await;
+
+        let selected = router
+            .select_providers_for_request("codex", "gpt-5.5")
+            .await
+            .unwrap();
+        assert_eq!(selected.providers[0].id, "backup");
+
+        router
+            .bind_official_affinity("codex_thread-hot", "main")
+            .await;
+        let sticky_cool = router
+            .select_providers_for_request_with_session("codex", "gpt-5.5", Some("codex_thread-hot"))
+            .await
+            .unwrap();
+        // Bound account is at 90%, backup is cooler → rebind.
+        assert_eq!(sticky_cool.providers[0].id, "backup");
+
+        router.note_official_quota("account-a", 40.0).await;
+        router
+            .bind_official_affinity("codex_thread-ok", "main")
+            .await;
+        let sticky_ok = router
+            .select_providers_for_request_with_session("codex", "gpt-5.5", Some("codex_thread-ok"))
+            .await
+            .unwrap();
+        assert_eq!(sticky_ok.providers[0].id, "main");
+
+        let pinned = router
+            .select_providers_for_request("codex", "main/gpt-5.5")
+            .await
+            .unwrap();
+        assert_eq!(pinned.providers[0].id, "main");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn kimi_coding_pool_picks_lowest_quota_and_keeps_slug_pin() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let mut main = kimi_coding_card("kimi-a", "key-a");
+        main.sort_index = Some(0);
+        let mut backup = kimi_coding_card("kimi-b", "key-b");
+        backup.sort_index = Some(1);
+        db.save_provider("codex", &main).unwrap();
+        db.save_provider("codex", &backup).unwrap();
+        db.set_current_provider("codex", "kimi-a").unwrap();
+
+        let router = ProviderRouter::new(db);
+        router.note_official_quota("kimi-a", 88.0).await;
+        router.note_official_quota("kimi-b", 11.0).await;
+
+        let selected = router
+            .select_providers_for_request("codex", "kimi-for-coding")
+            .await
+            .unwrap();
+        assert_eq!(selected.providers[0].id, "kimi-b");
+
+        let pinned = router
+            .select_providers_for_request("codex", "kimi-a/kimi-for-coding")
+            .await
+            .unwrap();
+        assert_eq!(pinned.providers[0].id, "kimi-a");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn anthropic_oauth_pool_picks_lowest_quota_on_claude_app() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let mut main = anthropic_oauth_card("claude-a", "sk-ant-oat01-a");
+        main.sort_index = Some(0);
+        let mut backup = anthropic_oauth_card("claude-b", "sk-ant-oat01-b");
+        backup.sort_index = Some(1);
+        db.save_provider("claude", &main).unwrap();
+        db.save_provider("claude", &backup).unwrap();
+        db.set_current_provider("claude", "claude-a").unwrap();
+
+        let router = ProviderRouter::new(db);
+        router.note_official_quota("claude-a", 90.0).await;
+        router.note_official_quota("claude-b", 15.0).await;
+
+        let selected = router
+            .select_providers_for_request("claude", "claude-sonnet-4-6")
+            .await
+            .unwrap();
+        assert_eq!(selected.providers[0].id, "claude-b");
+
+        let pinned = router
+            .select_providers_for_request("claude", "claude-a/claude-sonnet-4-6")
+            .await
+            .unwrap();
+        assert_eq!(pinned.providers[0].id, "claude-a");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn combo_expands_to_target_order_even_when_failover_off() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let kimi = catalog_provider("kimi", "Kimi", "k2");
+        let deepseek = catalog_provider("deepseek", "DeepSeek", "deepseek-v4");
+        db.save_provider("codex", &kimi).unwrap();
+        db.save_provider("codex", &deepseek).unwrap();
+        db.set_current_provider("codex", "kimi").unwrap();
+        let mut config = db.get_proxy_config_for_app("codex").await.unwrap();
+        config.auto_failover_enabled = false;
+        db.update_proxy_config_for_app(config).await.unwrap();
+        db.save_model_combos(&[crate::proxy::combo::ModelCombo {
+            id: "main".into(),
+            targets: vec![
+                crate::proxy::combo::parse_combo_target_spec("deepseek/deepseek-v4").unwrap(),
+                crate::proxy::combo::parse_combo_target_spec("kimi/k2").unwrap(),
+            ],
+            strategy: crate::proxy::combo::ComboStrategy::Failover,
+            sticky_limit: 1,
+        }])
+        .unwrap();
+
+        let router = ProviderRouter::new(db);
+        let selected = router
+            .select_providers_for_request("codex", "combo/main")
+            .await
+            .unwrap();
+        assert_eq!(
+            selected
+                .providers
+                .iter()
+                .map(|provider| provider.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["deepseek", "kimi"]
+        );
+        assert_eq!(
+            selected.attempt_upstream_models.as_deref(),
+            Some(["deepseek-v4".to_string(), "k2".to_string()].as_slice())
+        );
+        assert!(!selected.promote_current_on_success);
+
+        let claude = router
+            .select_providers_for_request("codex", "anthropic/combo/main")
+            .await
+            .unwrap();
+        assert_eq!(claude.providers[0].id, "deepseek");
+
+        let err = router
+            .select_providers_for_request("codex", "combo/missing")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)));
+    }
+
+    struct RestoreEnv {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl RestoreEnv {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = env::var(key).ok();
+            env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => env::set_var(self.key, value),
+                None => env::remove_var(self.key),
+            }
+        }
+    }
+
+    async fn spawn_json_get(body: serde_json::Value) -> (String, tokio::task::JoinHandle<()>) {
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(move || {
+                let body = body.clone();
+                async move { axum::Json(body) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind usage mock");
+        let addr = listener.local_addr().expect("usage mock addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve usage mock");
+        });
+        (format!("http://{addr}/"), handle)
+    }
+
+    fn managed_kimi_oauth_card(id: &str, account_id: &str) -> Provider {
+        let mut provider = kimi_coding_card(id, "PROXY_MANAGED");
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("kimi_oauth".to_string()),
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("kimi_oauth".to_string()),
+                account_id: Some(account_id.to_string()),
+            }),
+            ..Default::default()
+        });
+        provider
+    }
+
+    fn managed_anthropic_oauth_card(id: &str, account_id: &str) -> Provider {
+        let mut provider = anthropic_oauth_card(id, "PROXY_MANAGED");
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("anthropic_oauth".to_string()),
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("anthropic_oauth".to_string()),
+                account_id: Some(account_id.to_string()),
+            }),
+            ..Default::default()
+        });
+        provider
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn managed_kimi_oauth_quota_refresh_uses_account_store_token() {
+        let _home = TempHome::new();
+        let (url, handle) = spawn_json_get(json!({
+            "limits": [{ "detail": { "limit": 100, "remaining": 86 } }]
+        }))
+        .await;
+        let _env = RestoreEnv::set("CC_SWITCH_TEST_KIMI_USAGE_URL", &url);
+
+        let oauth_dir = _home.dir.path().join("oauth");
+        std::fs::create_dir_all(&oauth_dir).unwrap();
+        let manager = KimiOAuthManager::new(oauth_dir);
+        manager
+            .add_test_account_with_access_token("acct-k", "kimi-managed-token", Some("k@kimi.com"))
+            .await
+            .unwrap();
+
+        let provider = managed_kimi_oauth_card("kimi-a", "acct-k");
+        let db = Arc::new(Database::memory().unwrap());
+        let router = ProviderRouter::new(db);
+        assert!(
+            router
+                .refresh_subscription_pool_quota_now(&provider, Some(&manager), None)
+                .await
+        );
+        let quota = router.quota_for_test("acct-k").await.expect("kimi quota");
+        assert!(
+            (quota - 14.0).abs() < 1e-6,
+            "expected ~14% used, got {quota}"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn managed_anthropic_oauth_quota_refresh_uses_account_store_token() {
+        let _home = TempHome::new();
+        let (url, handle) = spawn_json_get(json!({
+            "five_hour": { "utilization": 22.5 }
+        }))
+        .await;
+        let _env = RestoreEnv::set("CC_SWITCH_TEST_CLAUDE_USAGE_URL", &url);
+
+        let oauth_dir = _home.dir.path().join("oauth");
+        std::fs::create_dir_all(&oauth_dir).unwrap();
+        let manager = AnthropicOAuthManager::new(oauth_dir);
+        manager
+            .add_test_account_with_access_token(
+                "acct-a",
+                "sk-ant-oat01-managed",
+                Some("a@claude.ai"),
+            )
+            .await
+            .unwrap();
+
+        let provider = managed_anthropic_oauth_card("claude-a", "acct-a");
+        let db = Arc::new(Database::memory().unwrap());
+        let router = ProviderRouter::new(db);
+        assert!(
+            router
+                .refresh_subscription_pool_quota_now(&provider, None, Some(&manager))
+                .await
+        );
+        assert_eq!(router.quota_for_test("acct-a").await, Some(22.5));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn managed_card_without_store_token_skips_quota_refresh() {
+        let _home = TempHome::new();
+        let provider = managed_kimi_oauth_card("kimi-a", "acct-missing");
+        let oauth_dir = _home.dir.path().join("oauth");
+        std::fs::create_dir_all(&oauth_dir).unwrap();
+        let manager = KimiOAuthManager::new(oauth_dir);
+        let db = Arc::new(Database::memory().unwrap());
+        let router = ProviderRouter::new(db);
+        assert!(
+            !router
+                .refresh_subscription_pool_quota_now(&provider, Some(&manager), None)
+                .await
+        );
+        assert_eq!(router.quota_for_test("acct-missing").await, None);
     }
 }

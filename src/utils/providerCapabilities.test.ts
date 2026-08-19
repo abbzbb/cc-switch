@@ -204,12 +204,34 @@ describe("providerNeedsRouting", () => {
   });
 
   describe("托管 OAuth：providerType 权威，与 apiFormat 无关（P2）", () => {
-    it("Claude 下 xai_oauth 需要路由", () => {
+    it("Claude 下 kimi_oauth 需要路由", () => {
       expect(
         providerNeedsRouting(
           "claude",
           mkProvider({
-            meta: { providerType: "xai_oauth", apiFormat: "openai_responses" },
+            meta: { providerType: "kimi_oauth", apiFormat: "anthropic" },
+          }),
+        ),
+      ).toBe(true);
+    });
+
+    it("Claude 下 anthropic_oauth 需要路由", () => {
+      expect(
+        providerNeedsRouting(
+          "claude",
+          mkProvider({
+            meta: { providerType: "anthropic_oauth", apiFormat: "anthropic" },
+          }),
+        ),
+      ).toBe(true);
+    });
+
+    it("Codex 下 kimi_oauth 需要路由", () => {
+      expect(
+        providerNeedsRouting(
+          "codex",
+          mkProvider({
+            meta: { providerType: "kimi_oauth", apiFormat: "openai_chat" },
           }),
         ),
       ).toBe(true);
@@ -363,21 +385,24 @@ describe("providerNeedsRouting", () => {
       ).toBe(true);
     });
 
-    it.each(["github_copilot", "codex_oauth", "xai_oauth"])(
-      "direct 模式的托管 OAuth %s 仍需要路由",
-      (providerType) => {
-        expect(
-          providerNeedsRouting(
-            "claude-desktop",
-            mkProvider({
-              meta: {
-                providerType,
-                claudeDesktopMode: "direct",
-              },
-            }),
-          ),
-        ).toBe(true);
-      },
-    );
+    it.each([
+      "github_copilot",
+      "codex_oauth",
+      "xai_oauth",
+      "kimi_oauth",
+      "anthropic_oauth",
+    ])("direct 模式的托管 OAuth %s 仍需要路由", (providerType) => {
+      expect(
+        providerNeedsRouting(
+          "claude-desktop",
+          mkProvider({
+            meta: {
+              providerType,
+              claudeDesktopMode: "direct",
+            },
+          }),
+        ),
+      ).toBe(true);
+    });
   });
 });

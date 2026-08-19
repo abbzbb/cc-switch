@@ -559,7 +559,7 @@ pub(crate) fn create_usage_collector(
 }
 
 /// 异步记录使用量
-fn spawn_log_usage(
+pub(crate) fn spawn_log_usage(
     state: &ProxyState,
     ctx: &RequestContext,
     usage: TokenUsage,
@@ -1030,6 +1030,9 @@ mod tests {
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             app_handle: None,
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
+            codex_oauth_manager: None,
+            kimi_oauth_manager: None,
+            anthropic_oauth_manager: None,
         }
     }
 

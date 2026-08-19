@@ -5,6 +5,46 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.1] - 2026-08-19
+
+The Codex picker is no longer capped at each card's mapping table or current `model`. The merged catalog unions toml-advertised models, a local Official GPT seed, and the last successful upstream `/v1/models` fetch. The proxy panel can choose which configs appear in that catalog.
+
+### Added
+
+- **Routing catalog picker on the proxy panel**: Codex / Claude / Claude Desktop cards can be included or hidden from the merged picker without opening each edit form. Slug-prefixed requests still work when a card is hidden. Gemini / Grok keep current-config + failover.
+
+### Changed
+
+- **Wider Codex catalog projection**: `cc-switch-model-catalog.json` unions the mapping table, toml `model` / `[model_providers.*].models`, a local Official seed (`gpt-5.4` / `gpt-5.5` / `gpt-5.6*`, …), and `~/.codex/cc-switch-model-discovery.json`. Loopback proxy URLs and `PROXY_MANAGED` keys are not fetched. Codex must be fully restarted after a refresh.
+
+### Fixed
+
+- **Unsigned release builds when signing secrets are missing**: Apple Developer ID and Tauri updater artifacts are skipped instead of failing the whole Release workflow; empty-array nounset abort on macOS bash 3.2 is avoided.
+
+## [3.20.0] - 2026-08-19
+
+The local proxy now does OpenCodex-style routing without bundling `ocx`. After takeover, Codex and Claude pickers merge every participating card as `{slug}/{model}`; a request with that id pins the card and does not cross-provider failover. Unprefixed official ChatGPT / Kimi For Coding / Claude Pro/Max ids pick the idle managed account, stick the session, and refresh quota in the background. Combos expose `combo/{id}` as failover or weighted round-robin. The Auth Center can sign into Kimi (device code) and Claude Pro/Max (browser PKCE or Claude CLI import) and bind the account to a card without writing the token into provider settings. Hosted `web_search` on non-official models and images sent to text-only models can be executed by a signed-in Claude Pro/Max or ChatGPT Official sidecar.
+
+### Added
+
+- **`provider/model` Routing**: Takeover merges participating provider catalogs into the Codex picker as `{routing_slug}/{model}` and into Claude Code `/model` as `anthropic/{slug}/{model}`. A prefixed request pins that card. An unknown first segment falls through to the current provider instead of 400. Cards can opt out of the merged catalog while still accepting a slug prefix. Dual `/v1/models` listings stay separate.
+- **Combo Virtual Models**: The proxy panel defines `combo/{id}` with `provider/model[:weight]` targets. `failover` walks the list; `round-robin` picks the first hop by weight and still continues on failure. Unknown combo ids return 400; no resolvable target returns 503. The `combo/` namespace is reserved.
+- **Managed Account Pools**: Two or more ChatGPT Official, Kimi For Coding, or Claude Pro/Max cards that share an unprefixed model pick the account with the lowest known utilization (unknown ranks after a known value, never as 0%). The session stays on the account that opened it until 401/403/429 or the hottest window is ≥ 80% with a more idle account available. `{slug}/model` still pins and injects that card's token. Official ChatGPT cards do not cross-account failover on the same request.
+- **Kimi and Claude Pro/Max Hosted Login**: Auth Center device-code login for Kimi, and browser PKCE (`http://localhost:54545/callback`) or Claude CLI import for Anthropic. Presets bind `providerType` + `authBinding`; tokens stay in the local account store. Empty official Claude seed cards are not treated as proxy-safe OAuth. Cancelled Anthropic login aborts the local callback.
+- **Background Quota Refresh for Managed Cards**: Pure `PROXY_MANAGED` Kimi / Anthropic cards resolve the bound account token and refresh utilization the same way official ChatGPT cards do, so cold-start pool ranking is not empty. Auth Center and provider cards show per-account usage for Kimi and Claude Pro/Max, matching the ChatGPT footer.
+- **Web Search / Vision Sidecars**: Hosted `web_search` on a non-official, non-Anthropic-OAuth card is rewritten to a function tool and executed by a signed-in Claude Pro/Max or ChatGPT Official account. Images on a text-only model are described first when a backend is ready, and left inert otherwise. Responses, Claude `/v1/messages`, and Codex `/v1/chat/completions` all run the loop. Settings expose backend, optional model, per-turn caps, and timeouts.
+
+### Changed
+
+- Official ChatGPT sidecar requests send `chatgpt-account-id`, `session_id`, `x-client-request-id`, `x-codex-window-id`, `originator`, and `version` so the Codex backend can route the model cohort.
+- Sidecar web-search hops restore Responses function-call namespaces and record token usage from the final hop.
+
+### Upgrade notes
+
+- No database schema migration — `SCHEMA_VERSION` stays at 16.
+- Sidecars stay inert until Claude Pro/Max or ChatGPT Official is signed in (or a test mock URL is set). Official ChatGPT / Anthropic OAuth cards do not intercept hosted web search.
+- Do not name a provider slug `combo` if any Combo is defined.
+
 ## [3.19.2] - 2026-08-06
 
 Development since v3.19.1 is a correctness and hardening pass, with the management UI picking up its two most-requested conveniences. The headline fix is to Codex usage accounting: a rollout file that interleaves several cumulative token counters — a gateway replaying the same snapshot under different rate-limit buckets, or two genuinely distinct counters alternating — could record several times its true usage, and the importer now recognizes both shapes; replaying a real corpus of ~1,900 rollout files lands within 0.001% of an independently computed ideal recount (#3011). A six-part security hardening caps every unbounded read a contributor's audit surfaced — usage scripts, Grok session logs, catalog files, proxy response bodies and their decompression — and the deep-link import dialog now shows two credential fields it previously persisted without rendering. OMO setups regain a working integration on two fronts: when OMO's unified config (`~/.omo/omo.jsonc` or `omo.json`) exists, writes land inside it instead of the legacy file the runtime no longer reads, and the model pickers merge in whatever the installed OpenCode reports at runtime. The MCP, prompt and skill panels gain search, with bulk per-app toggles joining the MCP and skill lists; the Auth Center shows each ChatGPT account's subscription usage inline; and two write-path overhauls — batched SQL backups and batched Codex session imports — cut the worst restore, sync and reimport stalls on large databases.

@@ -7,6 +7,9 @@ import { useManagedAuth } from "@/components/providers/forms/hooks/useManagedAut
 const apiMocks = vi.hoisted(() => ({
   authGetStatus: vi.fn(),
   authRemoveAccount: vi.fn(),
+  authCancelLogin: vi.fn(),
+  authStartLogin: vi.fn(),
+  authPollForAccount: vi.fn(),
 }));
 const toastMocks = vi.hoisted(() => ({
   success: vi.fn(),
@@ -17,8 +20,14 @@ vi.mock("@/lib/api", () => ({
     authGetStatus: (...args: unknown[]) => apiMocks.authGetStatus(...args),
     authRemoveAccount: (...args: unknown[]) =>
       apiMocks.authRemoveAccount(...args),
+    authCancelLogin: (...args: unknown[]) => apiMocks.authCancelLogin(...args),
+    authStartLogin: (...args: unknown[]) => apiMocks.authStartLogin(...args),
+    authPollForAccount: (...args: unknown[]) =>
+      apiMocks.authPollForAccount(...args),
   },
-  settingsApi: {},
+  settingsApi: {
+    openExternal: vi.fn().mockResolvedValue(undefined),
+  },
 }));
 
 vi.mock("sonner", () => ({
@@ -63,6 +72,15 @@ describe("useManagedAuth", () => {
       ],
     });
     apiMocks.authRemoveAccount.mockReset().mockResolvedValue(undefined);
+    apiMocks.authCancelLogin.mockReset().mockResolvedValue(undefined);
+    apiMocks.authStartLogin.mockReset().mockResolvedValue({
+      device_code: "dev",
+      user_code: "BROWSER",
+      verification_uri: "https://example.com",
+      interval: 2,
+      expires_in: 60,
+    });
+    apiMocks.authPollForAccount.mockReset().mockResolvedValue(null);
   });
 
   it("shows a success toast after removing an account", async () => {
@@ -81,6 +99,27 @@ describe("useManagedAuth", () => {
     );
     await waitFor(() =>
       expect(toastMocks.success).toHaveBeenCalledWith("账号已移除"),
+    );
+  });
+
+  it("cancels Anthropic PKCE on the backend when login is aborted", async () => {
+    apiMocks.authGetStatus.mockResolvedValue({
+      provider: "anthropic_oauth",
+      authenticated: false,
+      default_account_id: null,
+      accounts: [],
+    });
+    const { result } = renderHook(() => useManagedAuth("anthropic_oauth"), {
+      wrapper: createWrapper(),
+    });
+    await waitFor(() => expect(result.current.isStatusSuccess).toBe(true));
+
+    act(() => result.current.startAuth());
+    await waitFor(() => expect(result.current.isPolling).toBe(true));
+    act(() => result.current.cancelAuth());
+
+    await waitFor(() =>
+      expect(apiMocks.authCancelLogin).toHaveBeenCalledWith("anthropic_oauth"),
     );
   });
 });
