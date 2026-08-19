@@ -1314,4 +1314,64 @@ mod tests {
             assert!(slugs.contains(&"grok/grok-4.6".to_string()), "{slugs:?}");
         });
     }
+
+    #[test]
+    #[serial]
+    fn discovery_extra_grok_keeps_real_reasoning_levels() {
+        with_test_home(|| {
+            let mut cache = HashMap::new();
+            cache.insert("grok".to_string(), vec!["grok-4.6".into()]);
+            save_routing_discovery_cache(&cache);
+            let catalog =
+                build_merged_codex_routing_catalog(&[provider("grok", "Grok", &["grok-4.5"])])
+                    .expect("merged catalog");
+            let entry = catalog["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item.get("slug").and_then(Value::as_str) == Some("grok/grok-4.6"))
+                .expect("routed grok-4.6");
+            let efforts: Vec<&str> = entry["supported_reasoning_levels"]
+                .as_array()
+                .expect("supported_reasoning_levels")
+                .iter()
+                .filter_map(|level| level.get("effort").and_then(Value::as_str))
+                .collect();
+            assert_eq!(efforts, ["low", "medium", "high", "xhigh"], "{entry}");
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn discovery_extra_gpt56_keeps_max_and_ultra() {
+        with_test_home(|| {
+            let mut cache = HashMap::new();
+            cache.insert("packy".to_string(), vec!["gpt-5.6-sol".into()]);
+            save_routing_discovery_cache(&cache);
+            let catalog =
+                build_merged_codex_routing_catalog(&[provider("packy", "Packy", &["gpt-5.5"])])
+                    .expect("merged catalog");
+            let entry = catalog["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item.get("slug").and_then(Value::as_str) == Some("packy/gpt-5.6-sol"))
+                .expect("routed gpt-5.6-sol");
+            let efforts: Vec<&str> = entry["supported_reasoning_levels"]
+                .as_array()
+                .expect("supported_reasoning_levels")
+                .iter()
+                .filter_map(|level| level.get("effort").and_then(Value::as_str))
+                .collect();
+            assert_eq!(
+                efforts,
+                ["low", "medium", "high", "xhigh", "max", "ultra"],
+                "{entry}"
+            );
+            assert_eq!(
+                entry.get("default_reasoning_level").and_then(Value::as_str),
+                Some("medium")
+            );
+        });
+    }
 }

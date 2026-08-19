@@ -1181,6 +1181,44 @@ fn apply_codex_reasoning_level_override(
     true
 }
 
+fn catalog_model_leaf(model: &str) -> &str {
+    model.rsplit('/').next().unwrap_or(model).trim()
+}
+
+/// Effort list for catalog rows that never got an explicit `reasoningLevels`.
+/// Unknown ids stay on the template so we do not invent fake sliders.
+/// Returns `(levels, default_level)`.
+fn inferred_catalog_reasoning_levels(
+    model: &str,
+) -> Option<(&'static [&'static str], Option<&'static str>)> {
+    let leaf = catalog_model_leaf(model).to_ascii_lowercase();
+    if leaf.starts_with("grok-4.6") {
+        return Some((&["low", "medium", "high", "xhigh"], Some("high")));
+    }
+    if leaf.starts_with("grok-4") {
+        return Some((&["low", "medium", "high"], Some("high")));
+    }
+    // GPT-5.6: API effort is none/low/medium/high/xhigh/max (OpenAI latest-model
+    // guide). Codex also exposes `ultra` as a first-class effort. `none` stays
+    // off this list — official GPT catalogs keep disable-thinking out of the
+    // intensity picker.
+    if leaf.starts_with("gpt-5.6") {
+        return Some((
+            &["low", "medium", "high", "xhigh", "max", "ultra"],
+            Some("medium"),
+        ));
+    }
+    if leaf.starts_with("gpt-5")
+        || leaf.starts_with("o1")
+        || leaf.starts_with("o3")
+        || leaf.starts_with("o4")
+        || leaf.starts_with("codex-")
+    {
+        return Some((&["low", "medium", "high", "xhigh"], Some("medium")));
+    }
+    None
+}
+
 fn codex_catalog_model_entry(
     template: &Value,
     spec: &CodexCatalogModelSpec,
@@ -1254,11 +1292,21 @@ fn codex_catalog_model_entry(
 
     // Per-model reasoning levels override the template's conservative
     // none/high default (e.g. a LiteLLM gateway serving a model that accepts
-    // low/medium/high/xhigh/max). Applies to every profile.
+    // low/medium/high/xhigh/max). Applies to every profile. Routing extras
+    // and official seed rows often omit the field — infer known families so
+    // Codex does not collapse the picker to a single "high".
     let template_default = template
         .get("default_reasoning_level")
         .and_then(|value| value.as_str());
-    apply_codex_reasoning_level_override(entry_obj, template_default, spec);
+    if !apply_codex_reasoning_level_override(entry_obj, template_default, spec) {
+        if let Some((levels, default_level)) = inferred_catalog_reasoning_levels(&spec.model) {
+            let mut inferred = spec.clone();
+            inferred.reasoning_levels =
+                Some(levels.iter().map(|level| (*level).to_string()).collect());
+            inferred.default_reasoning_level = default_level.map(str::to_string);
+            apply_codex_reasoning_level_override(entry_obj, template_default, &inferred);
+        }
+    }
 
     entry
 }
@@ -1287,10 +1335,11 @@ struct CodexCatalogModelSpec {
     /// `NativeResponses`.
     base_instructions: Option<String>,
     /// Per-row override for the generated catalog's `supported_reasoning_levels`
-    /// (e.g. ["none", "low", "medium", "high", "xhigh", "max"]). When omitted
-    /// the template's conservative default (none/high) is kept. Consulted for
-    /// every profile; the vendor-catalog path applies it on top of the
-    /// official entry.
+    /// (e.g. ["none", "low", "medium", "high", "xhigh", "max"]). When omitted,
+    /// known families (gpt-5 / grok-4 / o-series) get inferred levels; every
+    /// other model keeps the template's conservative none/high default.
+    /// Consulted for every profile; the vendor-catalog path applies it on top
+    /// of the official entry.
     reasoning_levels: Option<Vec<String>>,
     /// Per-row override for the generated catalog's `default_reasoning_level`.
     /// Only meaningful together with `reasoning_levels`; when absent the
@@ -4284,6 +4333,57 @@ base_url = "https://production.api/v1"
                 .get("default_reasoning_level")
                 .and_then(|v| v.as_str()),
             Some("xhigh")
+        );
+    }
+
+    #[test]
+    fn inferred_family_reasoning_levels_for_bare_catalog_rows() {
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    { "model": "grok-4.6" },
+                    { "model": "xai/grok-4.5" },
+                    { "model": "gpt-5.6-sol" },
+                    { "model": "gpt-5.5" },
+                    { "model": "kimi-k2" }
+                ]
+            }
+        });
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            "",
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("catalog generation should not error")
+        .expect("non-empty modelCatalog must yield a catalog");
+        let models = catalog["models"].as_array().expect("models array");
+        let efforts = |index: usize| -> Vec<&str> {
+            models[index]["supported_reasoning_levels"]
+                .as_array()
+                .expect("supported_reasoning_levels array")
+                .iter()
+                .filter_map(|level| level.get("effort").and_then(|v| v.as_str()))
+                .collect()
+        };
+        assert_eq!(efforts(0), vec!["low", "medium", "high", "xhigh"]);
+        assert_eq!(efforts(1), vec!["low", "medium", "high"]);
+        assert_eq!(
+            efforts(2),
+            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(efforts(3), vec!["low", "medium", "high", "xhigh"]);
+        assert_eq!(efforts(4), vec!["none", "high"]);
+        assert_eq!(
+            models[0]
+                .get("default_reasoning_level")
+                .and_then(|v| v.as_str()),
+            Some("high")
+        );
+        assert_eq!(
+            models[2]
+                .get("default_reasoning_level")
+                .and_then(|v| v.as_str()),
+            Some("medium")
         );
     }
 
