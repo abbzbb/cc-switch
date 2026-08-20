@@ -13,7 +13,10 @@ use crate::{
     config::write_json_file,
     error::AppError,
     provider::Provider,
-    proxy::providers::{is_codex_official_provider, resolve_codex_catalog_tool_profile},
+    proxy::providers::{
+        codex_provider_upstream_model, is_codex_official_provider,
+        resolve_codex_catalog_tool_profile,
+    },
 };
 use serde_json::{json, Value};
 use std::{
@@ -670,10 +673,13 @@ const LOCAL_COMPACT_PROVIDER_NAME: &str = "CC Switch";
 /// Rewrite the live takeover `config.toml` so Codex compact/default-model
 /// paths stay consistent with the merged routing catalog.
 ///
+/// - When `current_provider_id` is set, write that card's prefixed default
+///   (`grok/grok-4.6`) instead of leaving a leftover union-catalog first
+///   row (`default/gpt-5.6-sol`). A live id already on that card is kept.
 /// - Namespace a unique unprefixed Official `model` (`gpt-5.6-sol` →
 ///   `{slug}/gpt-5.6-sol`) and drop an unprefixed `review_model`. Already
 ///   namespaced ids are left alone so a session pick of `grok/grok-4.6` is
-///   not clobbered on catalog refresh.
+///   not clobbered on catalog refresh when no current card is supplied.
 /// - Restore `model_catalog_json` when oh-my-codex/`omx setup` deleted it.
 /// - Strip inline `[model_providers.*].models` dumps so Official 258k rows
 ///   cannot sit beside `grok/grok-4.6` after the catalog pointer is gone.
@@ -682,12 +688,16 @@ const LOCAL_COMPACT_PROVIDER_NAME: &str = "CC Switch";
 ///   `/responses/compact` to an upstream that does not implement it.
 /// - Drop an undersized top-level `model_context_window` /
 ///   `model_auto_compact_token_limit` so Grok is not compacted at 120k.
-pub fn rewrite_live_codex_toml_for_shared_catalog(providers: &[Provider]) -> Result<(), AppError> {
+pub fn rewrite_live_codex_toml_for_shared_catalog(
+    providers: &[Provider],
+    current_provider_id: Option<&str>,
+) -> Result<(), AppError> {
     let config = crate::codex_config::read_codex_config_text()?;
     if config.trim().is_empty() {
         return Ok(());
     }
-    let next = rewrite_codex_toml_text_for_routing_takeover(&config, providers)?;
+    let next =
+        rewrite_codex_toml_text_for_routing_takeover(&config, providers, current_provider_id)?;
     if next == config {
         return Ok(());
     }
@@ -697,6 +707,7 @@ pub fn rewrite_live_codex_toml_for_shared_catalog(providers: &[Provider]) -> Res
 fn rewrite_codex_toml_text_for_routing_takeover(
     config: &str,
     providers: &[Provider],
+    current_provider_id: Option<&str>,
 ) -> Result<String, AppError> {
     let mut next = config.to_string();
     if !catalog_pointer_is_cc_switch(&next) {
@@ -705,8 +716,12 @@ fn rewrite_codex_toml_text_for_routing_takeover(
 
     let current_model = extract_toml_string_field(&next, "model");
     let review_model = extract_toml_string_field(&next, "review_model");
-    let rewrite =
-        shared_catalog_live_rewrite(providers, current_model.as_deref(), review_model.as_deref());
+    let rewrite = shared_catalog_live_rewrite(
+        providers,
+        current_model.as_deref(),
+        review_model.as_deref(),
+        current_provider_id,
+    );
     if let Some(model) = rewrite.model.as_deref() {
         next = crate::codex_config::update_codex_toml_field(&next, "model", model)
             .map_err(AppError::Config)?;
@@ -891,6 +906,7 @@ fn shared_catalog_live_rewrite(
     providers: &[Provider],
     current_model: Option<&str>,
     review_model: Option<&str>,
+    current_provider_id: Option<&str>,
 ) -> SharedCatalogLiveRewrite {
     if !catalog_has_non_official_participant(providers) {
         return SharedCatalogLiveRewrite {
@@ -898,7 +914,11 @@ fn shared_catalog_live_rewrite(
             clear_review_model: false,
         };
     }
-    let model = current_model.and_then(|value| namespaced_live_model(providers, value));
+    let model = if let Some(current_id) = current_provider_id {
+        live_model_for_current_provider(providers, current_model, current_id)
+    } else {
+        current_model.and_then(|value| namespaced_live_model(providers, value))
+    };
     // Mixed catalogs must not keep a leftover Official `review_model`
     // (`gpt-5.6-sol` or `default/gpt-5.6-sol`). Codex review then follows
     // `model` instead of silently calling Official beside Grok.
@@ -909,6 +929,140 @@ fn shared_catalog_live_rewrite(
         model,
         clear_review_model,
     }
+}
+
+fn live_model_for_current_provider(
+    providers: &[Provider],
+    current_model: Option<&str>,
+    current_provider_id: &str,
+) -> Option<String> {
+    let current_default = provider_default_routed_model(providers, current_provider_id)?;
+    let Some(current_model) = current_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Some(current_default);
+    };
+    if live_model_belongs_to_provider(providers, current_model, current_provider_id) {
+        return namespaced_live_model(providers, current_model);
+    }
+    Some(current_default)
+}
+
+fn live_model_belongs_to_provider(providers: &[Provider], model: &str, provider_id: &str) -> bool {
+    matches!(
+        decide_model_route(providers, model),
+        ModelRouteDecision::Pinned { provider_id: pinned, .. } if pinned == provider_id
+    )
+}
+
+fn provider_default_upstream_model(provider: &Provider) -> Option<String> {
+    codex_provider_upstream_model(provider)
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("modelCatalog")
+                .and_then(|catalog| catalog.get("models"))
+                .and_then(Value::as_array)
+                .and_then(|models| models.first())
+                .and_then(|entry| entry.get("model"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(ToString::to_string)
+        })
+        .or_else(|| provider_upstream_model_ids(provider).into_iter().next())
+}
+
+/// Prefixed catalog slug for a card's default model (`grok/grok-4.6`).
+/// Official-only catalogs keep the unprefixed pool id.
+pub fn provider_default_routed_model(providers: &[Provider], provider_id: &str) -> Option<String> {
+    let provider = providers
+        .iter()
+        .find(|provider| provider.id == provider_id)?;
+    if !participates_in_routing_catalog(provider) {
+        return None;
+    }
+    let upstream = provider_default_upstream_model(provider)?;
+    if !catalog_has_non_official_participant(providers) && is_codex_official_provider(provider) {
+        return Some(upstream);
+    }
+    let slugs = assign_routing_slugs(providers);
+    let slug = slugs.get(&provider.id)?;
+    Some(format!("{slug}/{}", alias_inner_slashes(&upstream)))
+}
+
+fn is_implicit_default_card(provider: &Provider) -> bool {
+    is_codex_official_provider(provider)
+        || provider.id.eq_ignore_ascii_case("default")
+        || preferred_routing_slug(provider).eq_ignore_ascii_case("default")
+}
+
+fn is_official_auxiliary_model(model: &str) -> bool {
+    matches!(
+        catalog_model_leaf(model).as_str(),
+        "codex-auto-review" | "gpt-5.3-codex-spark"
+    )
+}
+
+fn request_matches_provider_default(
+    providers: &[Provider],
+    request_model: &str,
+    provider: &Provider,
+) -> bool {
+    let Some(upstream) = provider_default_upstream_model(provider) else {
+        return false;
+    };
+    if models_match(request_model, &upstream) {
+        return true;
+    }
+    let slugs = assign_routing_slugs(providers);
+    let known: HashSet<String> = slugs.values().cloned().collect();
+    if let Some((slug, rest)) = parse_routed_model(request_model, &known) {
+        return slugs
+            .get(&provider.id)
+            .is_some_and(|assigned| assigned.eq_ignore_ascii_case(slug))
+            && models_match(rest, &upstream);
+    }
+    request_model.split_once('/').is_some_and(|(prefix, rest)| {
+        !prefix.is_empty()
+            && !known.contains(&prefix.to_ascii_lowercase())
+            && models_match(rest, &upstream)
+    })
+}
+
+/// Follow Guardian / leftover Official defaults onto the current third-party
+/// card. Explicit picks of another provider's non-default slug stay pinned.
+pub fn request_should_follow_current_provider(
+    providers: &[Provider],
+    request_model: &str,
+    current_provider_id: &str,
+) -> Option<String> {
+    let trimmed = request_model.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let current = providers
+        .iter()
+        .find(|provider| provider.id == current_provider_id)?;
+    if is_implicit_default_card(current) {
+        return None;
+    }
+    let current_default = provider_default_routed_model(providers, current_provider_id)?;
+    if models_match(trimmed, &current_default)
+        || live_model_belongs_to_provider(providers, trimmed, current_provider_id)
+    {
+        return None;
+    }
+    if is_official_auxiliary_model(trimmed) {
+        return Some(current_default);
+    }
+    let leftover = providers.iter().any(|provider| {
+        provider.id != current_provider_id
+            && is_implicit_default_card(provider)
+            && request_matches_provider_default(providers, trimmed, provider)
+    });
+    leftover.then_some(current_default)
 }
 
 /// Routed `{slug}/{model}` for a third-party card. Official pins return
@@ -1873,7 +2027,8 @@ mod tests {
             shared_catalog_live_rewrite(
                 &[official.clone()],
                 Some("gpt-5.6-sol"),
-                Some("gpt-5.6-sol")
+                Some("gpt-5.6-sol"),
+                None,
             ),
             SharedCatalogLiveRewrite {
                 model: None,
@@ -1885,6 +2040,7 @@ mod tests {
                 &[official.clone(), grok.clone()],
                 Some("gpt-5.6-sol"),
                 Some("gpt-5.6-sol"),
+                None,
             ),
             SharedCatalogLiveRewrite {
                 model: Some("codex-official/gpt-5.6-sol".into()),
@@ -1896,6 +2052,7 @@ mod tests {
                 &[official.clone(), grok.clone()],
                 Some("grok/grok-4.6"),
                 Some("grok/grok-4.6"),
+                None,
             ),
             SharedCatalogLiveRewrite {
                 model: None,
@@ -1907,11 +2064,110 @@ mod tests {
                 &[official, grok],
                 Some("grok/grok-4.6"),
                 Some("default/gpt-5.6-sol"),
+                None,
             ),
             SharedCatalogLiveRewrite {
                 model: None,
                 clear_review_model: true,
             }
+        );
+    }
+
+    #[test]
+    fn shared_catalog_rewrites_leftover_default_to_current_provider() {
+        let official = official("default");
+        let grok = provider("grok", "Grok", &["grok-4.6"]);
+        let providers = [official, grok];
+        assert_eq!(
+            shared_catalog_live_rewrite(
+                &providers,
+                Some("default/gpt-5.6-sol"),
+                Some("default/gpt-5.6-sol"),
+                Some("grok"),
+            ),
+            SharedCatalogLiveRewrite {
+                model: Some("grok/grok-4.6".into()),
+                clear_review_model: true,
+            }
+        );
+        assert_eq!(
+            shared_catalog_live_rewrite(&providers, Some("grok/grok-4.5"), None, Some("grok"),),
+            SharedCatalogLiveRewrite {
+                model: None,
+                clear_review_model: false,
+            }
+        );
+        assert_eq!(
+            shared_catalog_live_rewrite(&providers, Some("grok/grok-4.6"), None, Some("default"),),
+            SharedCatalogLiveRewrite {
+                model: Some("default/gpt-5.4".into()),
+                clear_review_model: false,
+            }
+        );
+    }
+
+    #[test]
+    fn current_provider_leads_merged_catalog_priority() {
+        let official = official("default");
+        let grok = provider("grok", "Grok", &["grok-4.6"]);
+        let official_first = catalog_slugs(&[official.clone(), grok.clone()]);
+        assert!(
+            official_first
+                .first()
+                .is_some_and(|slug| slug.starts_with("default/")),
+            "union catalog without current-first starts on the Official card: {official_first:?}"
+        );
+
+        let current_first = providers_current_first(&[grok.clone()], [official, grok]);
+        let slugs = catalog_slugs(&current_first);
+        assert_eq!(
+            slugs.first().map(String::as_str),
+            Some("grok/grok-4.6"),
+            "{slugs:?}"
+        );
+        let catalog = build_merged_codex_routing_catalog(&current_first).expect("catalog");
+        assert_eq!(
+            catalog["models"][0].get("priority").and_then(Value::as_u64),
+            Some(1000)
+        );
+    }
+
+    #[test]
+    fn leftover_official_default_follows_current_third_party() {
+        let mut official = official("codex-official");
+        official.settings_config["config"] = json!("model = \"gpt-5.6-sol\"\n");
+        let grok = provider("grok", "Grok", &["grok-4.6"]);
+        let kimi = provider("kimi", "Kimi", &["k2"]);
+        let providers = [official, grok, kimi];
+        assert_eq!(
+            request_should_follow_current_provider(&providers, "default/gpt-5.6-sol", "grok")
+                .as_deref(),
+            Some("grok/grok-4.6")
+        );
+        assert_eq!(
+            request_should_follow_current_provider(&providers, "gpt-5.6-sol", "grok").as_deref(),
+            Some("grok/grok-4.6")
+        );
+        assert_eq!(
+            request_should_follow_current_provider(&providers, "codex-auto-review", "grok")
+                .as_deref(),
+            Some("grok/grok-4.6")
+        );
+        assert_eq!(
+            request_should_follow_current_provider(&providers, "kimi/k2", "grok"),
+            None
+        );
+        assert_eq!(
+            request_should_follow_current_provider(&providers, "codex-official/gpt-5.5", "grok"),
+            None
+        );
+        assert_eq!(
+            request_should_follow_current_provider(
+                &providers,
+                "default/gpt-5.6-sol",
+                "codex-official"
+            ),
+            None
         );
     }
 
@@ -2019,6 +2275,7 @@ models = [
                 official("codex-official"),
                 provider("grok", "Grok", &["grok-4.6"]),
             ],
+            None,
         )
         .expect("rewrite");
         assert!(
@@ -2065,6 +2322,7 @@ models = [
         let rewritten = rewrite_codex_toml_text_for_routing_takeover(
             sample_omx_takeover_toml(),
             &[official("codex-official")],
+            None,
         )
         .expect("rewrite");
         assert!(rewritten.contains("name = \"OpenAI\""), "{rewritten}");
@@ -2100,6 +2358,7 @@ base_url = "http://127.0.0.1:15721/v1"
                 official("codex-official"),
                 provider("grok", "Grok", &["grok-4.6"]),
             ],
+            None,
         )
         .expect("rewrite");
         assert!(
@@ -2126,6 +2385,7 @@ base_url = "http://127.0.0.1:15721/v1"
                 official("codex-official"),
                 provider("grok", "Grok", &["grok-4.6"]),
             ],
+            None,
         )
         .expect("rewrite");
         assert!(
@@ -2139,6 +2399,34 @@ base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
+    fn routing_takeover_pins_current_provider_default_over_catalog_head() {
+        let input = r#"
+model = "default/gpt-5.6-sol"
+review_model = "default/gpt-5.6-sol"
+model_provider = "cm"
+
+[model_providers.cm]
+name = "Grok"
+base_url = "http://127.0.0.1:15721/v1"
+"#;
+        let rewritten = rewrite_codex_toml_text_for_routing_takeover(
+            input,
+            &[official("default"), provider("grok", "Grok", &["grok-4.6"])],
+            Some("grok"),
+        )
+        .expect("rewrite");
+        assert!(
+            rewritten.contains("model = \"grok/grok-4.6\""),
+            "{rewritten}"
+        );
+        assert!(
+            !rewritten.contains("model = \"default/gpt-5.6-sol\""),
+            "{rewritten}"
+        );
+        assert!(!rewritten.contains("review_model"), "{rewritten}");
+    }
+
+    #[test]
     fn routing_takeover_disables_remote_compact_for_typed_grok() {
         let input = r#"
 model = "grok/grok-4.6"
@@ -2148,9 +2436,12 @@ model_provider = "cm"
 name = "OpenAI"
 base_url = "http://127.0.0.1:15721/v1"
 "#;
-        let rewritten =
-            rewrite_codex_toml_text_for_routing_takeover(input, &[official("codex-official")])
-                .expect("rewrite");
+        let rewritten = rewrite_codex_toml_text_for_routing_takeover(
+            input,
+            &[official("codex-official")],
+            None,
+        )
+        .expect("rewrite");
         assert!(rewritten.contains("name = \"CC Switch\""), "{rewritten}");
     }
 
@@ -2165,9 +2456,12 @@ model_catalog_json = "cc-switch-model-catalog.json"
 name = "CC Switch"
 base_url = "http://127.0.0.1:15721/v1"
 "#;
-        let rewritten =
-            rewrite_codex_toml_text_for_routing_takeover(input, &[official("codex-official")])
-                .expect("rewrite");
+        let rewritten = rewrite_codex_toml_text_for_routing_takeover(
+            input,
+            &[official("codex-official")],
+            None,
+        )
+        .expect("rewrite");
         assert!(rewritten.contains("name = \"OpenAI\""), "{rewritten}");
     }
 

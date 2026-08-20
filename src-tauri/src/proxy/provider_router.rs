@@ -15,7 +15,8 @@ use crate::{
         },
         model_routing::{
             current_live_codex_model, persist_third_party_live_codex_model,
-            request_should_follow_session, routed_session_pick, SessionModelFollow,
+            request_should_follow_current_provider, request_should_follow_session,
+            routed_session_pick, SessionModelFollow,
         },
         official_pool::{
             hottest_quota_from_response_headers, hottest_quota_utilization, keep_official_affinity,
@@ -363,6 +364,17 @@ impl ProviderRouter {
             if let Some(session_id) = session_id {
                 self.remember_codex_session_follow(session_id, pick, displaced)
                     .await;
+            }
+        }
+        if let Some(current_id) =
+            crate::settings::get_effective_current_provider(&self.db, &AppType::Codex)
+                .ok()
+                .flatten()
+        {
+            if let Some(follow) =
+                request_should_follow_current_provider(providers, request_model, &current_id)
+            {
+                return Some(follow);
             }
         }
         None
@@ -1298,6 +1310,48 @@ mod tests {
             followed_codes.attempt_upstream_models.as_deref(),
             Some(["grok-4.6".to_string()].as_slice())
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn current_grok_rewrites_guardian_leftover_default_in_other_session() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        crate::settings::set_current_provider(&AppType::Codex, Some("grok"))
+            .expect("set current grok");
+
+        let db = Arc::new(Database::memory().unwrap());
+        let mut official = managed_codex_official("codex-official", "acct-1");
+        official.settings_config["config"] = json!("model = \"gpt-5.6-sol\"\n");
+        db.save_provider("codex", &official).unwrap();
+        db.save_provider("codex", &catalog_provider("grok", "Grok", "grok-4.6"))
+            .unwrap();
+        db.set_current_provider("codex", "grok").unwrap();
+
+        let router = ProviderRouter::new(db);
+        let guardian = router
+            .select_providers_for_request_with_session(
+                "codex",
+                "default/gpt-5.6-sol",
+                Some("guardian-sess"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(guardian.providers[0].id, "grok");
+        assert_eq!(
+            guardian.attempt_upstream_models.as_deref(),
+            Some(["grok-4.6".to_string()].as_slice())
+        );
+
+        let explicit = router
+            .select_providers_for_request_with_session(
+                "codex",
+                "codex-official/gpt-5.5",
+                Some("other-thread"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(explicit.providers[0].id, "codex-official");
     }
 
     #[tokio::test]

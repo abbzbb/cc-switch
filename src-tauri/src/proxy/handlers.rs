@@ -142,12 +142,16 @@ async fn handle_codex_gateway_models(state: ProxyState) -> Result<Json<Value>, P
         );
         return Ok(Json(json!({"models": []})));
     }
-    let providers: Vec<_> = state
+    let current = state
+        .provider_router
+        .select_providers("codex")
+        .await
+        .unwrap_or_default();
+    let all = state
         .db
         .get_all_providers("codex")
-        .map_err(|e| ProxyError::DatabaseError(e.to_string()))?
-        .into_values()
-        .collect();
+        .map_err(|e| ProxyError::DatabaseError(e.to_string()))?;
+    let providers = super::model_routing::providers_current_first(&current, all.into_values());
     let combos = state.db.list_model_combos().unwrap_or_default();
     super::model_routing::build_merged_codex_routing_catalog_with_combos(&providers, &combos)
         .map(Json)
