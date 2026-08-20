@@ -425,9 +425,10 @@ pub fn combo_catalog_entry(
     providers: &[Provider],
     template: Option<&Value>,
 ) -> Option<Value> {
-    if resolve_combo_targets(combo, providers).is_empty() {
+    let resolved = resolve_combo_targets(combo, providers);
+    let Some(first) = resolved.first() else {
         return None;
-    }
+    };
     let slug = catalog_slug(combo);
     let display = format!("Combo / {}", combo.id);
     if let Some(mut entry) = template.cloned() {
@@ -438,13 +439,16 @@ pub fn combo_catalog_entry(
         }
         return Some(entry);
     }
+    let context_window =
+        crate::codex_config::inferred_catalog_context_window(&first.upstream_model)
+            .unwrap_or(128_000);
     Some(json!({
         "slug": slug,
         "display_name": display,
         "description": display,
         "model_messages": { "instructions_template": "" },
         "additional_speed_tiers": [],
-        "context_window": 128000,
+        "context_window": context_window,
         "input_modalities": ["text"],
     }))
 }

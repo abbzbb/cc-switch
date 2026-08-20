@@ -1185,6 +1185,28 @@ fn catalog_model_leaf(model: &str) -> &str {
     model.rsplit('/').next().unwrap_or(model).trim()
 }
 
+/// Official context window for known families when a catalog row omits
+/// `contextWindow`. Discovery extras and slug-prefixed routing rows used to
+/// fall through to 128k, which is wrong for Grok 4.5/4.6 (500k, docs.x.ai)
+/// and GPT-5.6 in the Codex catalog (372k, openai/codex#31860).
+pub(crate) fn inferred_catalog_context_window(model: &str) -> Option<u64> {
+    let leaf = catalog_model_leaf(model).to_ascii_lowercase();
+    if leaf.starts_with("grok-4.6") || leaf.starts_with("grok-4.5") {
+        return Some(500_000);
+    }
+    if leaf.starts_with("grok-4.3") || leaf.starts_with("grok-4.20") {
+        return Some(1_000_000);
+    }
+    // Codex's ChatGPT catalog, not the 1.05M API spec.
+    if leaf.starts_with("gpt-5.6") {
+        return Some(372_000);
+    }
+    if leaf.starts_with("gpt-5.5") {
+        return Some(272_000);
+    }
+    None
+}
+
 /// Effort list for catalog rows that never got an explicit `reasoningLevels`.
 /// Unknown ids stay on the template so we do not invent fake sliders.
 /// Returns `(levels, default_level)`.
@@ -1232,7 +1254,10 @@ fn codex_catalog_model_entry(
     };
 
     let display_name = spec.display_name.as_deref().unwrap_or(&spec.model);
-    let context_window = spec.context_window.unwrap_or(default_context_window);
+    let context_window = spec
+        .context_window
+        .or_else(|| inferred_catalog_context_window(&spec.model))
+        .unwrap_or(default_context_window);
     entry_obj.insert("slug".to_string(), json!(spec.model));
     entry_obj.insert("display_name".to_string(), json!(display_name));
     entry_obj.insert("description".to_string(), json!(display_name));
@@ -1317,9 +1342,9 @@ struct CodexCatalogModelSpec {
     /// Explicit user value only. Entries fall back to the model id — except
     /// official vendor catalog entries, which keep the vendor's display name.
     display_name: Option<String>,
-    /// Explicit user value only. Entries fall back to the config's
-    /// `model_context_window` (or 128k) — except official vendor catalog
-    /// entries, which keep the vendor's declared window.
+    /// Explicit user value only. Entries fall back to a known-family official
+    /// window, then the config's `model_context_window` (or 128k) — except
+    /// official vendor catalog entries, which keep the vendor's declared window.
     context_window: Option<u64>,
     /// Per-row override for the native template's `supports_parallel_tool_calls`
     /// (e.g. MiniMax=true, MiMo=false). Only consulted for `NativeResponses`.
@@ -2946,7 +2971,7 @@ pub fn restore_codex_settings_for_backfill(
 ///   otherwise falls back to top-level `base_url`.
 /// - `"wire_api"`: writes to `[model_providers.<current>].wire_api` if `model_provider` exists,
 ///   otherwise falls back to top-level `wire_api`.
-/// - `"model"` / `"model_catalog_json"`: writes to top-level field.
+/// - `"model"` / `"model_catalog_json"` / `"review_model"`: writes to top-level field.
 ///
 /// Empty value removes the field.
 pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Result<String, String> {
@@ -3021,7 +3046,7 @@ pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Resu
                 doc[field] = toml_edit::value(trimmed);
             }
         }
-        "model" | "model_catalog_json" => {
+        "model" | "model_catalog_json" | "review_model" => {
             if trimmed.is_empty() {
                 doc.as_table_mut().remove(field);
             } else {
@@ -4379,6 +4404,26 @@ base_url = "https://production.api/v1"
                 .get("default_reasoning_level")
                 .and_then(|v| v.as_str()),
             Some("medium")
+        );
+        assert_eq!(
+            models[0].get("context_window").and_then(|v| v.as_u64()),
+            Some(500_000)
+        );
+        assert_eq!(
+            models[1].get("context_window").and_then(|v| v.as_u64()),
+            Some(500_000)
+        );
+        assert_eq!(
+            models[2].get("context_window").and_then(|v| v.as_u64()),
+            Some(372_000)
+        );
+        assert_eq!(
+            models[3].get("context_window").and_then(|v| v.as_u64()),
+            Some(272_000)
+        );
+        assert_eq!(
+            models[4].get("context_window").and_then(|v| v.as_u64()),
+            Some(128_000)
         );
     }
 

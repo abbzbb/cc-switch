@@ -2099,6 +2099,13 @@ fn codex_proxy_error_json(
         return body;
     };
 
+    let cause = error_obj
+        .get("message")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or_else(|| get_error_message(error));
+
     let message = if upstream_status == Some(413) {
         // 413 来自上游渠道商的网关（典型是 nginx 的 client_max_body_size），不是 CC
         // Switch 本地代理的限制（本地 DefaultBodyLimit 已放到 200MB）。上游响应体往往是
@@ -2118,13 +2125,26 @@ fn codex_proxy_error_json(
             model = request_model,
             endpoint = endpoint,
         )
+    } else if is_html_upstream_gateway_error(upstream_status, &cause) {
+        // Cloudflare / nginx 5xx HTML is not a model JSON error. Dumping it into
+        // Codex makes a remote-compact failure look like a CC Switch bug.
+        let status = upstream_status.unwrap_or(502);
+        format!(
+            concat!(
+                "Upstream provider returned HTTP {status} as an HTML error page ",
+                "(typically Cloudflare/nginx Bad Gateway), not a model API error. ",
+                "The provider's edge or origin failed; this is not a CC Switch limit. ",
+                "Provider: {provider}; model: {model}; endpoint: {endpoint}. ",
+                "Retry later, or switch to a healthy Grok card (api.x.ai / xAI OAuth). ",
+                "If this happens during remote compact, the aggregator may not support ",
+                "Codex's compact payload — start a new thread or compact locally."
+            ),
+            status = status,
+            provider = provider_name,
+            model = request_model,
+            endpoint = endpoint,
+        )
     } else {
-        let cause = error_obj
-            .get("message")
-            .and_then(|value| value.as_str())
-            .map(ToString::to_string)
-            .filter(|message| !message.trim().is_empty())
-            .unwrap_or_else(|| get_error_message(error));
         let status_fragment = upstream_status
             .map(|status| format!("; upstream_status: HTTP {status}"))
             .unwrap_or_default();
@@ -2201,6 +2221,20 @@ fn codex_proxy_error_code(error: &ProxyError) -> &'static str {
         | ProxyError::StopFailed(_)
         | ProxyError::ResponseBodyTooLarge(_) => "cc_switch_proxy_error",
     }
+}
+
+fn looks_like_html_error_page(body: &str) -> bool {
+    let head = body
+        .trim_start()
+        .chars()
+        .take(240)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    head.contains("<!doctype html") || head.contains("<html")
+}
+
+fn is_html_upstream_gateway_error(status: Option<u16>, body: &str) -> bool {
+    matches!(status, Some(502 | 503 | 504)) && looks_like_html_error_page(body)
 }
 
 fn compact_error_message(message: &str, max_chars: usize) -> String {
@@ -3751,5 +3785,31 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
         assert_eq!(body["error"]["provider"], "HCAI");
         assert_eq!(body["error"]["model"], "gpt-5.5");
         assert_eq!(body["error"]["endpoint"], "/responses");
+    }
+
+    #[test]
+    fn codex_proxy_html_502_does_not_dump_cloudflare_page() {
+        let error = ProxyError::UpstreamError {
+            status: 502,
+            body: Some(
+                "<!DOCTYPE html> <html lang=\"en-US\"><head><title>niuma.codes | 502: Bad gateway</title></head>\
+                 <body><h1>Bad gateway Error code 502</h1>\
+                 <div>Visit cloudflare.com for more information.</div></body></html>"
+                    .to_string(),
+            ),
+        };
+        let body = codex_proxy_error_json("Grok", "grok/grok-4.6", "/responses", &error);
+
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("HTTP 502"));
+        assert!(message.to_lowercase().contains("upstream"));
+        assert!(message.contains("Grok"));
+        assert!(message.contains("grok/grok-4.6"));
+        assert!(!message.contains("<!DOCTYPE"));
+        assert!(!message.contains("<html"));
+        assert!(!message.contains("cloudflare.com"));
+        assert_eq!(body["error"]["upstream_status"], 502);
+        assert_eq!(body["error"]["provider"], "Grok");
+        assert_eq!(body["error"]["model"], "grok/grok-4.6");
     }
 }

@@ -3765,7 +3765,9 @@ impl ProxyService {
                 .list_model_combos()
                 .map_err(|e| format!("读取 Combo 失败: {e}"))?,
         )
-        .map_err(|e| format!("写入合并模型目录失败: {e}"))
+        .map_err(|e| format!("写入合并模型目录失败: {e}"))?;
+        crate::proxy::model_routing::rewrite_live_codex_toml_for_shared_catalog(&providers)
+            .map_err(|e| format!("改写 Codex 默认模型失败: {e}"))
     }
 
     fn codex_catalog_providers(&self) -> Result<Vec<Provider>, String> {

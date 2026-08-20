@@ -23,7 +23,10 @@ const ROUTING_DISCOVERY_FILENAME: &str = "cc-switch-model-discovery.json";
 /// Official Codex models the picker should keep even when the card only
 /// stored a single current `model =`. Live ChatGPT `/models` is not mirrored
 /// here; this is a local seed so unprefixed `gpt-*` rows do not collapse to
-/// just `gpt-5.5`.
+/// just `gpt-5.5`. Unprefixed copies are omitted from the merged picker when
+/// a non-Official card also participates, so Codex does not treat
+/// `gpt-5.6-sol` as a sibling of `grok/grok-4.6`. Typed unprefixed official
+/// ids still unique-pin Official.
 const OFFICIAL_CATALOG_SEED: &[&str] = &[
     "gpt-5.4",
     "gpt-5.4-mini",
@@ -519,6 +522,7 @@ pub fn build_merged_codex_routing_catalog_with_combos(
 ) -> Result<Value, AppError> {
     let slugs = assign_routing_slugs(providers);
     let discovery = load_routing_discovery_cache();
+    let hide_unprefixed_official = catalog_has_non_official_participant(providers);
     let mut models = Vec::new();
     let mut seen_slugs = HashSet::new();
     let mut priority = 0usize;
@@ -530,7 +534,8 @@ pub fn build_merged_codex_routing_catalog_with_combos(
         let Some(slug) = slugs.get(&provider.id) else {
             continue;
         };
-        let keep_unprefixed = is_codex_official_provider(provider);
+        let is_official = is_codex_official_provider(provider);
+        let keep_unprefixed = is_official && !hide_unprefixed_official;
         let profile = resolve_codex_catalog_tool_profile(provider);
         let config_text = provider
             .settings_config
@@ -550,7 +555,7 @@ pub fn build_merged_codex_routing_catalog_with_combos(
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default(),
-            None if keep_unprefixed => official_native_fallback_entries(),
+            None if is_official => official_native_fallback_entries(),
             None => Vec::new(),
         };
         if entries.is_empty() {
@@ -578,7 +583,7 @@ pub fn build_merged_codex_routing_catalog_with_combos(
             .filter(|id| !have.contains(id.as_str()) && !have.contains(&alias_inner_slashes(id)))
             .collect();
             if !extra.is_empty() {
-                entries.extend(catalog_entries_from_ids(&extra, profile));
+                entries.extend(catalog_entries_from_ids(&extra, profile, config_text));
             }
         }
 
@@ -641,6 +646,104 @@ pub fn write_merged_codex_routing_catalog_with_combos(
     let cache_path = get_codex_config_dir().join("models_cache.json");
     let _ = std::fs::remove_file(cache_path);
     Ok(())
+}
+
+fn catalog_has_non_official_participant(providers: &[Provider]) -> bool {
+    providers.iter().any(|provider| {
+        participates_in_routing_catalog(provider) && !is_codex_official_provider(provider)
+    })
+}
+
+/// Rewrite live `model = gpt-5.6-sol` to `{slug}/gpt-5.6-sol` when Official
+/// shares the picker with a third-party card. Codex auxiliary requests
+/// (compact / default-model path) read this field; leaving the unprefixed
+/// Official id next to `grok/grok-4.6` is what double-calls `gpt-5.6-sol`.
+/// Already-namespaced ids are left alone so a session pick of
+/// `grok/grok-4.6` is not clobbered on catalog refresh.
+///
+/// Unprefixed `review_model` is removed in the same situation so Codex's
+/// review turn follows `model` instead of a leftover Official default.
+pub fn rewrite_live_codex_toml_for_shared_catalog(providers: &[Provider]) -> Result<(), AppError> {
+    let config = crate::codex_config::read_codex_config_text()?;
+    if config.trim().is_empty() {
+        return Ok(());
+    }
+    let current_model = extract_toml_string_field(&config, "model");
+    let review_model = extract_toml_string_field(&config, "review_model");
+    let rewrite =
+        shared_catalog_live_rewrite(providers, current_model.as_deref(), review_model.as_deref());
+    if rewrite.model.is_none() && !rewrite.clear_review_model {
+        return Ok(());
+    }
+
+    let mut next = config;
+    if let Some(model) = rewrite.model.as_deref() {
+        next = crate::codex_config::update_codex_toml_field(&next, "model", model)
+            .map_err(AppError::Config)?;
+    }
+    if rewrite.clear_review_model {
+        next = crate::codex_config::update_codex_toml_field(&next, "review_model", "")
+            .map_err(AppError::Config)?;
+    }
+    crate::codex_config::write_codex_live_config_atomic(Some(&next))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SharedCatalogLiveRewrite {
+    model: Option<String>,
+    clear_review_model: bool,
+}
+
+fn shared_catalog_live_rewrite(
+    providers: &[Provider],
+    current_model: Option<&str>,
+    review_model: Option<&str>,
+) -> SharedCatalogLiveRewrite {
+    if !catalog_has_non_official_participant(providers) {
+        return SharedCatalogLiveRewrite {
+            model: None,
+            clear_review_model: false,
+        };
+    }
+    let model = current_model.and_then(|value| namespaced_live_model(providers, value));
+    let clear_review_model = review_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some_and(|value| {
+            let slugs = assign_routing_slugs(providers);
+            let known: HashSet<String> = slugs.values().cloned().collect();
+            parse_routed_model(value, &known).is_none()
+        });
+    SharedCatalogLiveRewrite {
+        model,
+        clear_review_model,
+    }
+}
+
+fn namespaced_live_model(providers: &[Provider], current_model: &str) -> Option<String> {
+    let trimmed = current_model.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let slugs = assign_routing_slugs(providers);
+    let known: HashSet<String> = slugs.values().cloned().collect();
+    if parse_routed_model(trimmed, &known).is_some() {
+        return None;
+    }
+    let matches: Vec<&Provider> = providers
+        .iter()
+        .filter(|provider| participates_in_routing_catalog(provider))
+        .filter(|provider| {
+            provider_upstream_model_ids(provider)
+                .iter()
+                .any(|model| models_match(model, trimmed))
+        })
+        .collect();
+    if matches.len() != 1 {
+        return None;
+    }
+    let slug = slugs.get(&matches[0].id)?;
+    Some(format!("{slug}/{}", alias_inner_slashes(trimmed)))
 }
 
 fn append_combo_catalog_entries(
@@ -708,13 +811,17 @@ fn advertised_model_ids_for_catalog(
     ids
 }
 
-fn catalog_entries_from_ids(ids: &[String], profile: CodexCatalogToolProfile) -> Vec<Value> {
+fn catalog_entries_from_ids(
+    ids: &[String],
+    profile: CodexCatalogToolProfile,
+    config_text: &str,
+) -> Vec<Value> {
     if ids.is_empty() {
         return Vec::new();
     }
     let models: Vec<Value> = ids.iter().map(|model| json!({ "model": model })).collect();
     let settings = json!({ "modelCatalog": { "models": models } });
-    crate::codex_config::codex_model_catalog_from_settings(&settings, "", profile)
+    crate::codex_config::codex_model_catalog_from_settings(&settings, config_text, profile)
         .ok()
         .flatten()
         .and_then(|catalog| catalog.get("models").and_then(Value::as_array).cloned())
@@ -726,9 +833,15 @@ fn catalog_entries_from_provider(
     profile: CodexCatalogToolProfile,
     discovered: Option<&[String]>,
 ) -> Vec<Value> {
+    let config_text = provider
+        .settings_config
+        .get("config")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     catalog_entries_from_ids(
         &advertised_model_ids_for_catalog(provider, discovered),
         profile,
+        config_text,
     )
 }
 
@@ -762,16 +875,25 @@ fn official_native_fallback_entries() -> Vec<Value> {
 }
 
 fn extract_toml_model_line(config_text: &str) -> Option<String> {
+    extract_toml_string_field(config_text, "model")
+}
+
+fn extract_toml_string_field(config_text: &str, field: &str) -> Option<String> {
     for line in config_text.lines() {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("model") {
-            let rest = rest.trim_start();
-            if let Some(rest) = rest.strip_prefix('=') {
-                let value = rest.trim().trim_matches('"').trim_matches('\'').trim();
-                if !value.is_empty() && !value.starts_with('[') {
-                    return Some(value.to_string());
-                }
-            }
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix(field) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let value = rest.trim().trim_matches('"').trim_matches('\'').trim();
+        if !value.is_empty() && !value.starts_with('[') {
+            return Some(value.to_string());
         }
     }
     None
@@ -1256,10 +1378,14 @@ mod tests {
                 "{slugs:?}"
             );
             assert!(
-                slugs
-                    .iter()
-                    .any(|slug| *slug == "gpt-5.5" || slug.starts_with("codex-official/")),
+                slugs.iter().any(|slug| slug.starts_with("codex-official/")),
                 "official native rows should remain selectable: {slugs:?}"
+            );
+            assert!(
+                !slugs
+                    .iter()
+                    .any(|slug| *slug == "gpt-5.5" || *slug == "gpt-5.6-sol"),
+                "unprefixed Official ids must not sit next to third-party rows: {slugs:?}"
             );
             assert!(
                 !slugs.iter().any(|slug| slug.contains("secret-model")),
@@ -1356,7 +1482,13 @@ mod tests {
 
     #[test]
     fn official_seed_includes_current_gpt_family() {
-        let slugs = catalog_slugs(&[official("codex-official")]);
+        let catalog =
+            build_merged_codex_routing_catalog(&[official("codex-official")]).expect("catalog");
+        let models = catalog["models"].as_array().expect("models");
+        let slugs: Vec<&str> = models
+            .iter()
+            .filter_map(|entry| entry.get("slug").and_then(Value::as_str))
+            .collect();
         for expected in [
             "gpt-5.5",
             "gpt-5.6",
@@ -1364,10 +1496,113 @@ mod tests {
             "codex-official/gpt-5.5",
         ] {
             assert!(
-                slugs.iter().any(|slug| slug == expected),
+                slugs.iter().any(|slug| *slug == expected),
                 "missing {expected} in {slugs:?}"
             );
         }
+        let window = |slug: &str| {
+            models
+                .iter()
+                .find(|entry| entry.get("slug").and_then(Value::as_str) == Some(slug))
+                .and_then(|entry| entry.get("context_window").and_then(Value::as_u64))
+        };
+        assert_eq!(window("gpt-5.6-sol"), Some(372_000));
+        assert_eq!(window("gpt-5.5"), Some(272_000));
+        assert_eq!(window("codex-official/gpt-5.6-sol"), Some(372_000));
+    }
+
+    #[test]
+    fn official_only_pool_keeps_unprefixed_seed() {
+        let primary = official("codex-official");
+        let mut backup = official("chatgpt-backup");
+        backup.name = "ChatGPT Backup".to_string();
+        let slugs = catalog_slugs(&[primary, backup]);
+        assert!(
+            slugs.iter().any(|slug| slug == "gpt-5.6-sol"),
+            "Official-only catalogs keep unprefixed pool ids: {slugs:?}"
+        );
+    }
+
+    #[test]
+    fn official_plus_grok_hides_unprefixed_official_ids() {
+        let slugs = catalog_slugs(&[
+            official("codex-official"),
+            provider("grok", "Grok", &["grok-4.6"]),
+        ]);
+        assert!(slugs.contains(&"grok/grok-4.6".to_string()), "{slugs:?}");
+        assert!(
+            slugs.contains(&"codex-official/gpt-5.6-sol".to_string()),
+            "{slugs:?}"
+        );
+        assert!(
+            !slugs
+                .iter()
+                .any(|slug| { slug == "gpt-5.6-sol" || slug == "gpt-5.6" || slug == "gpt-5.5" }),
+            "bare Official ids must not appear beside Grok: {slugs:?}"
+        );
+    }
+
+    #[test]
+    fn official_plus_grok_unprefixed_sol_still_pins_official() {
+        let providers = vec![
+            official("codex-official"),
+            provider("grok", "Grok", &["grok-4.6"]),
+        ];
+        match decide_model_route(&providers, "gpt-5.6-sol") {
+            ModelRouteDecision::Pinned { provider_id, .. } => {
+                assert_eq!(provider_id, "codex-official");
+            }
+            other => panic!("typed gpt-5.6-sol must still pin Official, got {other:?}"),
+        }
+        match decide_model_route(&providers, "grok/grok-4.6") {
+            ModelRouteDecision::Pinned {
+                provider_id,
+                upstream_model,
+            } => {
+                assert_eq!(provider_id, "grok");
+                assert_eq!(upstream_model, "grok-4.6");
+            }
+            other => panic!("grok/grok-4.6 must pin Grok only, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shared_catalog_namespaces_official_default_and_clears_review_model() {
+        let official = official("codex-official");
+        let grok = provider("grok", "Grok", &["grok-4.6"]);
+        assert_eq!(
+            shared_catalog_live_rewrite(
+                &[official.clone()],
+                Some("gpt-5.6-sol"),
+                Some("gpt-5.6-sol")
+            ),
+            SharedCatalogLiveRewrite {
+                model: None,
+                clear_review_model: false,
+            }
+        );
+        assert_eq!(
+            shared_catalog_live_rewrite(
+                &[official.clone(), grok.clone()],
+                Some("gpt-5.6-sol"),
+                Some("gpt-5.6-sol"),
+            ),
+            SharedCatalogLiveRewrite {
+                model: Some("codex-official/gpt-5.6-sol".into()),
+                clear_review_model: true,
+            }
+        );
+        assert_eq!(
+            shared_catalog_live_rewrite(
+                &[official, grok],
+                Some("grok/grok-4.6"),
+                Some("grok/grok-4.6"),
+            ),
+            SharedCatalogLiveRewrite {
+                model: None,
+                clear_review_model: false,
+            }
+        );
     }
 
     #[test]
@@ -1409,6 +1644,11 @@ mod tests {
                 .filter_map(|level| level.get("effort").and_then(Value::as_str))
                 .collect();
             assert_eq!(efforts, ["low", "medium", "high", "xhigh"], "{entry}");
+            assert_eq!(
+                entry.get("context_window").and_then(Value::as_u64),
+                Some(500_000),
+                "routed grok-4.6 must keep the official 500k window, not 128k: {entry}"
+            );
         });
     }
 
@@ -1442,6 +1682,11 @@ mod tests {
             assert_eq!(
                 entry.get("default_reasoning_level").and_then(Value::as_str),
                 Some("medium")
+            );
+            assert_eq!(
+                entry.get("context_window").and_then(Value::as_u64),
+                Some(372_000),
+                "routed gpt-5.6-sol must keep the Codex 372k window, not 128k: {entry}"
             );
         });
     }
