@@ -5,6 +5,21 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.3] - 2026-08-20
+
+When Official and Grok both participate in the Codex routing catalog, picking Grok 4.6 no longer also calls `gpt-5.6-sol`. Catalog windows match the official Grok and Codex GPT-5.6 figures, and Cloudflare HTML 5xx is not dumped into Codex.
+
+### Fixed
+
+- **Official + Grok double-call**: Mixed catalogs hide unprefixed Official seed rows (`gpt-5.6-sol`) so they are not peers of `grok/grok-4.6`. Takeover namespaces an unprefixed live `model` that uniquely matches one card and drops an unprefixed `review_model`. Typed `gpt-5.6-sol` still unique-pins Official; Official-only pools keep the bare ids.
+- **Wrong catalog context windows**: Bare and discovery-extra rows now infer Grok 4.5/4.6 at 500k, Grok 4.3/4.20 at 1M, GPT-5.6 at 372k (Codex catalog), and GPT-5.5 at 272k instead of falling through to 128k.
+- **HTML gateway errors in Codex**: Upstream 502/503/504 HTML pages (Cloudflare/nginx) are replaced with a short proxy message so remote compact failures are not shown as a local CC Switch dump.
+
+### Upgrade notes
+
+- No database schema migration — `SCHEMA_VERSION` stays at 16.
+- Re-takeover or refresh the Codex routing catalog so the picker and live `config.toml` pick up the namespaced defaults.
+
 ## [3.20.2] - 2026-08-20
 
 The 3.20 routing work is closed for ship: privileged Official and sidecar hops now require the install inbound token, Combo and OAuth pickers match the catalog, Codex `GET /v1/models` is served from the database, and routed GPT-5.6 / Grok keep their reasoning levels.
