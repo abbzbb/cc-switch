@@ -2075,6 +2075,12 @@ fn set_codex_native_web_search_field(config_text: &str, disable: bool) -> Result
     Ok(doc.to_string())
 }
 
+/// Restore the takeover catalog pointer when it is missing or still
+/// cc-switch-owned. A user-managed catalog filename is left untouched.
+pub fn ensure_cc_switch_model_catalog_pointer(config_text: &str) -> Result<String, AppError> {
+    set_codex_model_catalog_json_field(config_text, Some(&get_codex_model_catalog_path()))
+}
+
 /// Generate Codex `model_catalog_json` from provider settings and inject/remove
 /// the top-level TOML field that points Codex to the generated file.
 pub fn prepare_codex_config_text_with_model_catalog(
