@@ -5,7 +5,9 @@
 //! the same ids so Codex's model picker can target any configured card.
 
 use crate::codex_config::{
-    get_codex_config_dir, get_codex_model_catalog_path, CodexCatalogToolProfile,
+    ensure_cc_switch_model_catalog_pointer, get_codex_config_dir, get_codex_model_catalog_path,
+    inferred_catalog_context_window, CodexCatalogToolProfile,
+    CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME,
 };
 use crate::config::write_json_file;
 use crate::error::AppError;
@@ -13,7 +15,8 @@ use crate::provider::Provider;
 use crate::proxy::providers::{is_codex_official_provider, resolve_codex_catalog_tool_profile};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use toml_edit::DocumentMut;
 
 /// Cap on models cached from one card's upstream `/v1/models`.
 pub const MAX_DISCOVERED_MODELS_PER_CARD: usize = 200;
@@ -654,29 +657,52 @@ fn catalog_has_non_official_participant(providers: &[Provider]) -> bool {
     })
 }
 
-/// Rewrite live `model = gpt-5.6-sol` to `{slug}/gpt-5.6-sol` when Official
-/// shares the picker with a third-party card. Codex auxiliary requests
-/// (compact / default-model path) read this field; leaving the unprefixed
-/// Official id next to `grok/grok-4.6` is what double-calls `gpt-5.6-sol`.
-/// Already-namespaced ids are left alone so a session pick of
-/// `grok/grok-4.6` is not clobbered on catalog refresh.
+/// Display name Codex uses for `supports_remote_compaction()` (`name == "OpenAI"`
+/// or Azure). A mixed Official+Grok picker shares one live provider, so that
+/// gate must be off or Codex posts `/responses/compact` to Grok/xAI.
+const REMOTE_COMPACT_PROVIDER_NAMES: &[&str] = &["OpenAI", "Azure"];
+const LOCAL_COMPACT_PROVIDER_NAME: &str = "CC Switch";
+
+/// Rewrite the live takeover `config.toml` so Codex compact/default-model
+/// paths stay consistent with the merged routing catalog.
 ///
-/// Unprefixed `review_model` is removed in the same situation so Codex's
-/// review turn follows `model` instead of a leftover Official default.
+/// - Namespace a unique unprefixed Official `model` (`gpt-5.6-sol` →
+///   `{slug}/gpt-5.6-sol`) and drop an unprefixed `review_model`. Already
+///   namespaced ids are left alone so a session pick of `grok/grok-4.6` is
+///   not clobbered on catalog refresh.
+/// - Restore `model_catalog_json` when oh-my-codex/`omx setup` deleted it.
+/// - Strip inline `[model_providers.*].models` dumps so Official 258k rows
+///   cannot sit beside `grok/grok-4.6` after the catalog pointer is gone.
+/// - Rename `name = "OpenAI"` (or Azure) to `CC Switch` when a third-party
+///   card participates, so Codex uses local compact instead of posting
+///   `/responses/compact` to an upstream that does not implement it.
+/// - Drop an undersized top-level `model_context_window` /
+///   `model_auto_compact_token_limit` so Grok is not compacted at 120k.
 pub fn rewrite_live_codex_toml_for_shared_catalog(providers: &[Provider]) -> Result<(), AppError> {
     let config = crate::codex_config::read_codex_config_text()?;
     if config.trim().is_empty() {
         return Ok(());
     }
-    let current_model = extract_toml_string_field(&config, "model");
-    let review_model = extract_toml_string_field(&config, "review_model");
-    let rewrite =
-        shared_catalog_live_rewrite(providers, current_model.as_deref(), review_model.as_deref());
-    if rewrite.model.is_none() && !rewrite.clear_review_model {
+    let next = rewrite_codex_toml_text_for_routing_takeover(&config, providers)?;
+    if next == config {
         return Ok(());
     }
+    crate::codex_config::write_codex_live_config_atomic(Some(&next))
+}
 
-    let mut next = config;
+fn rewrite_codex_toml_text_for_routing_takeover(
+    config: &str,
+    providers: &[Provider],
+) -> Result<String, AppError> {
+    let mut next = config.to_string();
+    if !catalog_pointer_is_cc_switch(&next) {
+        next = ensure_cc_switch_model_catalog_pointer(&next)?;
+    }
+
+    let current_model = extract_toml_string_field(&next, "model");
+    let review_model = extract_toml_string_field(&next, "review_model");
+    let rewrite =
+        shared_catalog_live_rewrite(providers, current_model.as_deref(), review_model.as_deref());
     if let Some(model) = rewrite.model.as_deref() {
         next = crate::codex_config::update_codex_toml_field(&next, "model", model)
             .map_err(AppError::Config)?;
@@ -685,7 +711,170 @@ pub fn rewrite_live_codex_toml_for_shared_catalog(providers: &[Provider]) -> Res
         next = crate::codex_config::update_codex_toml_field(&next, "review_model", "")
             .map_err(AppError::Config)?;
     }
-    crate::codex_config::write_codex_live_config_atomic(Some(&next))
+
+    sanitize_live_provider_for_routing_takeover(&next, providers)
+}
+
+fn catalog_pointer_is_cc_switch(config_text: &str) -> bool {
+    extract_toml_string_field(config_text, "model_catalog_json")
+        .and_then(|path| {
+            Path::new(&path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name == CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
+        })
+        .unwrap_or(false)
+}
+
+fn sanitize_live_provider_for_routing_takeover(
+    config: &str,
+    providers: &[Provider],
+) -> Result<String, AppError> {
+    let mut doc = config
+        .parse::<DocumentMut>()
+        .map_err(|error| AppError::Config(format!("Invalid Codex config.toml: {error}")))?;
+    let mut dirty = false;
+
+    if let Some(model_providers) = doc
+        .get_mut("model_providers")
+        .and_then(toml_edit::Item::as_table_like_mut)
+    {
+        let keys: Vec<String> = model_providers
+            .iter()
+            .map(|(key, _)| key.to_string())
+            .collect();
+        for key in keys {
+            let Some(table) = model_providers
+                .get_mut(key.as_str())
+                .and_then(toml_edit::Item::as_table_like_mut)
+            else {
+                continue;
+            };
+            if table.remove("models").is_some() {
+                dirty = true;
+            }
+        }
+    }
+
+    let live_model = extract_toml_string_field(config, "model");
+    let disable_remote_compact = should_disable_remote_compact(providers, live_model.as_deref());
+    if let Some(provider_key) = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .map(str::to_string)
+    {
+        if let Some(table) = doc
+            .get_mut("model_providers")
+            .and_then(toml_edit::Item::as_table_like_mut)
+            .and_then(|model_providers| model_providers.get_mut(&provider_key))
+            .and_then(toml_edit::Item::as_table_like_mut)
+        {
+            let current_name = table
+                .get("name")
+                .and_then(|item| item.as_str())
+                .unwrap_or("");
+            if disable_remote_compact
+                && REMOTE_COMPACT_PROVIDER_NAMES
+                    .iter()
+                    .any(|name| current_name.eq_ignore_ascii_case(name))
+            {
+                table.insert("name", toml_edit::value(LOCAL_COMPACT_PROVIDER_NAME));
+                dirty = true;
+            } else if !disable_remote_compact && current_name == LOCAL_COMPACT_PROVIDER_NAME {
+                table.insert("name", toml_edit::value("OpenAI"));
+                dirty = true;
+            }
+        }
+    }
+
+    let windows = participating_inferred_windows(providers);
+    let max_window = windows.iter().copied().max();
+    let min_window = windows.iter().copied().min();
+    if let (Some(current), Some(max)) = (
+        top_level_positive_u64(&doc, "model_context_window"),
+        max_window,
+    ) {
+        if current < max {
+            doc.as_table_mut().remove("model_context_window");
+            dirty = true;
+        }
+    }
+    if let (Some(current), Some(min)) = (
+        top_level_positive_u64(&doc, "model_auto_compact_token_limit"),
+        min_window,
+    ) {
+        if current < min {
+            doc.as_table_mut().remove("model_auto_compact_token_limit");
+            dirty = true;
+        }
+    }
+
+    if dirty {
+        Ok(doc.to_string())
+    } else {
+        Ok(config.to_string())
+    }
+}
+
+fn should_disable_remote_compact(providers: &[Provider], live_model: Option<&str>) -> bool {
+    if catalog_has_non_official_participant(providers) {
+        return true;
+    }
+    let Some(model) = live_model.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    if catalog_model_leaf(model).starts_with("grok-") {
+        return true;
+    }
+    let slugs = assign_routing_slugs(providers);
+    let known: HashSet<String> = slugs.values().cloned().collect();
+    let Some((slug, _)) = parse_routed_model(model, &known) else {
+        return false;
+    };
+    providers.iter().any(|provider| {
+        slugs
+            .get(&provider.id)
+            .is_some_and(|assigned| assigned.eq_ignore_ascii_case(slug))
+            && !is_codex_official_provider(provider)
+    })
+}
+
+fn catalog_model_leaf(model: &str) -> String {
+    model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn participating_inferred_windows(providers: &[Provider]) -> Vec<u64> {
+    let mut windows = Vec::new();
+    for provider in providers
+        .iter()
+        .filter(|provider| participates_in_routing_catalog(provider))
+    {
+        for model in provider_upstream_model_ids(provider) {
+            if let Some(window) = inferred_catalog_context_window(&model) {
+                windows.push(window);
+            }
+        }
+        if is_codex_official_provider(provider) {
+            for seed in OFFICIAL_CATALOG_SEED {
+                if let Some(window) = inferred_catalog_context_window(seed) {
+                    windows.push(window);
+                }
+            }
+        }
+    }
+    windows
+}
+
+fn top_level_positive_u64(doc: &DocumentMut, field: &str) -> Option<u64> {
+    doc.get(field)
+        .and_then(|item| item.as_integer())
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|value| *value > 0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1603,6 +1792,158 @@ mod tests {
                 clear_review_model: false,
             }
         );
+    }
+
+    fn sample_omx_takeover_toml() -> &'static str {
+        r#"
+model = "gpt-5.6-sol"
+review_model = "gpt-5.6-sol"
+model_provider = "cm"
+model_context_window = 258400
+model_auto_compact_token_limit = 120000
+model_reasoning_effort = "xhigh"
+
+[model_providers.cm]
+name = "OpenAI"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+experimental_bearer_token = "PROXY_MANAGED"
+models = [
+  { model = "gpt-5.6-sol", slug = "gpt-5.6-sol", context_window = 272000, isDefault = true },
+  { model = "gpt-5.5", slug = "gpt-5.5", context_window = 272000 },
+]
+"#
+    }
+
+    #[test]
+    fn routing_takeover_rewrites_omx_dump_for_official_plus_grok() {
+        let rewritten = rewrite_codex_toml_text_for_routing_takeover(
+            sample_omx_takeover_toml(),
+            &[
+                official("codex-official"),
+                provider("grok", "Grok", &["grok-4.6"]),
+            ],
+        )
+        .expect("rewrite");
+        assert!(
+            rewritten.contains("model_catalog_json = \"cc-switch-model-catalog.json\""),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains("model = \"codex-official/gpt-5.6-sol\""),
+            "{rewritten}"
+        );
+        assert!(
+            !rewritten.contains("review_model"),
+            "unprefixed review_model must be cleared:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("name = \"CC Switch\""),
+            "remote compact must be disabled when Grok participates:\n{rewritten}"
+        );
+        assert!(!rewritten.contains("name = \"OpenAI\""), "{rewritten}");
+        assert!(
+            !rewritten.contains("models = ["),
+            "inline Official dump must be stripped:\n{rewritten}"
+        );
+        assert!(
+            !rewritten.contains("model_context_window"),
+            "undersized window must not override Grok 500k:\n{rewritten}"
+        );
+        assert!(
+            !rewritten.contains("model_auto_compact_token_limit"),
+            "120k auto-compact must not fire on Grok:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("model_reasoning_effort = \"xhigh\""),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains("experimental_bearer_token = \"PROXY_MANAGED\""),
+            "{rewritten}"
+        );
+    }
+
+    #[test]
+    fn routing_takeover_keeps_openai_name_for_official_only() {
+        let rewritten = rewrite_codex_toml_text_for_routing_takeover(
+            sample_omx_takeover_toml(),
+            &[official("codex-official")],
+        )
+        .expect("rewrite");
+        assert!(rewritten.contains("name = \"OpenAI\""), "{rewritten}");
+        assert!(!rewritten.contains("name = \"CC Switch\""), "{rewritten}");
+        assert!(
+            rewritten.contains("model_catalog_json = \"cc-switch-model-catalog.json\""),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains("model = \"gpt-5.6-sol\""),
+            "Official-only keeps the unprefixed pool id:\n{rewritten}"
+        );
+        assert!(
+            !rewritten.contains("model_auto_compact_token_limit"),
+            "{rewritten}"
+        );
+    }
+
+    #[test]
+    fn routing_takeover_preserves_user_catalog_pointer() {
+        let input = r#"
+model = "grok/grok-4.6"
+model_provider = "cm"
+model_catalog_json = "my-handwritten-catalog.json"
+
+[model_providers.cm]
+name = "OpenAI"
+base_url = "http://127.0.0.1:15721/v1"
+"#;
+        let rewritten = rewrite_codex_toml_text_for_routing_takeover(
+            input,
+            &[
+                official("codex-official"),
+                provider("grok", "Grok", &["grok-4.6"]),
+            ],
+        )
+        .expect("rewrite");
+        assert!(
+            rewritten.contains("model_catalog_json = \"my-handwritten-catalog.json\""),
+            "{rewritten}"
+        );
+        assert!(rewritten.contains("name = \"CC Switch\""), "{rewritten}");
+    }
+
+    #[test]
+    fn routing_takeover_disables_remote_compact_for_typed_grok() {
+        let input = r#"
+model = "grok/grok-4.6"
+model_provider = "cm"
+
+[model_providers.cm]
+name = "OpenAI"
+base_url = "http://127.0.0.1:15721/v1"
+"#;
+        let rewritten =
+            rewrite_codex_toml_text_for_routing_takeover(input, &[official("codex-official")])
+                .expect("rewrite");
+        assert!(rewritten.contains("name = \"CC Switch\""), "{rewritten}");
+    }
+
+    #[test]
+    fn routing_takeover_restores_openai_name_when_grok_leaves() {
+        let input = r#"
+model = "default/gpt-5.6-sol"
+model_provider = "cm"
+model_catalog_json = "cc-switch-model-catalog.json"
+
+[model_providers.cm]
+name = "CC Switch"
+base_url = "http://127.0.0.1:15721/v1"
+"#;
+        let rewritten =
+            rewrite_codex_toml_text_for_routing_takeover(input, &[official("codex-official")])
+                .expect("rewrite");
+        assert!(rewritten.contains("name = \"OpenAI\""), "{rewritten}");
     }
 
     #[test]

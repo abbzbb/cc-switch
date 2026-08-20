@@ -5,6 +5,21 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.4] - 2026-08-20
+
+Takeover now repairs the live Codex `config.toml` that oh-my-codex leaves behind: the routing catalog pointer comes back, Official's inline model dump is stripped, and Grok no longer inherits a 120k remote-compact trigger.
+
+### Fixed
+
+- **Grok remote compact after local routing**: Codex treats `name = "OpenAI"` as a remote-compact gate and posts `/responses/compact` to every card behind the local proxy. When a third-party card (Grok, …) participates, takeover renames the live provider to `CC Switch` so Codex uses local compact instead. Official-only catalogs keep `name = "OpenAI"`.
+- **OMX wiped `model_catalog_json`**: Catalog refresh restores `cc-switch-model-catalog.json` when the pointer is missing. A user-owned catalog filename is left alone. Inline `[model_providers.*].models` dumps are stripped so stale Official 258k rows cannot sit beside `grok/grok-4.6`.
+- **Auto-compact at 120k on Grok**: Undersized top-level `model_context_window` / `model_auto_compact_token_limit` are removed when they are below the participating catalog windows (Grok 500k, GPT-5.6 372k).
+
+### Upgrade notes
+
+- No database schema migration — `SCHEMA_VERSION` stays at 16.
+- Re-takeover or refresh the Codex routing catalog, then fully quit and restart Codex so it rereads `name`, `model_catalog_json`, and the compact thresholds. `omx setup` can delete the catalog pointer again; refresh takeover afterwards.
+
 ## [3.20.3] - 2026-08-20
 
 When Official and Grok both participate in the Codex routing catalog, picking Grok 4.6 no longer also calls `gpt-5.6-sol`. Catalog windows match the official Grok and Codex GPT-5.6 figures, and Cloudflare HTML 5xx is not dumped into Codex.
