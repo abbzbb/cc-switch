@@ -2234,7 +2234,7 @@ fn looks_like_html_error_page(body: &str) -> bool {
 }
 
 fn is_html_upstream_gateway_error(status: Option<u16>, body: &str) -> bool {
-    matches!(status, Some(502 | 503 | 504)) && looks_like_html_error_page(body)
+    matches!(status, Some(502..=504)) && looks_like_html_error_page(body)
 }
 
 fn compact_error_message(message: &str, max_chars: usize) -> String {

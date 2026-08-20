@@ -426,9 +426,7 @@ pub fn combo_catalog_entry(
     template: Option<&Value>,
 ) -> Option<Value> {
     let resolved = resolve_combo_targets(combo, providers);
-    let Some(first) = resolved.first() else {
-        return None;
-    };
+    let first = resolved.first()?;
     let slug = catalog_slug(combo);
     let display = format!("Combo / {}", combo.id);
     if let Some(mut entry) = template.cloned() {
