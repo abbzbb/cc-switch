@@ -8317,7 +8317,8 @@ requires_openai_auth = true
         );
         assert_eq!(
             parsed_live.get("model").and_then(|v| v.as_str()),
-            Some("deepseek-v4-flash")
+            Some("b/deepseek-v4-flash"),
+            "shared catalog must namespace the live default so Codex auxiliaries stay on the switched card"
         );
         assert_eq!(
             live.get("auth")
