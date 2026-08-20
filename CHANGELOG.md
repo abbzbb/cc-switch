@@ -5,6 +5,32 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.2] - 2026-08-20
+
+The 3.20 routing work is closed for ship: privileged Official and sidecar hops now require the install inbound token, Combo and OAuth pickers match the catalog, Codex `GET /v1/models` is served from the database, and routed GPT-5.6 / Grok keep their reasoning levels.
+
+### Added
+
+- **Inbound proxy token for privileged hops**: Official-account inject and hosted sidecar calls require `Authorization: Bearer` or `x-cc-switch-proxy` with the per-install token (or Claude Desktop's gateway token). `PROXY_MANAGED` stays a public live-config placeholder. The header is stripped before upstream.
+- **Combo target picker**: Combo rows pick a routing slug and type a model (datalist), with `stickyLimit` 1–100 for round-robin.
+- **OAuth account select on provider forms**: Kimi / Anthropic / xAI forms use a shared select control; Auth Center stays the manage surface; remove and logout confirm.
+
+### Changed
+
+- **Single `routingCatalog` writer**: The proxy panel IPC is the only writer; provider forms drop the field; `ProviderService::update` preserves the stored catalog; Codex takeover rewrites the on-disk catalog from the database after save.
+- **Stable slug assignment**: Rust and TypeScript `assign_routing_slugs` sort by `sort_index` / `created_at` / `id` before assigning.
+- **Codex `GET /v1/models` from the database**: When the live `model_catalog_json` points at the cc-switch catalog, the gateway listing is built from the database; the on-disk file is projection only.
+
+### Fixed
+
+- **Routed GPT-5.6 and Grok lost Codex reasoning levels**: Catalog generation now restores the supported reasoning efforts for those routed models.
+- **CI**: Ubuntu apt no longer hangs on Azure mirrors; the Windows+WSL2 contract keeps cargo TEMP native so `link.exe` does not fail with LNK1327.
+
+### Upgrade notes
+
+- No database schema migration — `SCHEMA_VERSION` stays at 16.
+- Existing takeovers keep `PROXY_MANAGED` in live CLI configs. Privileged Official / sidecar paths need the inbound token after takeover rewrites the header (or you restart the proxy). Ordinary routed API-key hops are unchanged.
+
 ## [3.20.1] - 2026-08-19
 
 The Codex picker is no longer capped at each card's mapping table or current `model`. The merged catalog unions toml-advertised models, a local Official GPT seed, and the last successful upstream `/v1/models` fetch. The proxy panel can choose which configs appear in that catalog.
