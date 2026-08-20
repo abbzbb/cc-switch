@@ -1734,7 +1734,7 @@ command = "legacy-cmd"
 
     #[tokio::test]
     #[serial]
-    async fn update_current_codex_provider_refreshes_and_clears_catalog_during_takeover() {
+    async fn update_current_codex_provider_refreshes_catalog_during_takeover() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
 
@@ -1850,8 +1850,19 @@ requires_openai_auth = true
         let live_config = fs::read_to_string(crate::codex_config::get_codex_config_path())
             .expect("read Codex config.toml after mapping removal");
         assert!(
-            !live_config.contains("model_catalog_json"),
-            "removing mappings during takeover must clear the stale catalog pointer"
+            live_config.contains("model_catalog_json"),
+            "takeover must keep the merged catalog pointer after the mapping table is cleared; toml model= still populates the picker"
+        );
+        let catalog: Value = read_json_file(&catalog_path).expect("read catalog after clear");
+        let slugs: Vec<&str> = catalog["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .filter_map(|entry| entry.get("slug").and_then(Value::as_str))
+            .collect();
+        assert!(
+            slugs.iter().any(|slug| *slug == "p1/gpt-5.4"),
+            "toml-advertised model must remain in the merged catalog: {slugs:?}"
         );
 
         state
