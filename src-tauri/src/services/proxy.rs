@@ -3729,7 +3729,9 @@ impl ProxyService {
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
                 crate::codex_config::record_codex_managed_oauth_live_auth(auth)
                     .map_err(|e| format!("记录 Codex 托管认证标记失败: {e}"))?;
-                return self.write_merged_codex_routing_catalog_from_db();
+                return self.write_merged_codex_routing_catalog_from_db_for(
+                    provider.map(|provider| provider.id.as_str()),
+                );
             }
             let live_config = if official_passthrough {
                 prepared_config
@@ -3742,7 +3744,9 @@ impl ProxyService {
             };
             crate::codex_config::write_codex_live_config_atomic(Some(&live_config))
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
-            return self.write_merged_codex_routing_catalog_from_db();
+            return self.write_merged_codex_routing_catalog_from_db_for(
+                provider.map(|provider| provider.id.as_str()),
+            );
         }
 
         let mut config = config.clone();
@@ -3753,11 +3757,35 @@ impl ProxyService {
             }
         }
         self.write_codex_live_for_provider(&config, provider)?;
-        self.write_merged_codex_routing_catalog_from_db()
+        self.write_merged_codex_routing_catalog_from_db_for(
+            provider.map(|provider| provider.id.as_str()),
+        )
     }
 
     fn write_merged_codex_routing_catalog_from_db(&self) -> Result<(), String> {
-        let providers = self.codex_catalog_providers()?;
+        self.write_merged_codex_routing_catalog_from_db_for(None)
+    }
+
+    fn write_merged_codex_routing_catalog_from_db_for(
+        &self,
+        current_provider_id: Option<&str>,
+    ) -> Result<(), String> {
+        let current = match current_provider_id {
+            Some(id) => self
+                .db
+                .get_provider_by_id(id, AppType::Codex.as_str())
+                .map_err(|e| format!("读取 Codex 供应商失败: {e}"))?,
+            None => self
+                .get_current_provider_for_app(&AppType::Codex)
+                .ok()
+                .flatten(),
+        };
+        let current_id = current.as_ref().map(|provider| provider.id.clone());
+        let all = self.codex_catalog_providers()?;
+        let providers = match current {
+            Some(current) => crate::proxy::model_routing::providers_current_first(&[current], all),
+            None => all,
+        };
         crate::proxy::model_routing::write_merged_codex_routing_catalog_with_combos(
             &providers,
             &self
@@ -3766,8 +3794,11 @@ impl ProxyService {
                 .map_err(|e| format!("读取 Combo 失败: {e}"))?,
         )
         .map_err(|e| format!("写入合并模型目录失败: {e}"))?;
-        crate::proxy::model_routing::rewrite_live_codex_toml_for_shared_catalog(&providers)
-            .map_err(|e| format!("改写 Codex 默认模型失败: {e}"))
+        crate::proxy::model_routing::rewrite_live_codex_toml_for_shared_catalog(
+            &providers,
+            current_id.as_deref(),
+        )
+        .map_err(|e| format!("改写 Codex 默认模型失败: {e}"))
     }
 
     fn codex_catalog_providers(&self) -> Result<Vec<Provider>, String> {
@@ -8657,6 +8688,100 @@ requires_openai_auth = true
         assert!(
             !slugs.contains(&"model-a") && !slugs.contains(&"model-b"),
             "non-official cards should only appear as slug/model after merge; got: {slugs:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn switching_to_grok_rewrites_live_default_and_catalog_head() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        seed_codex_model_template();
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let default_config = r#"model_provider = "openai"
+model = "gpt-5.6-sol"
+
+[model_providers.openai]
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+        let grok_config = r#"model_provider = "grok"
+model = "grok-4.6"
+
+[model_providers.grok]
+name = "Grok"
+base_url = "https://api.x.ai/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+        let official = Provider::with_id(
+            "default".to_string(),
+            "OpenAI".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-openai" },
+                "config": default_config,
+                "modelCatalog": { "models": [{ "model": "gpt-5.6-sol" }] }
+            }),
+            None,
+        );
+        let grok = Provider::with_id(
+            "grok".to_string(),
+            "Grok".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-grok" },
+                "config": grok_config,
+                "modelCatalog": { "models": [{ "model": "grok-4.6" }] }
+            }),
+            None,
+        );
+        db.save_provider("codex", &official).expect("save default");
+        db.save_provider("codex", &grok).expect("save grok");
+        db.set_current_provider("codex", "default")
+            .expect("set current default");
+        crate::settings::set_current_provider(&AppType::Codex, Some("default"))
+            .expect("set local current default");
+        crate::codex_config::write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "sk-openai" }),
+            Some(default_config),
+        )
+        .expect("seed live codex config");
+
+        service
+            .takeover_live_config_strict(&AppType::Codex)
+            .await
+            .expect("take over Codex");
+        service
+            .hot_switch_provider("codex", "grok")
+            .await
+            .expect("switch to grok");
+
+        let live = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read live config");
+        assert!(
+            live.contains("model = \"grok/grok-4.6\""),
+            "switching current provider must pin live model to that card: {live}"
+        );
+        assert!(
+            !live.contains("model = \"default/gpt-5.6-sol\""),
+            "leftover Official default must not remain after switch: {live}"
+        );
+
+        let catalog: Value = serde_json::from_str(
+            &std::fs::read_to_string(crate::codex_config::get_codex_model_catalog_path())
+                .expect("read catalog"),
+        )
+        .expect("parse catalog");
+        let first = catalog["models"][0]
+            .get("slug")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert_eq!(
+            first, "grok/grok-4.6",
+            "current provider must own catalog priority 1000, got: {catalog}"
         );
     }
 

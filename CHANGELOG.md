@@ -5,6 +5,19 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.6] - 2026-08-21
+
+Switching the current Codex provider now updates the live default model and catalog head, so Guardian / auto-review no longer keep billing the previous `default/gpt-5.6-sol` card.
+
+### Fixed
+
+- **Guardian still on Official after switching to Grok**: Activating a Codex card (switch, save, or catalog regenerate) writes live `config.toml` `model` to that card's prefixed default (`grok/grok-4.6`) instead of leaving the union catalog's first row (`default/gpt-5.6-sol`). A live id already on the current card is kept. The merged catalog and `GET /v1/models` put the current card first (`priority = 1000`). Guardian leftovers (`default/gpt-5.6-sol`, `codex-auto-review`, `gpt-5.3-codex-spark`) follow the current third-party default even in a sibling session; an explicit pick of another catalog slug is unchanged.
+
+### Upgrade notes
+
+- No database schema migration — `SCHEMA_VERSION` stays at 16.
+- Re-takeover or refresh the Codex routing catalog after switching providers, then fully quit and restart Codex so new threads and Guardian inherit the current card. Old threads that still send another provider's slug keep prefix-routing to that card.
+
 ## [3.20.5] - 2026-08-21
 
 Picking Grok in a routed Codex session no longer keeps calling Official, remote compact is not forwarded to Grok, and failed usage rows show the rewritten model id.
