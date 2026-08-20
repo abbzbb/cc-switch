@@ -2,28 +2,34 @@
 //!
 //! 负责选择和管理代理目标供应商，实现智能故障转移
 
-use crate::app_config::AppType;
-use crate::database::Database;
-use crate::error::AppError;
-use crate::provider::Provider;
-use crate::proxy::circuit_breaker::{AllowResult, CircuitBreaker, CircuitBreakerConfig};
-use crate::proxy::combo::{
-    combo_id_from_request_model, find_combo, order_failover, order_round_robin,
-    resolve_combo_targets, ComboRoundRobinState, ComboStrategy, ResolvedComboTarget,
+use crate::{
+    app_config::AppType,
+    database::Database,
+    error::AppError,
+    provider::Provider,
+    proxy::{
+        circuit_breaker::{AllowResult, CircuitBreaker, CircuitBreakerConfig},
+        combo::{
+            combo_id_from_request_model, find_combo, order_failover, order_round_robin,
+            resolve_combo_targets, ComboRoundRobinState, ComboStrategy, ResolvedComboTarget,
+        },
+        model_routing::{
+            current_live_codex_model, persist_third_party_live_codex_model,
+            request_should_follow_session, routed_session_pick, SessionModelFollow,
+        },
+        official_pool::{
+            hottest_quota_from_response_headers, hottest_quota_utilization, keep_official_affinity,
+            pick_official_pool, pool_card_secret, pool_family_for_unprefixed_model,
+            provider_chatgpt_account_id, provider_pool_family, quota_identity,
+            subscription_pool_candidates, OfficialPoolState, SubscriptionPoolFamily,
+            OFFICIAL_POOL_AUTO_SWITCH_THRESHOLD,
+        },
+        providers::{
+            anthropic_oauth_auth::AnthropicOAuthManager, kimi_oauth_auth::KimiOAuthManager,
+        },
+    },
 };
-use crate::proxy::official_pool::{
-    hottest_quota_from_response_headers, hottest_quota_utilization, keep_official_affinity,
-    pick_official_pool, pool_card_secret, pool_family_for_unprefixed_model,
-    provider_chatgpt_account_id, provider_pool_family, quota_identity,
-    subscription_pool_candidates, OfficialPoolState, SubscriptionPoolFamily,
-    OFFICIAL_POOL_AUTO_SWITCH_THRESHOLD,
-};
-use crate::proxy::providers::anthropic_oauth_auth::AnthropicOAuthManager;
-use crate::proxy::providers::kimi_oauth_auth::KimiOAuthManager;
-use std::collections::HashMap;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{collections::HashMap, str::FromStr, sync::Arc, time::Instant};
 use tokio::sync::RwLock;
 
 /// Providers selected for one request, optionally with per-attempt upstream models.
@@ -142,6 +148,8 @@ pub struct ProviderRouter {
     combo_rr: Arc<RwLock<HashMap<String, ComboRoundRobinState>>>,
     /// ChatGPT Official account-pool affinity + cooldown (process-local).
     official_pool: Arc<RwLock<OfficialPoolState>>,
+    /// Codex session → last third-party routed pick (Grok, …).
+    session_follow: Arc<RwLock<HashMap<String, SessionModelFollow>>>,
 }
 
 impl ProviderRouter {
@@ -160,6 +168,7 @@ impl ProviderRouter {
             circuit_breakers: Arc::new(RwLock::new(HashMap::new())),
             combo_rr: Arc::new(RwLock::new(HashMap::new())),
             official_pool,
+            session_follow: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -291,8 +300,19 @@ impl ProviderRouter {
                 .await;
         }
 
-        match crate::proxy::model_routing::decide_model_route(&all_providers, request_model) {
-            crate::proxy::model_routing::ModelRouteDecision::Pinned { provider_id, .. } => {
+        let followed = if app_type == AppType::Codex.as_str() {
+            self.apply_codex_session_follow(&all_providers, request_model, session_id)
+                .await
+        } else {
+            None
+        };
+        let effective_model = followed.as_deref().unwrap_or(request_model);
+
+        match crate::proxy::model_routing::decide_model_route(&all_providers, effective_model) {
+            crate::proxy::model_routing::ModelRouteDecision::Pinned {
+                provider_id,
+                upstream_model,
+            } => {
                 let provider = all_providers
                     .into_iter()
                     .find(|provider| provider.id == provider_id)
@@ -301,7 +321,7 @@ impl ProviderRouter {
                     })?;
                 Ok(ProviderSelection {
                     providers: vec![provider],
-                    attempt_upstream_models: None,
+                    attempt_upstream_models: followed.is_some().then_some(vec![upstream_model]),
                     promote_current_on_success: false,
                 })
             }
@@ -321,6 +341,50 @@ impl ProviderRouter {
                     .map(ProviderSelection::from_providers)
             }
         }
+    }
+
+    async fn apply_codex_session_follow(
+        &self,
+        providers: &[Provider],
+        request_model: &str,
+        session_id: Option<&str>,
+    ) -> Option<String> {
+        if let Some(session_id) = session_id {
+            let follow = self.session_follow.read().await.get(session_id).cloned();
+            if let Some(follow) = follow {
+                if request_should_follow_session(providers, request_model, &follow) {
+                    return Some(follow.model);
+                }
+            }
+        }
+        if let Some(pick) = routed_session_pick(providers, request_model) {
+            let displaced = current_live_codex_model().filter(|value| value != &pick);
+            persist_third_party_live_codex_model(&pick);
+            if let Some(session_id) = session_id {
+                self.remember_codex_session_follow(session_id, pick, displaced)
+                    .await;
+            }
+        }
+        None
+    }
+
+    async fn remember_codex_session_follow(
+        &self,
+        session_id: &str,
+        model: String,
+        displaced_default: Option<String>,
+    ) {
+        let mut map = self.session_follow.write().await;
+        if map.len() >= 256 && !map.contains_key(session_id) {
+            map.clear();
+        }
+        map.insert(
+            session_id.to_string(),
+            SessionModelFollow {
+                model,
+                displaced_default,
+            },
+        );
     }
 
     async fn try_official_pool(
@@ -712,8 +776,10 @@ impl ProviderRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::Database;
-    use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta};
+    use crate::{
+        database::Database,
+        provider::{AuthBinding, AuthBindingSource, ProviderMeta},
+    };
     use serde_json::json;
     use serial_test::serial;
     use std::env;
@@ -1164,6 +1230,74 @@ mod tests {
             .unwrap();
         assert_eq!(pinned.providers.len(), 1);
         assert_eq!(pinned.providers[0].id, "codex-official");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn grok_session_follow_rewrites_official_default() {
+        let _home = TempHome::new();
+        let config_dir = crate::codex_config::get_codex_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "model = \"default/gpt-5.6-sol\"\nmodel_provider = \"cm\"\n",
+        )
+        .unwrap();
+
+        let db = Arc::new(Database::memory().unwrap());
+        db.save_provider("codex", &managed_codex_official("codex-official", "acct-1"))
+            .unwrap();
+        db.save_provider("codex", &catalog_provider("grok", "Grok", "grok-4.6"))
+            .unwrap();
+        db.set_current_provider("codex", "codex-official").unwrap();
+
+        let router = ProviderRouter::new(db);
+        let grok = router
+            .select_providers_for_request_with_session("codex", "grok/grok-4.6", Some("sess-1"))
+            .await
+            .unwrap();
+        assert_eq!(grok.providers[0].id, "grok");
+        assert_eq!(grok.attempt_upstream_models, None);
+
+        let followed = router
+            .select_providers_for_request_with_session(
+                "codex",
+                "default/gpt-5.6-sol",
+                Some("sess-1"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(followed.providers[0].id, "grok");
+        assert_eq!(
+            followed.attempt_upstream_models.as_deref(),
+            Some(["grok-4.6".to_string()].as_slice())
+        );
+
+        let other_session = router
+            .select_providers_for_request_with_session(
+                "codex",
+                "default/gpt-5.6-sol",
+                Some("sess-2"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(other_session.providers[0].id, "codex-official");
+
+        let persisted = std::fs::read_to_string(config_dir.join("config.toml")).unwrap();
+        assert!(
+            persisted.contains("model = \"grok/grok-4.6\""),
+            "{persisted}"
+        );
+
+        let followed_codes = router
+            .select_providers_for_request_with_session("codex", "codes/gpt-5.4", Some("sess-1"))
+            .await
+            .unwrap();
+        assert_eq!(followed_codes.providers[0].id, "grok");
+        assert_eq!(
+            followed_codes.attempt_upstream_models.as_deref(),
+            Some(["grok-4.6".to_string()].as_slice())
+        );
     }
 
     #[tokio::test]

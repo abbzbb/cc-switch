@@ -5,6 +5,21 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.5] - 2026-08-21
+
+Picking Grok in a routed Codex session no longer keeps calling Official, remote compact is not forwarded to Grok, and failed usage rows show the rewritten model id.
+
+### Fixed
+
+- **Official auxiliaries after `/model` Grok**: Codex review / default-model / compact paths read live `config.toml` `model` (`default/gpt-5.6-sol`). After a third-party routed request (`grok/grok-4.6`), the proxy remembers it for that session, rewrites Official/GPT-default helpers to Grok, and persists `model = "grok/grok-4.6"` so the next Codex start stays on Grok. Mixed-catalog takeover also clears a leftover namespaced `review_model`.
+- **Grok `/responses/compact` 502 burst**: Non-Official cards reject remote compact locally (400) instead of forwarding ChatGPT's compact API to niuma/xAI and retrying HTML 5xx.
+- **Failed rows missing `→ grok-4.6`**: Error logs now store `request_model` and the stripped outbound id separately, matching success rows.
+
+### Upgrade notes
+
+- No database schema migration — `SCHEMA_VERSION` stays at 16.
+- Re-takeover or refresh the Codex routing catalog, fully quit and restart Codex, then **start a new thread** after switching to Grok. Old threads that still contain Official compact/reasoning items can 5xx even when routing is correct.
+
 ## [3.20.4] - 2026-08-20
 
 Takeover now repairs the live Codex `config.toml` that oh-my-codex leaves behind: the routing catalog pointer comes back, Official's inline model dump is stripped, and Grok no longer inherits a 120k remote-compact trigger.

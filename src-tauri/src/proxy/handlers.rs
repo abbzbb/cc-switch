@@ -45,8 +45,7 @@ use super::{
     usage::parser::TokenUsage,
     ProxyError,
 };
-use crate::app_config::AppType;
-use crate::database::PRICING_SOURCE_REQUEST;
+use crate::{app_config::AppType, database::PRICING_SOURCE_REQUEST};
 use axum::{
     extract::{Query, State},
     http::{header, HeaderMap, StatusCode},
@@ -1245,11 +1244,24 @@ async fn handle_responses_compact_for_app(
     let mut ctx =
         RequestContext::new(&state, &body, &headers, app_type.clone(), tag, app_type_str).await?;
     let endpoint = endpoint_with_query(&uri, "/responses/compact");
-
     let is_stream = body
         .get("stream")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+
+    if super::model_routing::provider_rejects_remote_compact(&ctx.provider) {
+        if ctx.outbound_model.is_none() {
+            ctx.outbound_model = super::model_routing::expected_outbound_model(
+                &ctx.get_providers(),
+                &ctx.request_model,
+            );
+        }
+        let error = ProxyError::InvalidRequest(
+            "Remote compact is not supported for this provider. CC Switch takeover sets name = \"CC Switch\" so Codex uses local compact; fully quit and restart Codex, or start a new thread.".into(),
+        );
+        log_forward_error(&state, &ctx, is_stream, &error);
+        return build_codex_proxy_error_response(&ctx, &endpoint, &error);
+    }
     let codex_tool_context = transform_codex_chat::build_codex_tool_context_from_request(&body);
     let namespace_restore_map = transform_codex_responses_namespace::namespace_restore_map(&body);
 
@@ -2962,11 +2974,16 @@ fn log_forward_error(
     let error_message = get_error_message(error);
     let request_id = uuid::Uuid::new_v4().to_string();
 
+    let outbound_model = ctx
+        .outbound_model
+        .clone()
+        .unwrap_or_else(|| ctx.request_model.clone());
     if let Err(e) = logger.log_error_with_context(
         request_id,
         ctx.provider.id.clone(),
         ctx.app_type_str.to_string(),
-        ctx.request_model.clone(),
+        outbound_model,
+        Some(ctx.request_model.clone()),
         status_code,
         error_message,
         ctx.latency_ms(),
