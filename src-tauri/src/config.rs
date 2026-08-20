@@ -556,6 +556,12 @@ mod tests {
     #[test]
     #[ignore = "requires CC_SWITCH_WSL_TEST_DIR to point to a WSL2 UNC directory"]
     fn atomic_write_replaces_existing_wsl_unc_file() {
+        // Apply after the test binary starts so cargo/link.exe keep a native TEMP.
+        // Setting the process TEMP to a \\wsl.localhost path makes mt.exe fail with LNK1327.
+        if let Some(temp) = std::env::var_os("CC_SWITCH_WSL_TEST_TEMP") {
+            std::env::set_var("TEMP", &temp);
+            std::env::set_var("TMP", &temp);
+        }
         let root = PathBuf::from(
             std::env::var_os("CC_SWITCH_WSL_TEST_DIR").expect("CC_SWITCH_WSL_TEST_DIR must be set"),
         );
