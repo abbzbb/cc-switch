@@ -2,14 +2,16 @@
 //!
 //! 提供请求生命周期的上下文管理，封装通用初始化逻辑
 
-use crate::app_config::AppType;
-use crate::provider::Provider;
-use crate::proxy::{
-    extract_session_id,
-    forwarder::RequestForwarder,
-    server::ProxyState,
-    types::{AppProxyConfig, CopilotOptimizerConfig, OptimizerConfig, RectifierConfig},
-    ProxyError,
+use crate::{
+    app_config::AppType,
+    provider::Provider,
+    proxy::{
+        extract_session_id,
+        forwarder::RequestForwarder,
+        server::ProxyState,
+        types::{AppProxyConfig, CopilotOptimizerConfig, OptimizerConfig, RectifierConfig},
+        ProxyError,
+    },
 };
 use axum::http::HeaderMap;
 use std::time::Instant;
@@ -164,6 +166,13 @@ impl RequestContext {
             .cloned()
             .ok_or(ProxyError::NoAvailableProvider)?;
 
+        let outbound_model = attempt_upstream_models
+            .as_ref()
+            .and_then(|models| models.first().cloned())
+            .or_else(|| {
+                crate::proxy::model_routing::expected_outbound_model(&providers, &request_model)
+            });
+
         log::debug!(
             "[{}] Provider: {}, model: {}, failover chain: {} providers, session: {}",
             tag,
@@ -182,7 +191,7 @@ impl RequestContext {
             promote_current_on_success,
             current_provider_id,
             request_model,
-            outbound_model: None,
+            outbound_model,
             tag,
             app_type_str,
             app_type,

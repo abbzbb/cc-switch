@@ -1,11 +1,17 @@
 //! Usage Logger - 记录 API 请求使用情况
 
-use super::calculator::{CostBreakdown, CostCalculator, ModelPricing};
-use super::parser::TokenUsage;
-use crate::database::{Database, PRICING_SOURCE_REQUEST, PRICING_SOURCE_RESPONSE};
-use crate::error::AppError;
-use crate::services::sql_helpers::{INPUT_TOKEN_SEMANTICS_FRESH, INPUT_TOKEN_SEMANTICS_TOTAL};
-use crate::services::usage_stats::{find_model_pricing_row, is_placeholder_pricing_model};
+use super::{
+    calculator::{CostBreakdown, CostCalculator, ModelPricing},
+    parser::TokenUsage,
+};
+use crate::{
+    database::{Database, PRICING_SOURCE_REQUEST, PRICING_SOURCE_RESPONSE},
+    error::AppError,
+    services::{
+        sql_helpers::{INPUT_TOKEN_SEMANTICS_FRESH, INPUT_TOKEN_SEMANTICS_TOTAL},
+        usage_stats::{find_model_pricing_row, is_placeholder_pricing_model},
+    },
+};
 use rusqlite::OptionalExtension;
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
@@ -301,6 +307,7 @@ impl<'a> UsageLogger<'a> {
         provider_id: String,
         app_type: String,
         model: String,
+        request_model: Option<String>,
         status_code: u16,
         error_message: String,
         latency_ms: u64,
@@ -308,7 +315,7 @@ impl<'a> UsageLogger<'a> {
         session_id: Option<String>,
         provider_type: Option<String>,
     ) -> Result<(), AppError> {
-        let request_model = model.clone();
+        let request_model = request_model.unwrap_or_else(|| model.clone());
         let log = RequestLog {
             request_id,
             provider_id,
@@ -764,6 +771,36 @@ mod tests {
             .unwrap();
         assert_eq!(status, 500);
         assert_eq!(error, Some("Internal Server Error".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn log_error_with_context_keeps_request_and_outbound_models() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let logger = UsageLogger::new(&db);
+
+        logger.log_error_with_context(
+            "req-grok-502".to_string(),
+            "grok".to_string(),
+            "codex".to_string(),
+            "grok-4.6".to_string(),
+            Some("grok/grok-4.6".to_string()),
+            502,
+            "upstream 502".to_string(),
+            800,
+            false,
+            None,
+            None,
+        )?;
+
+        let conn = crate::database::lock_conn!(db.conn);
+        let (model, request_model): (String, String) = conn.query_row(
+            "SELECT model, request_model FROM proxy_request_logs WHERE request_id = 'req-grok-502'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(model, "grok-4.6");
+        assert_eq!(request_model, "grok/grok-4.6");
         Ok(())
     }
 
