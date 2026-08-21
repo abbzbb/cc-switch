@@ -286,7 +286,10 @@ impl ChatToResponsesState {
 
         if !self.reasoning.added {
             let output_index = self.next_output_index();
-            let item_id = format!("rs_{}", self.response_id);
+            let item_id = super::transform_codex_responses_ids::shorten_responses_id(&format!(
+                "rs_{}",
+                self.response_id
+            ));
             self.reasoning.output_index = Some(output_index);
             self.reasoning.item_id = item_id.clone();
             self.reasoning.added = true;
@@ -311,7 +314,10 @@ impl ChatToResponsesState {
 
         if !self.text.added {
             let output_index = self.next_output_index();
-            let item_id = format!("{}_msg", self.response_id);
+            let item_id = super::transform_codex_responses_ids::shorten_responses_id(&format!(
+                "{}_msg",
+                self.response_id
+            ));
             self.text.output_index = Some(output_index);
             self.text.item_id = item_id.clone();
             self.text.added = true;

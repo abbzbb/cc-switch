@@ -5,6 +5,19 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.7] - 2026-08-21
+
+Codex → OpenAI Responses no longer 400s when a replayed `input[].id` is longer than 64 characters.
+
+### Fixed
+
+- **Responses `input[].id` longer than 64**: OpenAI rejects item / call ids above `maxLength: 64` with `string_above_max_length` (the Codex/Grok ids in this report were 83). The native Responses passthrough now remaps over-long `id` / `call_id` / `previous_response_id` to a stable SHA-256 stand-in (prefix preserved, same string → same short id so tool-call pairs still match). Chat/Anthropic bridges also clamp synthesized `fc_*` / `rs_*` / `*_msg` ids so Codex does not store an over-long id and replay it later. (#8)
+
+### Upgrade notes
+
+- No database schema migration — `SCHEMA_VERSION` stays at 16.
+- Already-open Codex threads that 400ed on `input[].id` should work on the next turn through the updated proxy; no new thread required.
+
 ## [3.20.6] - 2026-08-21
 
 Switching the current Codex provider now updates the live default model and catalog head, so Guardian / auto-review no longer keep billing the previous `default/gpt-5.6-sol` card.

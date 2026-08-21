@@ -147,11 +147,14 @@ impl AnthropicToResponsesState {
     fn handle_message_start(&mut self, data: &Value) -> Vec<Bytes> {
         if let Some(message) = data.get("message") {
             if let Some(id) = message.get("id").and_then(|v| v.as_str()) {
-                self.response_id = if id.starts_with("resp_") {
-                    id.to_string()
-                } else {
-                    format!("resp_{id}")
-                };
+                self.response_id =
+                    super::transform_codex_responses_ids::shorten_responses_id(&if id
+                        .starts_with("resp_")
+                    {
+                        id.to_string()
+                    } else {
+                        format!("resp_{id}")
+                    });
             }
             if let Some(model) = message.get("model").and_then(|v| v.as_str()) {
                 if !model.is_empty() {
@@ -176,7 +179,10 @@ impl AnthropicToResponsesState {
         match block_type {
             "text" => {
                 let output_index = self.next_output_index();
-                let item_id = format!("{}_msg_{output_index}", self.response_id);
+                let item_id = super::transform_codex_responses_ids::shorten_responses_id(&format!(
+                    "{}_msg_{output_index}",
+                    self.response_id
+                ));
                 events.push(sse::message_item_added(output_index, &item_id));
                 events.push(sse::message_content_part_added(output_index, &item_id));
                 self.blocks.insert(
@@ -240,7 +246,10 @@ impl AnthropicToResponsesState {
             }
             "thinking" | "redacted_thinking" => {
                 let output_index = self.next_output_index();
-                let item_id = format!("rs_{}_{output_index}", self.response_id);
+                let item_id = super::transform_codex_responses_ids::shorten_responses_id(&format!(
+                    "rs_{}_{output_index}",
+                    self.response_id
+                ));
                 events.push(sse::reasoning_item_added(output_index, &item_id));
                 let has_visible_summary = block_type == "thinking";
                 if has_visible_summary {
