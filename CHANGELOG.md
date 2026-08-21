@@ -5,6 +5,19 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.8] - 2026-08-21
+
+The unified Codex catalog no longer double-prefixes Grok ids or copies Official models into the Grok namespace.
+
+### Fixed
+
+- **Catalog `grok/grok-grok-4.6` and `grok/default-*`**: Regenerating `cc-switch-model-catalog.json` treated already-prefixed slugs as bare ids, flattened `/` to `-`, and prefixed again. Source ids are now peeled to a bare upstream id, sibling `provider/` rows are dropped, and the same `(provider, bare id)` is emitted once. Discovery extras that are image / audio / realtime stay out of the coding picker unless the user mapped them. (#10)
+
+### Upgrade notes
+
+- No database schema migration — `SCHEMA_VERSION` stays at 16.
+- Re-takeover or refresh the Codex routing catalog after installing, then fully quit and restart Codex so the picker rereads `cc-switch-model-catalog.json`.
+
 ## [3.20.7] - 2026-08-21
 
 Codex → OpenAI Responses no longer 400s when a replayed `input[].id` is longer than 64 characters.

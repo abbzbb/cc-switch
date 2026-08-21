@@ -205,6 +205,114 @@ pub fn alias_inner_slashes(model: &str) -> String {
     model.replace('/', "-")
 }
 
+/// Bare upstream id to advertise under `this_slug`, or `None` if `raw` belongs
+/// to another routing namespace.
+///
+/// A second catalog pass used to treat `grok/grok-4.6` as a new model id,
+/// flatten the slash, and prefix again (`grok/grok-grok-4.6`). The same pass
+/// copied `default/gpt-5.6-sol` into the Grok namespace as
+/// `grok/default-gpt-5.6-sol`. Peel this card's own prefix (including a
+/// doubled leftover) and drop slugs that already belong to a sibling card.
+pub(crate) fn bare_catalog_model_id(
+    raw: &str,
+    this_slug: &str,
+    known_slugs: &HashSet<String>,
+) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let this = this_slug.trim().to_ascii_lowercase();
+    if this.is_empty() {
+        return None;
+    }
+
+    if let Some((prefix, rest)) = raw.split_once('/') {
+        let prefix = prefix.trim().to_ascii_lowercase();
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return None;
+        }
+        if prefix == this {
+            return bare_catalog_model_id(rest, this_slug, known_slugs);
+        }
+        if known_slugs
+            .iter()
+            .any(|slug| slug.eq_ignore_ascii_case(&prefix))
+        {
+            return None;
+        }
+        return Some(alias_inner_slashes(raw));
+    }
+
+    if let Some((head, rest)) = raw.split_once('-') {
+        let head = head.to_ascii_lowercase();
+        if !head.is_empty()
+            && head != this
+            && !rest.is_empty()
+            && known_slugs
+                .iter()
+                .any(|slug| slug.eq_ignore_ascii_case(&head))
+        {
+            return None;
+        }
+    }
+
+    let doubled = format!("{this}-{this}-");
+    let peeled = if raw.len() > doubled.len()
+        && raw.is_char_boundary(doubled.len())
+        && raw[..doubled.len()].eq_ignore_ascii_case(&doubled)
+        && raw.is_char_boundary(this.len() + 1)
+    {
+        &raw[this.len() + 1..]
+    } else {
+        raw
+    };
+    if peeled.is_empty() {
+        return None;
+    }
+    Some(alias_inner_slashes(peeled))
+}
+
+fn catalog_display_name(provider_name: &str, display: &str, bare: &str) -> String {
+    let name = provider_name.trim();
+    let mut display = display.trim().to_string();
+    loop {
+        let prefix = format!("{name} / ");
+        if display.len() >= prefix.len()
+            && display.is_char_boundary(prefix.len())
+            && display[..prefix.len()].eq_ignore_ascii_case(&prefix)
+        {
+            display = display[prefix.len()..].trim().to_string();
+            continue;
+        }
+        break;
+    }
+    if display.is_empty() || display.eq_ignore_ascii_case(bare) {
+        format!("{name} / {bare}")
+    } else {
+        format!("{name} / {display}")
+    }
+}
+
+/// Discovery/`/v1/models` extras that Codex should not offer as coding models.
+fn is_non_coding_discovery_model(id: &str) -> bool {
+    let id = id
+        .rsplit('/')
+        .next()
+        .unwrap_or(id)
+        .trim()
+        .replace('_', "-")
+        .to_ascii_lowercase();
+    id.starts_with("gpt-image-")
+        || id.starts_with("dall-e")
+        || id.starts_with("tts-")
+        || id.starts_with("whisper-")
+        || id.starts_with("sora-")
+        || id.contains("-audio-")
+        || id.contains("-realtime-")
+}
+
 pub fn models_match(left: &str, right: &str) -> bool {
     let left = left.trim();
     let right = right.trim();
@@ -531,6 +639,10 @@ pub fn build_merged_codex_routing_catalog_with_combos(
     combos: &[crate::proxy::combo::ModelCombo],
 ) -> Result<Value, AppError> {
     let slugs = assign_routing_slugs(providers);
+    let known_slugs: HashSet<String> = slugs
+        .values()
+        .map(|slug| slug.to_ascii_lowercase())
+        .collect();
     let discovery = load_routing_discovery_cache();
     let hide_unprefixed_official = catalog_has_non_official_participant(providers);
     let mut models = Vec::new();
@@ -577,20 +689,18 @@ pub fn build_merged_codex_routing_catalog_with_combos(
         } else {
             let have: HashSet<String> = entries
                 .iter()
-                .filter_map(|entry| {
-                    entry
-                        .get("slug")
-                        .and_then(Value::as_str)
-                        .map(|slug| slug.trim().to_string())
-                })
-                .filter(|slug| !slug.is_empty())
+                .filter_map(|entry| entry.get("slug").and_then(Value::as_str))
+                .filter_map(|id| bare_catalog_model_id(id, slug, &known_slugs))
+                .flat_map(|id| [id.clone(), alias_inner_slashes(&id)])
                 .collect();
             let extra: Vec<String> = advertised_model_ids_for_catalog(
                 provider,
                 discovery.get(&provider.id).map(Vec::as_slice),
             )
             .into_iter()
-            .filter(|id| !have.contains(id.as_str()) && !have.contains(&alias_inner_slashes(id)))
+            .filter_map(|id| bare_catalog_model_id(&id, slug, &known_slugs))
+            .filter(|id| !have.contains(id) && !have.contains(&alias_inner_slashes(id)))
+            .filter(|id| !is_non_coding_discovery_model(id))
             .collect();
             if !extra.is_empty() {
                 entries.extend(catalog_entries_from_ids(&extra, profile, config_text));
@@ -608,19 +718,27 @@ pub fn build_merged_codex_routing_catalog_with_combos(
             if original_slug.is_empty() {
                 continue;
             }
+            let Some(bare) = bare_catalog_model_id(&original_slug, slug, &known_slugs) else {
+                continue;
+            };
+
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("slug".to_string(), json!(bare.clone()));
+            }
 
             if keep_unprefixed {
                 push_catalog_entry(&mut models, &mut seen_slugs, &mut priority, entry.clone());
             }
 
-            let aliased = alias_inner_slashes(&original_slug);
+            let aliased = alias_inner_slashes(&bare);
             let routed_slug = format!("{slug}/{aliased}");
             if let Some(obj) = entry.as_object_mut() {
                 let display = obj
                     .get("display_name")
                     .and_then(Value::as_str)
-                    .unwrap_or(&original_slug);
-                let display = format!("{} / {display}", provider.name);
+                    .unwrap_or(bare.as_str())
+                    .to_string();
+                let display = catalog_display_name(&provider.name, &display, &bare);
                 obj.insert("slug".to_string(), json!(routed_slug));
                 obj.insert("display_name".to_string(), json!(display));
                 obj.insert("description".to_string(), json!(display));
@@ -2547,6 +2665,158 @@ base_url = "http://127.0.0.1:15721/v1"
                 entry.get("context_window").and_then(Value::as_u64),
                 Some(372_000),
                 "routed gpt-5.6-sol must keep the Codex 372k window, not 128k: {entry}"
+            );
+        });
+    }
+
+    fn known(slugs: &[&str]) -> HashSet<String> {
+        slugs.iter().map(|slug| slug.to_ascii_lowercase()).collect()
+    }
+
+    #[test]
+    fn bare_catalog_id_peels_own_prefix_and_drops_foreign() {
+        let slugs = known(&["default", "grok"]);
+        assert_eq!(
+            bare_catalog_model_id("grok-4.6", "grok", &slugs).as_deref(),
+            Some("grok-4.6")
+        );
+        assert_eq!(
+            bare_catalog_model_id("grok/grok-4.6", "grok", &slugs).as_deref(),
+            Some("grok-4.6")
+        );
+        assert_eq!(
+            bare_catalog_model_id("grok/grok-grok-4.6", "grok", &slugs).as_deref(),
+            Some("grok-4.6")
+        );
+        assert_eq!(
+            bare_catalog_model_id("default/gpt-5.6-sol", "grok", &slugs),
+            None
+        );
+        assert_eq!(
+            bare_catalog_model_id("default-gpt-5.6-sol", "grok", &slugs),
+            None
+        );
+        assert_eq!(
+            bare_catalog_model_id("grok/default-gpt-5.6-sol", "grok", &slugs),
+            None
+        );
+        assert_eq!(
+            bare_catalog_model_id("org/custom", "grok", &slugs).as_deref(),
+            Some("org-custom")
+        );
+    }
+
+    #[test]
+    fn mixed_catalog_does_not_double_prefix_or_cross_copy() {
+        let mut openai = official("default");
+        openai.name = "OpenAI".to_string();
+        let grok = provider(
+            "grok",
+            "Grok",
+            &[
+                "grok-4.6",
+                "grok/grok-4.6",
+                "grok/grok-grok-4.6",
+                "default/gpt-5.6-sol",
+                "default-gpt-5.6-sol",
+                "grok/default-gpt-5.6-sol",
+            ],
+        );
+        let first = catalog_slugs(&[openai.clone(), grok.clone()]);
+        assert!(
+            first.contains(&"grok/grok-4.6".to_string()),
+            "expected single Grok row: {first:?}"
+        );
+        assert!(
+            first.contains(&"default/gpt-5.6-sol".to_string()),
+            "expected Official row: {first:?}"
+        );
+        assert!(
+            !first.iter().any(|slug| slug.contains("grok-grok")),
+            "doubled Grok prefix leaked: {first:?}"
+        );
+        assert!(
+            !first
+                .iter()
+                .any(|slug| slug.starts_with("grok/default") || slug.contains("default-gpt")),
+            "Official models copied into Grok: {first:?}"
+        );
+        assert_eq!(
+            first
+                .iter()
+                .filter(|slug| slug.as_str() == "grok/grok-4.6")
+                .count(),
+            1
+        );
+
+        let catalog =
+            build_merged_codex_routing_catalog(&[openai.clone(), grok.clone()]).expect("catalog");
+        let grok_display = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item.get("slug").and_then(Value::as_str) == Some("grok/grok-4.6"))
+            .and_then(|item| item.get("display_name").and_then(Value::as_str))
+            .unwrap();
+        assert_eq!(grok_display, "Grok / grok-4.6");
+
+        let mut grok_replay = grok;
+        let replayed: Vec<Value> = first.iter().map(|slug| json!({ "model": slug })).collect();
+        grok_replay.settings_config["modelCatalog"] = json!({ "models": replayed });
+        let second = catalog_slugs(&[openai, grok_replay]);
+        assert_eq!(
+            second
+                .iter()
+                .filter(|slug| slug.starts_with("grok/"))
+                .count(),
+            first
+                .iter()
+                .filter(|slug| slug.starts_with("grok/"))
+                .count(),
+            "second pass grew the Grok namespace:\nfirst={first:?}\nsecond={second:?}"
+        );
+        assert!(
+            !second.iter().any(|slug| slug.contains("grok-grok")),
+            "second pass reintroduced doubled prefix: {second:?}"
+        );
+        assert!(
+            !second
+                .iter()
+                .any(|slug| slug.starts_with("grok/default") || slug.contains("default-gpt")),
+            "second pass copied Official into Grok: {second:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn discovery_skips_image_audio_realtime_unless_mapped() {
+        with_test_home(|| {
+            let mut cache = HashMap::new();
+            cache.insert(
+                "default".to_string(),
+                vec![
+                    "gpt-image-1".into(),
+                    "gpt-4o-audio-preview".into(),
+                    "gpt-4o-realtime-preview".into(),
+                    "gpt-5.6-sol".into(),
+                ],
+            );
+            save_routing_discovery_cache(&cache);
+            let mut openai = official("default");
+            openai.settings_config["modelCatalog"] =
+                json!({ "models": [{ "model": "gpt-5.6-sol" }] });
+            let slugs = catalog_slugs(&[openai, provider("grok", "Grok", &["grok-4.6"])]);
+            assert!(
+                slugs.contains(&"default/gpt-5.6-sol".to_string()),
+                "{slugs:?}"
+            );
+            assert!(
+                !slugs.iter().any(|slug| {
+                    slug.contains("gpt-image")
+                        || slug.contains("audio-preview")
+                        || slug.contains("realtime-preview")
+                }),
+                "non-coding discovery extras leaked: {slugs:?}"
             );
         });
     }
