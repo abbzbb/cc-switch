@@ -1282,13 +1282,14 @@ pub(crate) fn anthropic_response_to_responses_with_context(
     }
 
     let id = body.get("id").and_then(|i| i.as_str()).unwrap_or("");
-    let response_id = if id.is_empty() {
-        "resp_ccswitch".to_string()
-    } else if id.starts_with("resp_") {
-        id.to_string()
-    } else {
-        format!("resp_{id}")
-    };
+    let response_id =
+        super::transform_codex_responses_ids::shorten_responses_id(&if id.is_empty() {
+            "resp_ccswitch".to_string()
+        } else if id.starts_with("resp_") {
+            id.to_string()
+        } else {
+            format!("resp_{id}")
+        });
     let model = body.get("model").and_then(|m| m.as_str()).unwrap_or("");
 
     let mut output: Vec<Value> = Vec::new();
@@ -1298,7 +1299,9 @@ pub(crate) fn anthropic_response_to_responses_with_context(
         if !text_parts.is_empty() {
             let idx = output.len();
             output.push(json!({
-                "id": format!("{response_id}_msg_{idx}"),
+                "id": super::transform_codex_responses_ids::shorten_responses_id(&format!(
+                    "{response_id}_msg_{idx}"
+                )),
                 "type": "message",
                 "status": "completed",
                 "role": "assistant",
@@ -1341,7 +1344,9 @@ pub(crate) fn anthropic_response_to_responses_with_context(
                     flush_text(&mut output, &mut text_parts);
                     let idx = output.len();
                     if let Some(item) = responses_reasoning_item_from_anthropic_block(
-                        &format!("rs_{response_id}_{idx}"),
+                        &super::transform_codex_responses_ids::shorten_responses_id(&format!(
+                            "rs_{response_id}_{idx}"
+                        )),
                         block,
                     ) {
                         output.push(item);

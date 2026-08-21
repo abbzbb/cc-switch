@@ -1824,6 +1824,24 @@ impl RequestForwarder {
             );
         }
 
+        // Native Responses passthrough: OpenAI (and strict compatible
+        // gateways) reject `input[].id` / `call_id` longer than 64 characters
+        // with 400 string_above_max_length. Codex and some third-party
+        // upstreams emit 80+ character ids; remap them to a stable short hash
+        // so a multi-turn replay does not fail before generation (abbzbb#8).
+        if matches!(app_type, AppType::Codex | AppType::GrokBuild)
+            && !codex_responses_to_chat
+            && !codex_responses_to_anthropic
+            && super::providers::transform_codex_responses_ids::clamp_responses_item_ids(
+                &mut request_body,
+            )
+        {
+            log::info!(
+                "[Codex] Rewrote Responses item ids longer than 64 chars (provider={})",
+                provider.id
+            );
+        }
+
         if matches!(app_type, AppType::Codex | AppType::GrokBuild) {
             self.apply_media_prevention(&mut request_body, provider);
         }

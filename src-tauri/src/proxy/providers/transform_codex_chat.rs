@@ -1512,7 +1512,9 @@ fn chat_reasoning_to_response_output_item(
     }
 
     Some(json!({
-        "id": format!("rs_{response_id}"),
+        "id": super::transform_codex_responses_ids::shorten_responses_id(&format!(
+            "rs_{response_id}"
+        )),
         "type": "reasoning",
         "summary": [{
             "type": "summary_text",
@@ -1595,7 +1597,9 @@ fn chat_message_to_response_output_item(message: &Value, response_id: &str) -> O
     }
 
     Some(json!({
-        "id": format!("{response_id}_msg"),
+        "id": super::transform_codex_responses_ids::shorten_responses_id(&format!(
+            "{response_id}_msg"
+        )),
         "type": "message",
         "status": "completed",
         "role": "assistant",
@@ -1742,11 +1746,15 @@ pub(crate) fn response_tool_call_item_id_from_chat_name(
     chat_name: &str,
     tool_context: &CodexToolContext,
 ) -> String {
-    if tool_context.is_custom_tool_chat_name(chat_name) {
+    let raw = if tool_context.is_custom_tool_chat_name(chat_name) {
         format!("ctc_{call_id}")
     } else {
         format!("fc_{call_id}")
-    }
+    };
+    // OpenAI Responses `id` maxLength is 64; a long Chat `call_id` must not
+    // become an 83-character `fc_*` / `ctc_*` item id that later 400s when
+    // Codex replays it onto a native Responses upstream (abbzbb#8).
+    super::transform_codex_responses_ids::shorten_responses_id(&raw)
 }
 
 pub(crate) fn response_tool_call_item_from_chat_name(
@@ -1937,11 +1945,12 @@ pub(crate) fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
 
 pub(crate) fn response_id_from_chat_id(id: Option<&str>) -> String {
     let id = id.unwrap_or("ccswitch");
-    if id.starts_with("resp_") {
+    let raw = if id.starts_with("resp_") {
         id.to_string()
     } else {
         format!("resp_{id}")
-    }
+    };
+    super::transform_codex_responses_ids::shorten_responses_id(&raw)
 }
 
 pub(crate) fn response_status_from_finish_reason(finish_reason: Option<&str>) -> &'static str {
@@ -4311,6 +4320,17 @@ mod tests {
             result["output"][0]["input"],
             "*** Begin Patch\n*** End Patch"
         );
+    }
+
+    #[test]
+    fn chat_tool_item_id_from_eighty_three_char_call_id_fits_responses_limit() {
+        let long_call = format!("call_{}", "x".repeat(78));
+        assert_eq!(long_call.len(), 83);
+        let context = CodexToolContext::default();
+        let item_id = response_tool_call_item_id_from_chat_name(&long_call, "shell", &context);
+        assert!(item_id.len() <= 64, "{item_id}");
+        assert!(item_id.starts_with("fc_"));
+        assert_ne!(item_id, format!("fc_{long_call}"));
     }
 
     /// #4341（非流式路径）：丢弃后一个工具调用都不剩时，必须如实报错，
