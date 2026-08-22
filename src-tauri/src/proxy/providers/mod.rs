@@ -36,6 +36,7 @@ pub mod streaming_responses;
 pub mod transform;
 pub mod transform_codex_anthropic;
 pub mod transform_codex_chat;
+pub mod transform_codex_responses_continue;
 pub mod transform_codex_responses_ids;
 pub mod transform_codex_responses_namespace;
 pub mod transform_codex_responses_xai_sanitize;
@@ -62,8 +63,9 @@ pub use claude::{
 pub use codex::CodexAdapter;
 pub use codex::{
     apply_codex_chat_upstream_model, apply_codex_upstream_model, codex_provider_upstream_model,
-    inject_codex_chat_prompt_cache_key, inject_xai_responses_prompt_cache_key,
-    is_codex_official_provider, provider_needs_responses_namespace_flatten,
+    inject_codex_chat_prompt_cache_key, inject_xai_responses_max_output_tokens,
+    inject_xai_responses_prompt_cache_key, is_codex_official_provider,
+    provider_is_xai_prompt_cache_upstream, provider_needs_responses_namespace_flatten,
     resolve_codex_catalog_tool_profile, resolve_codex_chat_reasoning_config,
     resolve_prompt_cache_routing_key, should_convert_codex_responses_to_anthropic,
     should_convert_codex_responses_to_chat, should_send_xai_conv_id_header,

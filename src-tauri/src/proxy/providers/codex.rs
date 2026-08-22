@@ -135,7 +135,7 @@ fn is_xai_prompt_cache_host(host: &str) -> bool {
 }
 
 /// Whether this provider's real upstream is an xAI/Grok-style cache router.
-fn provider_is_xai_prompt_cache_upstream(provider: &Provider) -> bool {
+pub fn provider_is_xai_prompt_cache_upstream(provider: &Provider) -> bool {
     provider.is_xai_oauth()
         || parsed_provider_host_and_path(provider)
             .is_some_and(|(host, _path)| is_xai_prompt_cache_host(&host))
@@ -255,6 +255,50 @@ pub fn inject_xai_responses_prompt_cache_key(
     };
 
     responses_body["prompt_cache_key"] = JsonValue::String(key.to_string());
+    true
+}
+
+/// Default output ceiling for native Grok/xAI Responses. Codex does not send
+/// `model_max_output_tokens`, so xhigh reasoning can consume a tiny implicit
+/// budget and complete with only a reasoning item (abbzbb#14).
+pub fn inject_xai_responses_max_output_tokens(
+    provider: &Provider,
+    responses_body: &mut JsonValue,
+) -> bool {
+    if !provider_is_xai_prompt_cache_upstream(provider) || !responses_body.is_object() {
+        return false;
+    }
+
+    let effort = responses_body
+        .get("reasoning")
+        .and_then(|value| value.get("effort"))
+        .and_then(JsonValue::as_str)
+        .or_else(|| {
+            responses_body
+                .get("reasoning_effort")
+                .and_then(JsonValue::as_str)
+        })
+        .unwrap_or("");
+    let floor = match effort {
+        "xhigh" | "max" | "ultra" => {
+            super::transform_codex_responses_continue::XAI_XHIGH_MAX_OUTPUT_TOKENS
+        }
+        _ => super::transform_codex_responses_continue::XAI_DEFAULT_MAX_OUTPUT_TOKENS,
+    };
+    let configured = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.max_output_tokens)
+        .filter(|value| *value > 0);
+    let target = configured.unwrap_or(floor);
+    let current = responses_body
+        .get("max_output_tokens")
+        .and_then(JsonValue::as_u64)
+        .unwrap_or(0);
+    if current >= target {
+        return false;
+    }
+    responses_body["max_output_tokens"] = JsonValue::from(target);
     true
 }
 
@@ -1528,6 +1572,47 @@ wire_api = "responses"
             Some("session-key"),
         ));
         assert_eq!(not_object, json!("not-an-object"));
+    }
+
+    #[test]
+    fn xai_responses_max_output_tokens_defaults_and_honors_override() {
+        let xai = create_provider(json!({
+            "base_url": "https://api.x.ai/v1"
+        }));
+        let mut body = json!({
+            "model": "grok-4.6",
+            "reasoning": { "effort": "high" }
+        });
+        assert!(inject_xai_responses_max_output_tokens(&xai, &mut body));
+        assert_eq!(body["max_output_tokens"], 16384);
+
+        let mut xhigh = json!({
+            "model": "grok-4.6",
+            "reasoning": { "effort": "xhigh" }
+        });
+        assert!(inject_xai_responses_max_output_tokens(&xai, &mut xhigh));
+        assert_eq!(xhigh["max_output_tokens"], 32768);
+
+        let mut configured = xai.clone();
+        configured.meta = Some(crate::provider::ProviderMeta {
+            max_output_tokens: Some(4096),
+            ..Default::default()
+        });
+        let mut override_body = json!({ "model": "grok-4.6" });
+        assert!(inject_xai_responses_max_output_tokens(
+            &configured,
+            &mut override_body
+        ));
+        assert_eq!(override_body["max_output_tokens"], 4096);
+
+        let unknown = create_provider(json!({
+            "base_url": "https://strict.example.com/v1"
+        }));
+        let mut other = json!({ "model": "other" });
+        assert!(!inject_xai_responses_max_output_tokens(
+            &unknown, &mut other
+        ));
+        assert!(other.get("max_output_tokens").is_none());
     }
 
     #[test]

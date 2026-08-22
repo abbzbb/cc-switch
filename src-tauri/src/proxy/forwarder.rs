@@ -1812,6 +1812,17 @@ impl RequestForwarder {
                     provider.id
                 );
             }
+            if super::providers::inject_xai_responses_max_output_tokens(provider, &mut request_body)
+            {
+                log::debug!(
+                    "[Codex] Injected xAI max_output_tokens={} (provider={})",
+                    request_body
+                        .get("max_output_tokens")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0),
+                    provider.id
+                );
+            }
         }
 
         if matches!(app_type, AppType::Codex | AppType::GrokBuild) {

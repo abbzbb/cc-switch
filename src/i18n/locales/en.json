@@ -1595,7 +1595,7 @@
     "impersonateClaudeCodeHint": "Enable when the gateway (or its upstream) restricts usage to Claude Code: spoofs the User-Agent, anthropic-beta and x-app headers, and injects the Claude Code identity as the first system prompt line.",
     "maxOutputTokensLabel": "Max output tokens",
     "maxOutputTokensPlaceholder": "Leave empty to use the default 8192",
-    "maxOutputTokensHint": "Codex does not forward model_max_output_tokens in the request body, so the default 8192 ceiling can truncate long or thinking-heavy responses (stop_reason=max_tokens). This value overrides the request's max_tokens on the Anthropic path. Do not exceed the real output ceiling of the model/gateway or it may 400. Leave empty to use the default 8192.",
+    "maxOutputTokensHint": "Codex does not forward model_max_output_tokens. Native Grok/xAI Responses inject 16384 by default (32768 on xhigh); the Anthropic path defaults to 8192. This field overrides those defaults. Exceeding the gateway ceiling may 400.",
     "promptCacheRoutingLabel": "Prompt cache routing",
     "promptCacheRoutingAuto": "Auto (recommended)",
     "promptCacheRoutingEnabled": "Enabled",
