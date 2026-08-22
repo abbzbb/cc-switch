@@ -2199,6 +2199,73 @@ fn provider_service_switch_claude_updates_live_and_state() {
     );
 }
 
+#[test]
+fn switch_live_write_failure_does_not_commit_current_provider() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let settings_path = get_claude_settings_path();
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent).expect("create claude settings dir");
+    }
+    // Force the live write to fail: settings.json is a directory, not a file.
+    std::fs::create_dir_all(&settings_path).expect("create settings.json as directory");
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "old-provider".to_string();
+        manager.providers.insert(
+            "old-provider".to_string(),
+            Provider::with_id(
+                "old-provider".to_string(),
+                "Legacy Claude".to_string(),
+                json!({
+                    "env": { "ANTHROPIC_API_KEY": "old-key" }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "new-provider".to_string(),
+            Provider::with_id(
+                "new-provider".to_string(),
+                "Fresh Claude".to_string(),
+                json!({
+                    "env": { "ANTHROPIC_API_KEY": "new-key" }
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&config).expect("create test state");
+    let before = state
+        .db
+        .get_current_provider(AppType::Claude.as_str())
+        .expect("get current before switch");
+    assert_eq!(before.as_deref(), Some("old-provider"));
+
+    let result = ProviderService::switch(&state, AppType::Claude, "new-provider");
+    assert!(
+        result.is_err(),
+        "switch must fail when live write cannot complete: {result:?}"
+    );
+
+    let after = state
+        .db
+        .get_current_provider(AppType::Claude.as_str())
+        .expect("get current after failed switch");
+    assert_eq!(
+        after.as_deref(),
+        Some("old-provider"),
+        "current provider id must stay unchanged when live write fails"
+    );
+}
+
 /// 切走勾选了通用配置的 Claude 供应商时，应把它 live 里新增的可共享键
 /// （用户直接在应用内装插件/改偏好）捕获进通用配置片段，并带到下一个供应商。
 #[test]

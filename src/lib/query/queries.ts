@@ -1,9 +1,5 @@
 import { useRef } from "react";
-import {
-  useQuery,
-  type UseQueryResult,
-  keepPreviousData,
-} from "@tanstack/react-query";
+import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import {
   providersApi,
   settingsApi,
@@ -53,6 +49,18 @@ export interface UseProvidersQueryOptions {
   isProxyRunning?: boolean; // 代理服务是否运行中
 }
 
+/**
+ * Keep previous providers only when the last query was for the same app.
+ * Cross-app switches must not flash the previous app's list (switch/delete
+ * would otherwise run against the NEW activeApp while showing the OLD list).
+ */
+export const keepPreviousProvidersIfSameApp = (
+  previousData: ProvidersQueryData | undefined,
+  previousQuery: { queryKey: readonly unknown[] } | undefined,
+  appId: AppId,
+): ProvidersQueryData | undefined =>
+  previousQuery?.queryKey[1] === appId ? previousData : undefined;
+
 export const useProvidersQuery = (
   appId: AppId,
   options?: UseProvidersQueryOptions,
@@ -61,7 +69,8 @@ export const useProvidersQuery = (
 
   return useQuery({
     queryKey: ["providers", appId],
-    placeholderData: keepPreviousData,
+    placeholderData: (previousData, previousQuery) =>
+      keepPreviousProvidersIfSameApp(previousData, previousQuery, appId),
     // 当代理服务运行时，每 10 秒刷新一次供应商列表
     // 这样可以自动反映后端熔断器自动禁用代理目标的变更
     refetchInterval: isProxyRunning ? 10000 : false,

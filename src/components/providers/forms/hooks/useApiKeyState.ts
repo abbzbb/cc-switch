@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import type { ProviderCategory } from "@/types";
 import {
   getApiKeyFromConfig,
@@ -34,8 +34,12 @@ export function useApiKeyState({
     return "";
   });
 
-  // 当外部通过 form.reset / 读取 live 等方式更新配置时，同步回 API Key 状态
+  const configRef = useRef(initialConfig);
+  configRef.current = initialConfig;
+
+  // 当外部通过 form.reset / 读取 live / JSON 编辑等方式更新配置时，同步回 API Key 状态
   // - 仅在 JSON 可解析时同步，避免用户编辑 JSON 过程中因临时无效导致输入框闪烁
+  // - 不把 apiKey 放进 deps，避免与用户输入互相覆盖形成循环
   useEffect(() => {
     if (!initialConfig) return;
 
@@ -45,19 +49,16 @@ export function useApiKeyState({
       return;
     }
 
-    // 从配置中提取 API Key（如果不存在则返回空字符串）
     const extracted = getApiKeyFromConfig(initialConfig, appType);
-    if (extracted !== apiKey) {
-      setApiKey(extracted);
-    }
-  }, [initialConfig, appType, apiKey]);
+    setApiKey((prev) => (extracted !== prev ? extracted : prev));
+  }, [initialConfig, appType]);
 
   const handleApiKeyChange = useCallback(
     (key: string) => {
       setApiKey(key);
 
       const configString = setApiKeyInConfig(
-        initialConfig || "{}",
+        configRef.current || "{}",
         key.trim(),
         {
           // 最佳实践：仅在"非官方/非云厂商类别"时补齐缺失字段
@@ -73,14 +74,7 @@ export function useApiKeyState({
 
       onConfigChange(configString);
     },
-    [
-      initialConfig,
-      selectedPresetId,
-      category,
-      appType,
-      apiKeyField,
-      onConfigChange,
-    ],
+    [category, appType, apiKeyField, onConfigChange],
   );
 
   const showApiKey = useCallback(

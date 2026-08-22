@@ -1,6 +1,6 @@
-use crate::config::{get_home_dir, write_text_file};
+use crate::config::{get_home_dir, write_text_file_private};
 use crate::error::AppError;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -235,18 +235,9 @@ pub fn write_gemini_env_text_atomic(content: &str) -> Result<(), AppError> {
         }
     }
 
-    write_text_file(&path, content)?;
-
-    // 设置文件权限为 600（仅所有者可读写）
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&path)
-            .map_err(|e| AppError::io(&path, e))?
-            .permissions();
-        perms.set_mode(0o600);
-        fs::set_permissions(&path, perms).map_err(|e| AppError::io(&path, e))?;
-    }
+    // Temp file is created 0600 and renamed into place, so there is no
+    // world-readable window (unlike write-then-chmod).
+    write_text_file_private(&path, content)?;
 
     Ok(())
 }
@@ -344,6 +335,69 @@ pub fn get_gemini_settings_path() -> PathBuf {
     get_gemini_dir().join("settings.json")
 }
 
+/// Live `~/.gemini/settings.json` keys owned by the Gemini CLI user or by the
+/// MCP projection (SSOT in the DB). These must not be stored in provider
+/// `settings_config.config` or later shallow-merged back over live files.
+const GEMINI_LIVE_USER_OWNED_SETTINGS_KEYS: &[&str] = &[
+    "mcpServers",
+    "mcp",
+    "security",
+    "selectedAuthType",
+    "theme",
+    "customThemes",
+    "tools",
+    "excludeTools",
+    "coreTools",
+    "autoAccept",
+    "ui",
+    "ide",
+    "ideMode",
+    "general",
+    "experimental",
+    "privacy",
+    "telemetry",
+    "model",
+    "context",
+    "contextFileName",
+    "fileFiltering",
+    "includeDirectories",
+    "checkpointing",
+    "folderTrust",
+    "hideBanner",
+    "hideTips",
+    "usageStatisticsEnabled",
+    "preferredEditor",
+    "vimMode",
+    "accessibility",
+    "hooks",
+];
+
+/// Keep only provider-owned keys from a live `settings.json` object.
+///
+/// User-owned CLI fields (theme / tools / mcpServers / security / …) stay on
+/// disk and in the MCP table; they are not part of the provider row.
+pub fn gemini_provider_owned_config(live_settings_json: &Value) -> Value {
+    let Some(object) = live_settings_json.as_object() else {
+        return json!({});
+    };
+    let mut owned = serde_json::Map::new();
+    for (key, value) in object {
+        if !GEMINI_LIVE_USER_OWNED_SETTINGS_KEYS.contains(&key.as_str()) {
+            owned.insert(key.clone(), value.clone());
+        }
+    }
+    Value::Object(owned)
+}
+
+/// Strip user-owned live `settings.json` fields from a provider settings
+/// snapshot of the form `{ "env": ..., "config": ... }`.
+pub fn strip_gemini_user_owned_live_settings(settings: &mut Value) {
+    let Some(config) = settings.get_mut("config") else {
+        return;
+    };
+    *config = gemini_provider_owned_config(config);
+}
+
 /// 更新 Gemini 目录 settings.json 中的 security.auth.selectedType 字段
 ///
 /// 此函数会：
@@ -361,11 +415,12 @@ fn update_selected_type(selected_type: &str) -> Result<(), AppError> {
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
     }
 
-    // 读取现有的 settings.json（如果存在）
+    // 读取现有的 settings.json（如果存在）。解析失败必须中止，
+    // 不能把损坏/半写入文件当成 `{}` 再覆盖回去。
     let mut settings_content = if settings_path.exists() {
         let content =
             fs::read_to_string(&settings_path).map_err(|e| AppError::io(&settings_path, e))?;
-        serde_json::from_str::<Value>(&content).unwrap_or_else(|_| serde_json::json!({}))
+        serde_json::from_str::<Value>(&content).map_err(|e| AppError::json(&settings_path, e))?
     } else {
         serde_json::json!({})
     };
@@ -709,5 +764,71 @@ KEY_WITH-DASH=value";
         });
 
         assert!(validate_gemini_settings(&settings).is_err());
+    }
+
+    #[test]
+    fn gemini_provider_owned_config_strips_live_user_fields() {
+        let live = json!({
+            "theme": "dark",
+            "mcpServers": { "echo": { "command": "echo" } },
+            "tools": { "sandbox": true },
+            "security": { "auth": { "selectedType": "gemini-api-key" } },
+            "timeout": 30000,
+            "maxRetries": 3
+        });
+        let owned = gemini_provider_owned_config(&live);
+        assert_eq!(
+            owned,
+            json!({
+                "timeout": 30000,
+                "maxRetries": 3
+            })
+        );
+    }
+
+    #[test]
+    fn strip_gemini_user_owned_live_settings_keeps_env_and_provider_config() {
+        let mut settings = json!({
+            "env": { "GEMINI_API_KEY": "sk-test" },
+            "config": {
+                "theme": "dark",
+                "mcpServers": { "echo": { "command": "echo" } },
+                "timeout": 1000
+            }
+        });
+        strip_gemini_user_owned_live_settings(&mut settings);
+        assert_eq!(settings["env"]["GEMINI_API_KEY"], "sk-test");
+        assert_eq!(settings["config"], json!({ "timeout": 1000 }));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn update_selected_type_does_not_wipe_corrupt_settings_json() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+
+        let settings_path = get_gemini_settings_path();
+        if let Some(parent) = settings_path.parent() {
+            std::fs::create_dir_all(parent).expect("create gemini dir");
+        }
+        let corrupt = "{ not-json";
+        std::fs::write(&settings_path, corrupt).expect("seed corrupt settings.json");
+
+        let result = write_packycode_settings();
+        match original_test_home {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+
+        assert!(
+            result.is_err(),
+            "corrupt settings.json must abort instead of being replaced with {{}}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&settings_path).expect("read settings.json"),
+            corrupt,
+            "corrupt bytes must be left untouched"
+        );
     }
 }

@@ -3,6 +3,7 @@
 //! Handles reading and writing live configuration files for Claude, Codex, and Gemini.
 
 use std::collections::HashMap;
+use std::fs;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -10,7 +11,9 @@ use toml_edit::{DocumentMut, Item, TableLike};
 
 use crate::app_config::AppType;
 use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
-use crate::config::{delete_file, get_claude_settings_path, read_json_file, write_json_file};
+use crate::config::{
+    delete_file, get_claude_settings_path, read_json_file, write_json_file, write_json_file_private,
+};
 use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
@@ -1021,6 +1024,11 @@ fn restore_live_settings_for_provider_backfill(
         strip_injected_kimi_for_coding_context_defaults(&mut settings, provider);
         return settings;
     }
+    if matches!(app_type, AppType::Gemini) {
+        let mut settings = live_settings;
+        crate::gemini_config::strip_gemini_user_owned_live_settings(&mut settings);
+        return settings;
+    }
     if matches!(app_type, AppType::GrokBuild) {
         let mut settings = live_settings;
         if let Err(err) = crate::grok_config::strip_grok_mcp_servers_from_settings(&mut settings) {
@@ -1167,7 +1175,6 @@ pub(crate) fn normalize_provider_common_config_for_storage(
 
 /// Live configuration snapshot for backup/restore
 #[derive(Clone)]
-#[allow(dead_code)]
 pub(crate) enum LiveSnapshot {
     Claude {
         settings: Option<Value>,
@@ -1180,16 +1187,85 @@ pub(crate) enum LiveSnapshot {
         env: Option<HashMap<String, String>>,
         config: Option<Value>,
     },
+    Grok {
+        config: Option<String>,
+    },
 }
 
 impl LiveSnapshot {
-    #[allow(dead_code)]
+    pub(crate) fn capture(app_type: &AppType) -> Option<Self> {
+        match app_type {
+            AppType::Claude => Self::capture_optional_json(get_claude_settings_path())
+                .map(|settings| Self::Claude { settings }),
+            AppType::Codex => {
+                let auth = Self::capture_optional_json(get_codex_auth_path())?;
+                let config_path = get_codex_config_path();
+                let config = Self::capture_optional_text(&config_path)?;
+                Some(Self::Codex { auth, config })
+            }
+            AppType::Gemini => {
+                use crate::gemini_config::{
+                    get_gemini_env_path, get_gemini_settings_path, read_gemini_env,
+                };
+                let env_path = get_gemini_env_path();
+                let env = if !env_path.exists() {
+                    None
+                } else if env_path.is_file() {
+                    match read_gemini_env() {
+                        Ok(map) => Some(map),
+                        Err(_) => return None,
+                    }
+                } else {
+                    return None;
+                };
+                let config = Self::capture_optional_json(get_gemini_settings_path())?;
+                Some(Self::Gemini { env, config })
+            }
+            AppType::GrokBuild => {
+                let config =
+                    Self::capture_optional_text(&crate::grok_config::get_grok_config_path())?;
+                Some(Self::Grok { config })
+            }
+            AppType::ClaudeDesktop
+            | AppType::OpenCode
+            | AppType::OpenClaw
+            | AppType::Hermes
+            | AppType::Pi => None,
+        }
+    }
+
+    fn capture_optional_json(path: std::path::PathBuf) -> Option<Option<Value>> {
+        if !path.exists() {
+            return Some(None);
+        }
+        if !path.is_file() {
+            return None;
+        }
+        match read_json_file(&path) {
+            Ok(value) => Some(Some(value)),
+            Err(_) => None,
+        }
+    }
+
+    fn capture_optional_text(path: &std::path::Path) -> Option<Option<String>> {
+        if !path.exists() {
+            return Some(None);
+        }
+        if !path.is_file() {
+            return None;
+        }
+        match fs::read_to_string(path) {
+            Ok(text) => Some(Some(text)),
+            Err(_) => None,
+        }
+    }
+
     pub(crate) fn restore(&self) -> Result<(), AppError> {
         match self {
             LiveSnapshot::Claude { settings } => {
                 let path = get_claude_settings_path();
                 if let Some(value) = settings {
-                    write_json_file(&path, value)?;
+                    write_json_file_private(&path, value)?;
                 } else if path.exists() {
                     delete_file(&path)?;
                 }
@@ -1198,7 +1274,7 @@ impl LiveSnapshot {
                 let auth_path = get_codex_auth_path();
                 let config_path = get_codex_config_path();
                 if let Some(value) = auth {
-                    write_json_file(&auth_path, value)?;
+                    write_json_file_private(&auth_path, value)?;
                 } else if auth_path.exists() {
                     delete_file(&auth_path)?;
                 }
@@ -1209,7 +1285,7 @@ impl LiveSnapshot {
                     delete_file(&config_path)?;
                 }
             }
-            LiveSnapshot::Gemini { env, .. } => {
+            LiveSnapshot::Gemini { env, config } => {
                 use crate::gemini_config::{
                     get_gemini_env_path, get_gemini_settings_path, write_gemini_env_atomic,
                 };
@@ -1221,16 +1297,18 @@ impl LiveSnapshot {
                 }
 
                 let settings_path = get_gemini_settings_path();
-                match self {
-                    LiveSnapshot::Gemini {
-                        config: Some(cfg), ..
-                    } => {
-                        write_json_file(&settings_path, cfg)?;
-                    }
-                    LiveSnapshot::Gemini { config: None, .. } if settings_path.exists() => {
-                        delete_file(&settings_path)?;
-                    }
-                    _ => {}
+                if let Some(cfg) = config {
+                    write_json_file(&settings_path, cfg)?;
+                } else if settings_path.exists() {
+                    delete_file(&settings_path)?;
+                }
+            }
+            LiveSnapshot::Grok { config } => {
+                let path = crate::grok_config::get_grok_config_path();
+                if let Some(text) = config {
+                    crate::grok_config::write_grok_live_settings(&json!({ "config": text }))?;
+                } else if path.exists() {
+                    delete_file(&path)?;
                 }
             }
         }
@@ -1244,7 +1322,7 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
         AppType::Claude => {
             let path = get_claude_settings_path();
             let settings = sanitize_claude_settings_for_live(&provider.settings_config);
-            write_json_file(&path, &settings)?;
+            write_json_file_private(&path, &settings)?;
         }
         AppType::ClaudeDesktop => {
             return Err(AppError::localized(
@@ -1616,10 +1694,12 @@ pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
             let env_json = env_to_json(&env_map);
             let env_obj = env_json.get("env").cloned().unwrap_or_else(|| json!({}));
 
-            // Read settings.json file (MCP config etc.)
+            // settings.json user-owned fields (theme/tools/mcpServers/security)
+            // stay on disk and in the MCP table — never dump them into provider
+            // `settings_config.config`.
             let settings_path = get_gemini_settings_path();
             let config_obj = if settings_path.exists() {
-                read_json_file(&settings_path)?
+                crate::gemini_config::gemini_provider_owned_config(&read_json_file(&settings_path)?)
             } else {
                 json!({})
             };
@@ -1771,15 +1851,13 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
             let env_json = env_to_json(&env_map);
             let env_obj = env_json.get("env").cloned().unwrap_or_else(|| json!({}));
 
-            // Read settings.json file (MCP config etc.)
             let settings_path = get_gemini_settings_path();
             let config_obj = if settings_path.exists() {
-                read_json_file(&settings_path)?
+                crate::gemini_config::gemini_provider_owned_config(&read_json_file(&settings_path)?)
             } else {
                 json!({})
             };
 
-            // Return complete structure: { "env": {...}, "config": {...} }
             json!({
                 "env": env_obj,
                 "config": config_obj
@@ -1876,30 +1954,32 @@ pub(crate) fn write_gemini_live(provider: &Provider) -> Result<(), AppError> {
     let env_map = json_to_env(&provider.settings_config)?;
 
     // Prepare config to write to ~/.gemini/settings.json
-    // Behavior:
-    // - config is object: use it (merge with existing to preserve mcpServers etc.)
-    // - config is null or absent: preserve existing file content
+    // Prefer writing `.env` + `security.auth.selectedType` only. A stale full
+    // snapshot of live settings.json must not be shallow-merged back (it
+    // clobbers theme/tools/mcpServers). Parse errors abort instead of `{}`.
     let settings_path = get_gemini_settings_path();
+    let existing_settings = if settings_path.exists() {
+        Some(read_json_file::<Value>(&settings_path)?)
+    } else {
+        None
+    };
+
     let mut config_to_write: Option<Value> = None;
 
     if let Some(config_value) = provider.settings_config.get("config") {
         if config_value.is_object() {
-            // Merge with existing settings to preserve mcpServers and other fields
-            let mut merged = if settings_path.exists() {
-                read_json_file::<Value>(&settings_path).unwrap_or_else(|_| json!({}))
-            } else {
-                json!({})
-            };
-
-            // Merge provider config into existing settings
-            if let (Some(merged_obj), Some(config_obj)) =
-                (merged.as_object_mut(), config_value.as_object())
-            {
-                for (k, v) in config_obj {
-                    merged_obj.insert(k.clone(), v.clone());
+            let owned = crate::gemini_config::gemini_provider_owned_config(config_value);
+            if owned.as_object().is_some_and(|object| !object.is_empty()) {
+                let mut merged = existing_settings.clone().unwrap_or_else(|| json!({}));
+                if let (Some(merged_obj), Some(owned_obj)) =
+                    (merged.as_object_mut(), owned.as_object())
+                {
+                    for (k, v) in owned_obj {
+                        merged_obj.insert(k.clone(), v.clone());
+                    }
                 }
+                config_to_write = Some(merged);
             }
-            config_to_write = Some(merged);
         } else if !config_value.is_null() {
             return Err(AppError::localized(
                 "gemini.validation.invalid_config",
@@ -1907,12 +1987,8 @@ pub(crate) fn write_gemini_live(provider: &Provider) -> Result<(), AppError> {
                 "Gemini config invalid: config must be an object or null",
             ));
         }
-        // config is null: don't modify existing settings.json (preserve mcpServers etc.)
-    }
-
-    // If no config specified or config is null, preserve existing file
-    if config_to_write.is_none() && settings_path.exists() {
-        config_to_write = Some(read_json_file(&settings_path)?);
+        // config is null / empty after stripping: leave live settings.json
+        // fields that are not being intentionally updated.
     }
 
     match auth_type {
@@ -2236,7 +2312,7 @@ pub fn remove_openclaw_provider_from_live(provider_id: &str) -> Result<(), AppEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta};
+    use crate::provider::{AuthBinding, AuthBindingSource, Provider, ProviderMeta};
     use serde_json::json;
 
     #[test]
@@ -3175,5 +3251,135 @@ base_url = "https://a.example/v1"
 
         assert!(!config_text.contains("mcp_servers"));
         assert!(config_text.contains("model = \"grok-4.5\""));
+    }
+
+    #[test]
+    fn gemini_switch_backfill_strips_settings_json_dump() {
+        let provider = Provider::with_id(
+            "gemini".to_string(),
+            "Gemini".to_string(),
+            json!({
+                "env": { "GEMINI_API_KEY": "sk-test" }
+            }),
+            None,
+        );
+        let live_settings = json!({
+            "env": { "GEMINI_API_KEY": "sk-test" },
+            "config": {
+                "theme": "dark",
+                "mcpServers": { "echo": { "command": "echo" } },
+                "tools": { "sandbox": true },
+                "security": { "auth": { "selectedType": "gemini-api-key" } },
+                "timeout": 30000
+            }
+        });
+
+        let result =
+            restore_live_settings_for_provider_backfill(&AppType::Gemini, &provider, live_settings);
+
+        assert_eq!(result["env"]["GEMINI_API_KEY"], "sk-test");
+        assert!(
+            result["config"].get("mcpServers").is_none(),
+            "MCP stays in the DB, not the provider row"
+        );
+        assert!(result["config"].get("theme").is_none());
+        assert!(result["config"].get("tools").is_none());
+        assert!(result["config"].get("security").is_none());
+        assert_eq!(result["config"]["timeout"], 30000);
+    }
+
+    fn with_gemini_test_home<T>(test: impl FnOnce(&std::path::Path) -> T) -> T {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        let result = test(temp.path());
+        match old_test_home {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+        result
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn write_gemini_live_does_not_wipe_corrupt_settings_json() {
+        with_gemini_test_home(|home| {
+            let settings_path = home.join(".gemini").join("settings.json");
+            std::fs::create_dir_all(settings_path.parent().unwrap()).expect("create gemini dir");
+            let corrupt = "{ not-json";
+            std::fs::write(&settings_path, corrupt).expect("seed corrupt settings");
+
+            let provider = Provider::with_id(
+                "gemini".to_string(),
+                "Gemini".to_string(),
+                json!({
+                    "env": { "GEMINI_API_KEY": "sk-test" },
+                    "config": { "theme": "light", "timeout": 1 }
+                }),
+                None,
+            );
+
+            let result = write_gemini_live(&provider);
+            assert!(
+                result.is_err(),
+                "parse failure must abort instead of writing {{}}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&settings_path).expect("read settings"),
+                corrupt
+            );
+            assert!(
+                !home.join(".gemini").join(".env").exists(),
+                "env must not be rewritten after a settings.json parse failure"
+            );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn write_gemini_live_does_not_merge_stale_settings_dump() {
+        with_gemini_test_home(|home| {
+            let settings_path = home.join(".gemini").join("settings.json");
+            std::fs::create_dir_all(settings_path.parent().unwrap()).expect("create gemini dir");
+            std::fs::write(
+                &settings_path,
+                serde_json::to_string_pretty(&json!({
+                    "theme": "dark",
+                    "mcpServers": { "echo": { "command": "echo" } },
+                    "tools": { "sandbox": true }
+                }))
+                .unwrap(),
+            )
+            .expect("seed live settings");
+
+            let provider = Provider::with_id(
+                "gemini".to_string(),
+                "Gemini".to_string(),
+                json!({
+                    "env": { "GEMINI_API_KEY": "sk-test" },
+                    "config": {
+                        "theme": "light",
+                        "mcpServers": { "other": { "command": "other" } },
+                        "tools": { "sandbox": false },
+                        "timeout": 5000
+                    }
+                }),
+                None,
+            );
+
+            write_gemini_live(&provider).expect("write gemini live");
+
+            let live: Value =
+                serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+            assert_eq!(live["theme"], "dark");
+            assert_eq!(live["mcpServers"]["echo"]["command"], "echo");
+            assert_eq!(live["tools"]["sandbox"], true);
+            assert_eq!(live["timeout"], 5000);
+            assert_eq!(
+                live.pointer("/security/auth/selectedType")
+                    .and_then(Value::as_str),
+                Some("gemini-api-key")
+            );
+        });
     }
 }

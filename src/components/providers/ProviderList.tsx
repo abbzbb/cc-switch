@@ -6,11 +6,13 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { AlertTriangle, Search, X } from "lucide-react";
@@ -33,6 +35,7 @@ import {
 import { useStreamCheck } from "@/hooks/useStreamCheck";
 import { ProviderCard } from "@/components/providers/ProviderCard";
 import { ProviderEmptyState } from "@/components/providers/ProviderEmptyState";
+import { ProviderActionPendingContext } from "@/components/providers/ProviderActions";
 import {
   useAutoFailoverEnabled,
   useFailoverQueue,
@@ -43,7 +46,6 @@ import {
   useCurrentOmoProviderId,
   useCurrentOmoSlimProviderId,
 } from "@/lib/query/omo";
-import { useCallback } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { isTextEditableTarget } from "@/utils/domUtils";
@@ -70,6 +72,7 @@ interface ProviderListProps {
   onOpenTerminal?: (provider: Provider) => void;
   onCreate?: () => void;
   isLoading?: boolean;
+  isActionPending?: boolean;
   isProxyRunning?: boolean; // 代理服务运行状态
   isProxyTakeover?: boolean; // 代理接管模式（Live配置已被接管）
   activeProviderId?: string; // 代理当前实际使用的供应商 ID（用于故障转移模式下标注绿色边框）
@@ -92,6 +95,7 @@ export function ProviderList({
   onOpenTerminal,
   onCreate,
   isLoading = false,
+  isActionPending = false,
   isProxyRunning = false,
   isProxyTakeover = false,
   activeProviderId,
@@ -406,8 +410,30 @@ export function ProviderList({
       </div>
     ) : null;
 
+  const handleSwitch = useCallback(
+    (provider: Provider) => {
+      if (isActionPending) return;
+      onSwitch(provider);
+    },
+    [isActionPending, onSwitch],
+  );
+
+  const handleSetAsDefault = useCallback(
+    (provider: Provider, modelId?: string) => {
+      if (isActionPending) return;
+      onSetAsDefault?.(provider, modelId);
+    },
+    [isActionPending, onSetAsDefault],
+  );
+
+  const withActionLock = (node: ReactNode) => (
+    <ProviderActionPendingContext.Provider value={isActionPending}>
+      {node}
+    </ProviderActionPendingContext.Provider>
+  );
+
   if (isLoading) {
-    return (
+    return withActionLock(
       <div className="space-y-3">
         {[0, 1, 2].map((index) => (
           <div
@@ -415,12 +441,12 @@ export function ProviderList({
             className="w-full border border-dashed rounded-lg h-28 border-muted-foreground/40 bg-muted/40"
           />
         ))}
-      </div>
+      </div>,
     );
   }
 
   if (sortedProviders.length === 0) {
-    return (
+    return withActionLock(
       <div className="mt-4 space-y-4">
         {piStateErrorNotice}
         <ProviderEmptyState
@@ -428,7 +454,7 @@ export function ProviderList({
           onCreate={appId === "pi" ? undefined : onCreate}
           onImport={appId === "pi" ? undefined : () => importMutation.mutate()}
         />
-      </div>
+      </div>,
     );
   }
 
@@ -475,7 +501,7 @@ export function ProviderList({
                 }
                 isOmo={isOmo}
                 isOmoSlim={isOmoSlim}
-                onSwitch={onSwitch}
+                onSwitch={handleSwitch}
                 onEdit={onEdit}
                 onDelete={onDelete}
                 onRemoveFromConfig={onRemoveFromConfig}
@@ -519,7 +545,7 @@ export function ProviderList({
                 }
                 onSetAsDefault={
                   onSetAsDefault
-                    ? (modelId) => onSetAsDefault(provider, modelId)
+                    ? (modelId) => handleSetAsDefault(provider, modelId)
                     : undefined
                 }
               />
@@ -530,7 +556,7 @@ export function ProviderList({
     </DndContext>
   );
 
-  return (
+  return withActionLock(
     <div className="mt-4 space-y-4">
       {piStateErrorNotice}
       {claudeDesktopStatusMessages.length > 0 && (

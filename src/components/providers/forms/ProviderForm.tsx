@@ -308,6 +308,7 @@ function ProviderFormFull({
   onManageUniversalProviders,
   onManageAuthAccounts,
   onSubmittingChange,
+  onSubmitReadyChange,
   initialData,
   showButtons = true,
   isProxyTakeover = false,
@@ -477,6 +478,7 @@ function ProviderFormFull({
     mode: "onSubmit",
   });
   const { isSubmitting } = form.formState;
+  const settingsConfig = form.watch("settingsConfig");
 
   const handleSettingsConfigChange = useCallback(
     (config: string) => {
@@ -517,7 +519,7 @@ function ProviderFormFull({
     handleApiKeyChange,
     showApiKey: shouldShowApiKey,
   } = useApiKeyState({
-    initialConfig: form.getValues("settingsConfig"),
+    initialConfig: settingsConfig,
     onConfigChange: handleSettingsConfigChange,
     selectedPresetId,
     category,
@@ -528,7 +530,7 @@ function ProviderFormFull({
   const { baseUrl, handleClaudeBaseUrlChange } = useBaseUrlState({
     appType: appId,
     category,
-    settingsConfig: form.getValues("settingsConfig"),
+    settingsConfig,
     codexConfig: "",
     onSettingsConfigChange: handleSettingsConfigChange,
     onCodexConfigChange: () => {},
@@ -547,7 +549,7 @@ function ProviderFormFull({
     subagentModel,
     handleModelChange,
   } = useModelState({
-    settingsConfig: form.getValues("settingsConfig"),
+    settingsConfig,
     onConfigChange: handleSettingsConfigChange,
   });
 
@@ -875,7 +877,7 @@ function ProviderFormFull({
   } = useTemplateValues({
     selectedPresetId: appId === "claude" ? selectedPresetId : null,
     presetEntries: appId === "claude" ? presetEntries : [],
-    settingsConfig: form.getValues("settingsConfig"),
+    settingsConfig,
     onConfigChange: handleSettingsConfigChange,
   });
 
@@ -888,7 +890,7 @@ function ProviderFormFull({
     isExtracting: isClaudeExtracting,
     handleExtract: handleClaudeExtract,
   } = useCommonConfigSnippet({
-    settingsConfig: form.getValues("settingsConfig"),
+    settingsConfig,
     onConfigChange: handleSettingsConfigChange,
     initialData: appId === "claude" ? initialData : undefined,
     initialEnabled:
@@ -934,6 +936,15 @@ function ProviderFormFull({
   } = useGeminiConfigState({
     initialData: appId === "gemini" ? initialData : undefined,
   });
+
+  const hasConfigParseError = Boolean(
+    (appId === "codex" && codexAuthError) ||
+      (appId === "gemini" && geminiConfigError),
+  );
+
+  useEffect(() => {
+    onSubmitReadyChange?.(!hasConfigParseError);
+  }, [hasConfigParseError, onSubmitReadyChange]);
 
   const updateGeminiEnvField = useCallback(
     (
@@ -1158,6 +1169,16 @@ function ProviderFormFull({
     (appId === "claude" || appId === "codex") && category !== "official";
 
   const handleSubmit = async (values: ProviderFormData) => {
+    if (hasConfigParseError) {
+      toast.error(
+        (appId === "codex" ? codexAuthError : geminiConfigError) ||
+          t("jsonEditor.invalidJson", {
+            defaultValue: "JSON格式错误",
+          }),
+      );
+      return;
+    }
+
     const overridesResult = shouldApplyLocalProxyRequestOverrides
       ? buildLocalProxyRequestOverrides(
           localProxyHeadersOverride,
@@ -1582,6 +1603,16 @@ function ProviderFormFull({
       return;
     }
 
+    if (hasConfigParseError) {
+      toast.error(
+        (appId === "codex" ? codexAuthError : geminiConfigError) ||
+          t("jsonEditor.invalidJson", {
+            defaultValue: "JSON格式错误",
+          }),
+      );
+      return;
+    }
+
     let settingsConfig: string;
 
     if (appId === "codex") {
@@ -1590,7 +1621,7 @@ function ProviderFormFull({
           isCodexOfficialManagedOauthBound || wasCodexOfficialManagedOauthBound;
         const authJson = shouldStripCodexOfficialAuth
           ? {}
-          : JSON.parse(codexAuth);
+          : JSON.parse(codexAuth.trim() || "{}");
         const codexConfigForSave = codexConfig ?? "";
         let normalizedCodexConfig =
           category !== "official" && codexConfigForSave.trim()
@@ -1628,7 +1659,12 @@ function ProviderFormFull({
         }
         settingsConfig = JSON.stringify(configObj);
       } catch (err) {
-        settingsConfig = values.settingsConfig.trim();
+        toast.error(
+          t("jsonEditor.invalidJson", {
+            defaultValue: "JSON格式错误",
+          }),
+        );
+        return;
       }
     } else if (appId === "gemini") {
       try {
@@ -1640,7 +1676,12 @@ function ProviderFormFull({
         };
         settingsConfig = JSON.stringify(combined);
       } catch (err) {
-        settingsConfig = values.settingsConfig.trim();
+        toast.error(
+          t("jsonEditor.invalidJson", {
+            defaultValue: "JSON格式错误",
+          }),
+        );
+        return;
       }
     } else if (
       appId === "opencode" &&
@@ -2472,8 +2513,8 @@ function ProviderFormFull({
               providerId={providerId}
               shouldShowApiKey={
                 (category !== "cloud_provider" ||
-                  hasApiKeyField(form.getValues("settingsConfig"), "claude")) &&
-                shouldShowApiKey(form.getValues("settingsConfig"), isEditMode)
+                  hasApiKeyField(settingsConfig, "claude")) &&
+                shouldShowApiKey(settingsConfig, isEditMode)
               }
               apiKey={apiKey}
               onApiKeyChange={handleApiKeyChange}
@@ -2664,10 +2705,7 @@ function ProviderFormFull({
           {appId === "gemini" && (
             <GeminiFormFields
               providerId={providerId}
-              shouldShowApiKey={shouldShowApiKey(
-                form.getValues("settingsConfig"),
-                isEditMode,
-              )}
+              shouldShowApiKey={shouldShowApiKey(settingsConfig, isEditMode)}
               apiKey={geminiApiKey}
               onApiKeyChange={handleGeminiApiKeyChange}
               category={category}
@@ -2848,8 +2886,8 @@ function ProviderFormFull({
                   {t("provider.configJson")}
                 </Label>
                 <JsonEditor
-                  value={form.getValues("settingsConfig")}
-                  onChange={(config) => form.setValue("settingsConfig", config)}
+                  value={settingsConfig}
+                  onChange={handleSettingsConfigChange}
                   placeholder={`{
   "npm": "@ai-sdk/openai-compatible",
   "options": {
@@ -2873,8 +2911,8 @@ function ProviderFormFull({
                   {t("provider.configJson")}
                 </Label>
                 <JsonEditor
-                  value={form.getValues("settingsConfig")}
-                  onChange={(config) => form.setValue("settingsConfig", config)}
+                  value={settingsConfig}
+                  onChange={handleSettingsConfigChange}
                   placeholder={
                     appId === "hermes"
                       ? `{
@@ -2908,8 +2946,8 @@ function ProviderFormFull({
           ) : (
             <>
               <CommonConfigEditor
-                value={form.getValues("settingsConfig")}
-                onChange={(value) => form.setValue("settingsConfig", value)}
+                value={settingsConfig}
+                onChange={handleSettingsConfigChange}
                 useCommonConfig={useCommonConfig}
                 onCommonConfigToggle={handleCommonConfigToggle}
                 commonConfigSnippet={commonConfigSnippet}
@@ -2942,7 +2980,9 @@ function ProviderFormFull({
               </Button>
               <Button
                 type="submit"
-                disabled={isSubmitting || isConfirmSubmitting}
+                disabled={
+                  isSubmitting || isConfirmSubmitting || hasConfigParseError
+                }
               >
                 {submitLabel}
               </Button>

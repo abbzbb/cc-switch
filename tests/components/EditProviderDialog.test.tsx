@@ -16,6 +16,7 @@ const apiMocks = vi.hoisted(() => ({
 }));
 let mockFormReady = true;
 let mockCodexManagedAccountSelected = false;
+let mockProviderKey: string | undefined;
 let submitReadyCallbacks: Array<(isReady: boolean) => void> = [];
 
 vi.mock("@/lib/api", () => ({
@@ -73,6 +74,7 @@ vi.mock("@/components/providers/forms/ProviderForm", () => ({
       meta?: Record<string, unknown>;
       icon?: string;
       iconColor?: string;
+      providerKey?: string;
     }) => void;
     onSubmitReadyChange?: (isReady: boolean) => void;
     onManageAuthAccounts?: (target: "codex_oauth") => void;
@@ -108,6 +110,7 @@ vi.mock("@/components/providers/forms/ProviderForm", () => ({
               : initialData.meta,
             icon: initialData.icon,
             iconColor: initialData.iconColor,
+            providerKey: mockProviderKey,
           });
         }}
       >
@@ -139,6 +142,7 @@ describe("EditProviderDialog", () => {
   beforeEach(() => {
     mockFormReady = true;
     mockCodexManagedAccountSelected = false;
+    mockProviderKey = undefined;
     submitReadyCallbacks = [];
     apiMocks.getCurrent.mockReset();
     apiMocks.getLiveProviderSettings.mockReset();
@@ -417,5 +421,35 @@ describe("EditProviderDialog", () => {
 
     act(() => staleCallback?.(true));
     expect(reopenedButton).toBeDisabled();
+  });
+
+  it("uses payload.providerKey as the next provider id for Hermes", async () => {
+    mockProviderKey = "renamed-hermes";
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const provider: Provider = {
+      id: "old-hermes",
+      name: "Hermes Provider",
+      settingsConfig: {
+        name: "Hermes Provider",
+        base_url: "https://api.example.com/v1",
+        api_key: "",
+      },
+    };
+
+    render(
+      <EditProviderDialog
+        open
+        provider={provider}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+        appId="hermes"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].provider.id).toBe("renamed-hermes");
+    expect(onSubmit.mock.calls[0][0].originalId).toBe("old-hermes");
   });
 });

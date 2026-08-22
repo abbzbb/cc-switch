@@ -1,3 +1,4 @@
+import { createContext, useContext } from "react";
 import {
   Activity,
   BarChart3,
@@ -59,7 +60,10 @@ interface ProviderActionsProps {
   isStateChangeProtected?: boolean;
   defaultModelOptions?: OpenClawDefaultModelOption[];
   onSetAsDefault?: (modelId?: string) => void;
+  isActionPending?: boolean;
 }
+
+export const ProviderActionPendingContext = createContext(false);
 
 // 主按钮的呈现状态。title 用于 disabled 态向用户解释为何不可点击；
 // 因 Button 基类带 disabled:pointer-events-none，title 必须挂在外层非禁用
@@ -100,8 +104,11 @@ export function ProviderActions({
   isStateChangeProtected = false,
   defaultModelOptions = [],
   onSetAsDefault,
+  isActionPending: isActionPendingProp = false,
 }: ProviderActionsProps) {
   const { t } = useTranslation();
+  const isActionPendingFromContext = useContext(ProviderActionPendingContext);
+  const isActionPending = isActionPendingProp || isActionPendingFromContext;
   const iconButtonClass = "h-8 w-8 p-1";
 
   // Additive provider membership: providers can coexist in the native config.
@@ -116,6 +123,7 @@ export function ProviderActions({
   const piStateChangeHint = t("pi.current.stateUnavailableHint");
 
   const handleMainButtonClick = () => {
+    if (isActionPending) return;
     if (isOmo) {
       if (isCurrent) {
         onDisableOmo?.();
@@ -259,6 +267,9 @@ export function ProviderActions({
   };
 
   const buttonState = getMainButtonState();
+  if (isActionPending) {
+    buttonState.disabled = true;
+  }
   const canDelete =
     !isReadOnly &&
     (appId === "pi"
@@ -309,6 +320,7 @@ export function ProviderActions({
                     size="sm"
                     variant="default"
                     className={defaultButtonClassName}
+                    disabled={isActionPending}
                   >
                     <Zap className="h-4 w-4" />
                     {inactiveLabel}
@@ -354,7 +366,7 @@ export function ProviderActions({
                   ? undefined
                   : () => onSetAsDefault(defaultModelOptions[0]?.id)
               }
-              disabled={isDefaultModel}
+              disabled={isDefaultModel || isActionPending}
               className={defaultButtonClassName}
             >
               <Zap className="h-4 w-4" />

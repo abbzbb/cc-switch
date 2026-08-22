@@ -10,7 +10,10 @@
 use super::{
     content_encoding::{decompress_body, get_content_encoding, is_supported_content_encoding},
     error_mapper::{get_error_message, map_proxy_error_to_status},
-    forwarder::{ActiveConnectionGuard, ForwardError, ForwardResult, RequestForwarder},
+    forwarder::{
+        strip_named_query_params, ActiveConnectionGuard, ForwardError, ForwardResult,
+        RequestForwarder,
+    },
     handler_config::{
         claude_stream_usage_event_filter, codex_stream_usage_event_filter, CLAUDE_PARSER_CONFIG,
         CODEX_PARSER_CONFIG, GEMINI_PARSER_CONFIG, OPENAI_PARSER_CONFIG,
@@ -76,8 +79,7 @@ pub async fn health_check() -> (StatusCode, Json<Value>) {
 
 /// 获取服务状态
 pub async fn get_status(State(state): State<ProxyState>) -> Result<Json<ProxyStatus>, ProxyError> {
-    let status = state.status.read().await.clone();
-    Ok(Json(status))
+    Ok(Json(state.aggregated_status().await))
 }
 
 /// GET /v1/models
@@ -2631,7 +2633,7 @@ fn compact_error_message(message: &str, max_chars: usize) -> String {
 // Gemini API 处理器
 // ============================================================================
 
-/// 处理 Gemini API 请求（透传，包括查询参数）
+/// 处理 Gemini API 请求（透传查询参数，但剥掉入站 `key`）
 pub async fn handle_gemini(
     State(state): State<ProxyState>,
     uri: axum::http::Uri,
@@ -2660,11 +2662,14 @@ pub async fn handle_gemini(
         .await?
         .with_model_from_uri(&uri);
 
-    // 提取完整的路径和查询参数
-    let endpoint = uri
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or(uri.path());
+    // 提取路径和查询参数。入站 `?key=` 可能是 PROXY_MANAGED 或过期用户密钥，
+    // 不能转发到上游；认证走 x-goog-api-key / Authorization。
+    let endpoint = strip_named_query_params(
+        uri.path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or(uri.path()),
+        &["key"],
+    );
 
     let is_stream = body
         .get("stream")
@@ -2676,7 +2681,7 @@ pub async fn handle_gemini(
         .forward_with_retry(
             &AppType::Gemini,
             method,
-            endpoint,
+            &endpoint,
             body,
             headers,
             extensions,
@@ -3421,8 +3426,8 @@ mod tests {
     use super::{
         body_looks_like_sse, chat_sse_to_response_value, classify_body_for_diagnostics,
         codex_proxy_error_json, responses_sse_stream_to_anthropic_message,
-        responses_sse_to_response_value, should_use_claude_transform_streaming, transform,
-        upstream_body_parse_error,
+        responses_sse_to_response_value, should_use_claude_transform_streaming,
+        strip_named_query_params, transform, upstream_body_parse_error,
     };
     use crate::proxy::ProxyError;
     use bytes::Bytes;
@@ -3430,6 +3435,25 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    #[test]
+    fn gemini_inbound_endpoint_strips_query_key() {
+        assert_eq!(
+            strip_named_query_params("/v1beta/models?key=PROXY_MANAGED", &["key"]),
+            "/v1beta/models"
+        );
+        assert_eq!(
+            strip_named_query_params("/v1beta/models?key=&alt=sse", &["key"]),
+            "/v1beta/models?alt=sse"
+        );
+        assert_eq!(
+            strip_named_query_params(
+                "/gemini/v1beta/models/x:generateContent?key=stale",
+                &["key"]
+            ),
+            "/gemini/v1beta/models/x:generateContent"
+        );
+    }
 
     #[test]
     fn body_looks_like_sse_detects_unlabeled_sse_prefixes() {

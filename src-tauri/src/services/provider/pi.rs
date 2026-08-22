@@ -350,6 +350,7 @@ mod tests {
             secret_access_key: None,
             team_organization_id: None,
             team_project_id: None,
+            restrict_private_hosts: false,
         }
     }
 

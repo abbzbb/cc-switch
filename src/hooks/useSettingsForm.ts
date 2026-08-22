@@ -51,6 +51,61 @@ const sanitizeDir = (value?: string | null): string | undefined => {
   return trimmed.length > 0 ? trimmed : undefined;
 };
 
+const toFormState = (
+  serverData: Settings,
+  language: Language,
+): SettingsFormState => ({
+  ...serverData,
+  showInTray: serverData.showInTray ?? true,
+  minimizeToTrayOnClose: serverData.minimizeToTrayOnClose ?? true,
+  useAppWindowControls: serverData.useAppWindowControls ?? false,
+  enableClaudePluginIntegration:
+    serverData.enableClaudePluginIntegration ?? false,
+  silentStartup: serverData.silentStartup ?? false,
+  skipClaudeOnboarding: serverData.skipClaudeOnboarding ?? false,
+  preserveCodexOfficialAuthOnSwitch:
+    serverData.preserveCodexOfficialAuthOnSwitch ?? false,
+  unifyCodexSessionHistory: serverData.unifyCodexSessionHistory ?? false,
+  claudeConfigDir: sanitizeDir(serverData.claudeConfigDir),
+  codexConfigDir: sanitizeDir(serverData.codexConfigDir),
+  geminiConfigDir: sanitizeDir(serverData.geminiConfigDir),
+  grokConfigDir: sanitizeDir(serverData.grokConfigDir),
+  opencodeConfigDir: sanitizeDir(serverData.opencodeConfigDir),
+  openclawConfigDir: sanitizeDir(serverData.openclawConfigDir),
+  hermesConfigDir: sanitizeDir(serverData.hermesConfigDir),
+  piConfigDir: sanitizeDir(serverData.piConfigDir),
+  language,
+});
+
+const omitSyncStatus = (settings: Settings): unknown => ({
+  ...settings,
+  webdavSync: settings.webdavSync
+    ? { ...settings.webdavSync, status: undefined }
+    : settings.webdavSync,
+  s3Sync: settings.s3Sync
+    ? { ...settings.s3Sync, status: undefined }
+    : settings.s3Sync,
+});
+
+export const onlySyncStatusChanged = (
+  prev: Settings,
+  next: Settings,
+): boolean =>
+  JSON.stringify(omitSyncStatus(prev)) === JSON.stringify(omitSyncStatus(next));
+
+const mergeSyncStatus = (
+  prev: SettingsFormState,
+  incoming: Settings,
+): SettingsFormState => ({
+  ...prev,
+  webdavSync: prev.webdavSync
+    ? { ...prev.webdavSync, status: incoming.webdavSync?.status }
+    : incoming.webdavSync,
+  s3Sync: prev.s3Sync
+    ? { ...prev.s3Sync, status: incoming.s3Sync?.status }
+    : incoming.s3Sync,
+});
+
 export interface UseSettingsFormResult {
   settings: SettingsFormState | null;
   isLoading: boolean;
@@ -78,6 +133,9 @@ export function useSettingsForm(): UseSettingsFormResult {
   );
 
   const initialLanguageRef = useRef<Language>("zh");
+  const isDirtyRef = useRef(false);
+  const hasHydratedRef = useRef(false);
+  const lastServerDataRef = useRef<Settings | null>(null);
 
   const readPersistedLanguage = useCallback((): Language => {
     if (typeof window !== "undefined") {
@@ -99,43 +157,43 @@ export function useSettingsForm(): UseSettingsFormResult {
     [i18n],
   );
 
-  // 初始化设置数据
+  const hydrateFromServer = useCallback(
+    (serverData: Settings) => {
+      const normalizedLanguage = normalizeLanguage(
+        serverData.language ?? readPersistedLanguage(),
+      );
+      setSettingsState(toFormState(serverData, normalizedLanguage));
+      initialLanguageRef.current = normalizedLanguage;
+      isDirtyRef.current = false;
+      hasHydratedRef.current = true;
+      syncLanguage(normalizedLanguage);
+    },
+    [readPersistedLanguage, syncLanguage],
+  );
+
+  // 初始化 / 跟随服务端设置。进行中的本地编辑不能被 sync-status 整表覆盖。
   useEffect(() => {
     if (!data) return;
 
-    const normalizedLanguage = normalizeLanguage(
-      data.language ?? readPersistedLanguage(),
-    );
+    const prevServer = lastServerDataRef.current;
+    lastServerDataRef.current = data;
 
-    const normalized: SettingsFormState = {
-      ...data,
-      showInTray: data.showInTray ?? true,
-      minimizeToTrayOnClose: data.minimizeToTrayOnClose ?? true,
-      useAppWindowControls: data.useAppWindowControls ?? false,
-      enableClaudePluginIntegration:
-        data.enableClaudePluginIntegration ?? false,
-      silentStartup: data.silentStartup ?? false,
-      skipClaudeOnboarding: data.skipClaudeOnboarding ?? false,
-      preserveCodexOfficialAuthOnSwitch:
-        data.preserveCodexOfficialAuthOnSwitch ?? false,
-      unifyCodexSessionHistory: data.unifyCodexSessionHistory ?? false,
-      claudeConfigDir: sanitizeDir(data.claudeConfigDir),
-      codexConfigDir: sanitizeDir(data.codexConfigDir),
-      geminiConfigDir: sanitizeDir(data.geminiConfigDir),
-      grokConfigDir: sanitizeDir(data.grokConfigDir),
-      opencodeConfigDir: sanitizeDir(data.opencodeConfigDir),
-      openclawConfigDir: sanitizeDir(data.openclawConfigDir),
-      piConfigDir: sanitizeDir(data.piConfigDir),
-      language: normalizedLanguage,
-    };
+    if (
+      hasHydratedRef.current &&
+      isDirtyRef.current &&
+      prevServer &&
+      onlySyncStatusChanged(prevServer, data)
+    ) {
+      setSettingsState((prev) => (prev ? mergeSyncStatus(prev, data) : prev));
+      return;
+    }
 
-    setSettingsState(normalized);
-    initialLanguageRef.current = normalizedLanguage;
-    syncLanguage(normalizedLanguage);
-  }, [data, readPersistedLanguage, syncLanguage]);
+    hydrateFromServer(data);
+  }, [data, hydrateFromServer]);
 
   const updateSettings = useCallback(
     (updates: Partial<SettingsFormState>) => {
+      isDirtyRef.current = true;
       setSettingsState((prev) => {
         const base =
           prev ??
@@ -175,29 +233,10 @@ export function useSettingsForm(): UseSettingsFormResult {
         serverData.language ?? readPersistedLanguage(),
       );
 
-      const normalized: SettingsFormState = {
-        ...serverData,
-        showInTray: serverData.showInTray ?? true,
-        minimizeToTrayOnClose: serverData.minimizeToTrayOnClose ?? true,
-        useAppWindowControls: serverData.useAppWindowControls ?? false,
-        enableClaudePluginIntegration:
-          serverData.enableClaudePluginIntegration ?? false,
-        silentStartup: serverData.silentStartup ?? false,
-        skipClaudeOnboarding: serverData.skipClaudeOnboarding ?? false,
-        preserveCodexOfficialAuthOnSwitch:
-          serverData.preserveCodexOfficialAuthOnSwitch ?? false,
-        unifyCodexSessionHistory: serverData.unifyCodexSessionHistory ?? false,
-        claudeConfigDir: sanitizeDir(serverData.claudeConfigDir),
-        codexConfigDir: sanitizeDir(serverData.codexConfigDir),
-        geminiConfigDir: sanitizeDir(serverData.geminiConfigDir),
-        grokConfigDir: sanitizeDir(serverData.grokConfigDir),
-        opencodeConfigDir: sanitizeDir(serverData.opencodeConfigDir),
-        openclawConfigDir: sanitizeDir(serverData.openclawConfigDir),
-        piConfigDir: sanitizeDir(serverData.piConfigDir),
-        language: normalizedLanguage,
-      };
-
-      setSettingsState(normalized);
+      setSettingsState(toFormState(serverData, normalizedLanguage));
+      isDirtyRef.current = false;
+      hasHydratedRef.current = true;
+      lastServerDataRef.current = serverData;
       syncLanguage(initialLanguageRef.current);
     },
     [readPersistedLanguage, syncLanguage],

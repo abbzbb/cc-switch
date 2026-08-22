@@ -31,6 +31,8 @@ export function useBaseUrlState({
   const [codexBaseUrl, setCodexBaseUrl] = useState("");
   const [geminiBaseUrl, setGeminiBaseUrl] = useState("");
   const isUpdatingRef = useRef(false);
+  const settingsConfigRef = useRef(settingsConfig);
+  settingsConfigRef.current = settingsConfig;
 
   // 从配置同步到 state（Claude / Claude Desktop）
   useEffect(() => {
@@ -43,13 +45,11 @@ export function useBaseUrlState({
       const config = JSON.parse(settingsConfig || "{}");
       const envUrl: unknown = config?.env?.ANTHROPIC_BASE_URL;
       const nextUrl = typeof envUrl === "string" ? envUrl.trim() : "";
-      if (nextUrl !== baseUrl) {
-        setBaseUrl(nextUrl);
-      }
+      setBaseUrl((prev) => (prev === nextUrl ? prev : nextUrl));
     } catch {
       // ignore
     }
-  }, [appType, category, settingsConfig, baseUrl]);
+  }, [appType, category, settingsConfig]);
 
   // 从配置同步到 state（Codex）
   useEffect(() => {
@@ -74,14 +74,12 @@ export function useBaseUrlState({
       const config = JSON.parse(settingsConfig || "{}");
       const envUrl: unknown = config?.env?.GOOGLE_GEMINI_BASE_URL;
       const nextUrl = typeof envUrl === "string" ? envUrl.trim() : "";
-      if (nextUrl !== geminiBaseUrl) {
-        setGeminiBaseUrl(nextUrl);
-        setBaseUrl(nextUrl); // 也更新 baseUrl 用于 UI
-      }
+      setGeminiBaseUrl((prev) => (prev === nextUrl ? prev : nextUrl));
+      setBaseUrl((prev) => (prev === nextUrl ? prev : nextUrl));
     } catch {
       // ignore
     }
-  }, [appType, category, settingsConfig, geminiBaseUrl]);
+  }, [appType, category, settingsConfig]);
 
   // 处理 Claude Base URL 变化
   const handleClaudeBaseUrlChange = useCallback(
@@ -91,7 +89,7 @@ export function useBaseUrlState({
       isUpdatingRef.current = true;
 
       try {
-        const config = JSON.parse(settingsConfig || "{}");
+        const config = JSON.parse(settingsConfigRef.current || "{}");
         if (!config.env) {
           config.env = {};
         }
@@ -105,7 +103,7 @@ export function useBaseUrlState({
         }, 0);
       }
     },
-    [settingsConfig, onSettingsConfigChange],
+    [onSettingsConfigChange],
   );
 
   // 处理 Codex Base URL 变化
@@ -141,7 +139,7 @@ export function useBaseUrlState({
       isUpdatingRef.current = true;
 
       try {
-        const config = JSON.parse(settingsConfig || "{}");
+        const config = JSON.parse(settingsConfigRef.current || "{}");
         if (!config.env) {
           config.env = {};
         }
@@ -155,7 +153,7 @@ export function useBaseUrlState({
         }, 0);
       }
     },
-    [settingsConfig, onSettingsConfigChange],
+    [onSettingsConfigChange],
   );
 
   return {

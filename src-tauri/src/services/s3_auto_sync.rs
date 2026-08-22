@@ -107,7 +107,7 @@ async fn run_auto_sync_upload(
         None => return Ok(()),
     };
 
-    let result = s3_sync::run_with_sync_lock(s3_sync::upload(db, &mut sync_settings)).await;
+    let result = s3_sync::run_with_sync_lock(s3_sync::upload_auto(db, &mut sync_settings)).await;
     match result {
         Ok(_) => {
             emit_auto_sync_status_updated(app, "success", None);
@@ -259,5 +259,23 @@ mod tests {
             !source.contains(&needle),
             "services layer should not depend on commands layer"
         );
+    }
+
+    #[test]
+    fn auto_sync_upload_uses_conditional_path() {
+        let source = include_str!("s3_auto_sync.rs");
+        assert!(
+            source.contains("upload_auto"),
+            "auto-sync must call upload_auto so a second device cannot overwrite remote"
+        );
+    }
+
+    #[test]
+    fn auto_sync_refuses_overwrite_without_local_cursor() {
+        use crate::services::sync_protocol::should_allow_auto_upload;
+        assert!(should_allow_auto_upload(None, None, false, None, None).is_ok());
+        assert!(should_allow_auto_upload(None, None, true, Some("e"), Some("h")).is_err());
+        assert!(should_allow_auto_upload(Some("e"), None, true, Some("e"), None).is_ok());
+        assert!(should_allow_auto_upload(Some("e"), None, true, Some("other"), None).is_err());
     }
 }

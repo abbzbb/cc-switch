@@ -1598,7 +1598,7 @@ impl RequestForwarder {
         let is_codex_alpha_search = matches!(app_type, AppType::Codex)
             && split_endpoint_and_query(&effective_endpoint).0 == "/alpha/search";
 
-        let url = if matches!(resolved_claude_api_format.as_deref(), Some("gemini_native")) {
+        let mut url = if matches!(resolved_claude_api_format.as_deref(), Some("gemini_native")) {
             super::gemini_url::resolve_gemini_native_url(
                 &base_url,
                 &effective_endpoint,
@@ -1614,6 +1614,17 @@ impl RequestForwarder {
         } else {
             adapter.build_url(&base_url, &effective_endpoint)
         };
+
+        // Gemini SDKs put the API key in `?key=`. Inbound values are the live
+        // PROXY_MANAGED placeholder or a stale client key; never forward them.
+        // Header injection already sets `x-goog-api-key` / Authorization.
+        let strip_gemini_key = matches!(app_type, AppType::Gemini)
+            || adapter.name() == "Gemini"
+            || matches!(resolved_claude_api_format.as_deref(), Some("gemini_native"));
+        if strip_gemini_key {
+            url = strip_named_query_params(&url, &["key"]);
+        }
+        url = strip_proxy_placeholder_query_values(&url);
 
         // 记录映射后的出站模型名（此时 mapped_body 已完成接管映射 / [1m] 剥离 /
         // Copilot 归一化）。格式转换后若 body 仍带 model 字段会在下方刷新覆盖；
@@ -2199,6 +2210,7 @@ impl RequestForwarder {
         let mut saw_user_agent = false;
         let mut saw_anthropic_beta = false;
         let mut saw_anthropic_version = false;
+        let connection_listed = super::response_processor::connection_listed_header_names(headers);
 
         for (key, value) in headers {
             let key_str = key.as_str();
@@ -2213,37 +2225,8 @@ impl RequestForwarder {
                 continue;
             }
 
-            // --- 连接 / 追踪 / CDN 类 — 无条件跳过 ---
-            if matches!(
-                key_str,
-                "content-length"
-                    | "transfer-encoding"
-                    | "x-forwarded-host"
-                    | "x-forwarded-port"
-                    | "x-forwarded-proto"
-                    | "forwarded"
-                    | "cf-connecting-ip"
-                    | "cf-ipcountry"
-                    | "cf-ray"
-                    | "cf-visitor"
-                    | "true-client-ip"
-                    | "fastly-client-ip"
-                    | "x-azure-clientip"
-                    | "x-azure-fdid"
-                    | "x-azure-ref"
-                    | "akamai-origin-hop"
-                    | "x-akamai-config-log-detail"
-                    | "x-request-id"
-                    | "x-correlation-id"
-                    | "x-trace-id"
-                    | "x-amzn-trace-id"
-                    | "x-b3-traceid"
-                    | "x-b3-spanid"
-                    | "x-b3-parentspanid"
-                    | "x-b3-sampled"
-                    | "traceparent"
-                    | "tracestate"
-            ) {
+            // hop-by-hop / 连接 / 追踪 / CDN 类 — 无条件跳过，不可“透传”
+            if should_omit_forwarded_request_header(key_str, &connection_listed) {
                 continue;
             }
 
@@ -2448,7 +2431,8 @@ impl RequestForwarder {
 
         // 序列化请求体。GET/HEAD 是 idempotent/safe 方法，按 HTTP 语义不应携带 body；
         // 强行附带 JSON body 会让某些上游（如 Google Gemini 的 models.list）拒绝请求。
-        let body_bytes = if matches!(method, &http::Method::GET | &http::Method::HEAD) {
+        let omit_json_body = method_omits_request_body(method);
+        let body_bytes = if omit_json_body {
             Vec::new()
         } else {
             serde_json::to_vec(&filtered_body).map_err(|e| {
@@ -2456,8 +2440,9 @@ impl RequestForwarder {
             })?
         };
 
-        // 确保 content-type 存在
-        if !ordered_headers.contains_key(http::header::CONTENT_TYPE) {
+        // JSON POST/PUT/PATCH 需要 content-type；GET/HEAD 不能补 application/json，
+        // Gemini 的 models.list 等只读端点会因此 400。
+        if !omit_json_body && !ordered_headers.contains_key(http::header::CONTENT_TYPE) {
             ordered_headers.insert(
                 http::header::CONTENT_TYPE,
                 http::HeaderValue::from_static("application/json"),
@@ -3144,6 +3129,108 @@ fn split_endpoint_and_query(endpoint: &str) -> (&str, Option<&str>) {
     endpoint
         .split_once('?')
         .map_or((endpoint, None), |(path, query)| (path, Some(query)))
+}
+
+fn method_omits_request_body(method: &http::Method) -> bool {
+    matches!(*method, http::Method::GET | http::Method::HEAD)
+}
+
+fn should_omit_forwarded_request_header(
+    name: &str,
+    connection_listed: &[http::HeaderName],
+) -> bool {
+    if super::response_processor::is_hop_by_hop_header(name) {
+        return true;
+    }
+    if connection_listed
+        .iter()
+        .any(|listed| listed.as_str() == name)
+    {
+        return true;
+    }
+    matches!(
+        name,
+        "content-length"
+            | "x-forwarded-host"
+            | "x-forwarded-port"
+            | "x-forwarded-proto"
+            | "forwarded"
+            | "cf-connecting-ip"
+            | "cf-ipcountry"
+            | "cf-ray"
+            | "cf-visitor"
+            | "true-client-ip"
+            | "fastly-client-ip"
+            | "x-azure-clientip"
+            | "x-azure-fdid"
+            | "x-azure-ref"
+            | "akamai-origin-hop"
+            | "x-akamai-config-log-detail"
+            | "x-request-id"
+            | "x-correlation-id"
+            | "x-trace-id"
+            | "x-amzn-trace-id"
+            | "x-b3-traceid"
+            | "x-b3-spanid"
+            | "x-b3-parentspanid"
+            | "x-b3-sampled"
+            | "traceparent"
+            | "tracestate"
+    )
+}
+
+/// Drop query pairs whose name matches any of `names` (case-insensitive).
+/// Works on relative endpoints (`/v1beta/models?key=`) and absolute URLs.
+pub(crate) fn strip_named_query_params(url_or_path: &str, names: &[&str]) -> String {
+    strip_query_pairs(url_or_path, |name, _value| {
+        names
+            .iter()
+            .any(|expected| name.eq_ignore_ascii_case(expected))
+    })
+}
+
+fn strip_proxy_placeholder_query_values(url_or_path: &str) -> String {
+    strip_query_pairs(url_or_path, |_name, value| {
+        value
+            .map(crate::proxy::inbound_auth::is_proxy_auth_placeholder)
+            .unwrap_or(false)
+    })
+}
+
+fn strip_query_pairs(
+    url_or_path: &str,
+    should_drop: impl Fn(&str, Option<&str>) -> bool,
+) -> String {
+    let (before_fragment, fragment) = match url_or_path.split_once('#') {
+        Some((path, fragment)) => (path, Some(fragment)),
+        None => (url_or_path, None),
+    };
+    let Some((path, query)) = before_fragment.split_once('?') else {
+        return url_or_path.to_string();
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|part| {
+            if part.is_empty() {
+                return false;
+            }
+            let (name, value) = match part.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (*part, None),
+            };
+            !should_drop(name, value)
+        })
+        .collect();
+    let mut stripped = if kept.is_empty() {
+        path.to_string()
+    } else {
+        format!("{path}?{}", kept.join("&"))
+    };
+    if let Some(fragment) = fragment {
+        stripped.push('#');
+        stripped.push_str(fragment);
+    }
+    stripped
 }
 
 fn strip_beta_query(query: Option<&str>) -> Option<String> {
@@ -4033,6 +4120,77 @@ mod tests {
             kimi_oauth_manager: None,
             anthropic_oauth_manager: None,
         }
+    }
+
+    #[test]
+    fn hop_by_hop_request_headers_are_not_forwarded() {
+        for header in [
+            "connection",
+            "keep-alive",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "proxy-connection",
+            "te",
+            "trailer",
+            "trailers",
+            "transfer-encoding",
+            "upgrade",
+        ] {
+            assert!(
+                should_omit_forwarded_request_header(header, &[]),
+                "expected hop-by-hop header {header} to be skipped"
+            );
+        }
+        assert!(!should_omit_forwarded_request_header("authorization", &[]));
+        assert!(!should_omit_forwarded_request_header("content-type", &[]));
+
+        let listed = vec![http::HeaderName::from_static("x-trace-hop")];
+        assert!(should_omit_forwarded_request_header("x-trace-hop", &listed));
+        assert!(!should_omit_forwarded_request_header(
+            "x-custom-client",
+            &listed
+        ));
+    }
+
+    #[test]
+    fn get_and_head_omit_json_request_body() {
+        assert!(method_omits_request_body(&http::Method::GET));
+        assert!(method_omits_request_body(&http::Method::HEAD));
+        assert!(!method_omits_request_body(&http::Method::POST));
+        assert!(!method_omits_request_body(&http::Method::PUT));
+    }
+
+    #[test]
+    fn strip_named_query_params_drops_key_and_placeholders() {
+        assert_eq!(
+            strip_named_query_params("/v1beta/models?key=PROXY_MANAGED&alt=sse", &["key"]),
+            "/v1beta/models?alt=sse"
+        );
+        assert_eq!(
+            strip_named_query_params("/v1beta/models?key=", &["key"]),
+            "/v1beta/models"
+        );
+        assert_eq!(
+            strip_named_query_params("/v1beta/models?KEY=stale", &["key"]),
+            "/v1beta/models"
+        );
+        assert_eq!(
+            strip_named_query_params(
+                "https://generativelanguage.googleapis.com/v1beta/models?key=PROXY_MANAGED",
+                &["key"]
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/models"
+        );
+        assert_eq!(
+            strip_proxy_placeholder_query_values(
+                "https://example/v1?foo=1&token=Bearer%20no&bar=PROXY_MANAGED"
+            ),
+            "https://example/v1?foo=1&token=Bearer%20no"
+        );
+        assert_eq!(
+            strip_proxy_placeholder_query_values("/v1?auth=Bearer ccs-proxy-abc&keep=1"),
+            "/v1?keep=1"
+        );
     }
 
     #[test]

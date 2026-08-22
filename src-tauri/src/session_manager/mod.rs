@@ -97,24 +97,28 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
 }
 
 pub fn load_messages(provider_id: &str, source_path: &str) -> Result<Vec<SessionMessage>, String> {
-    // SQLite sessions use a "sqlite:" prefixed source_path
+    // SQLite sessions use a "sqlite:" prefixed source_path. Validate the
+    // underlying db file is still under the provider root before opening it.
     if provider_id == "opencode" && source_path.starts_with("sqlite:") {
+        confine_sqlite_source(provider_id, source_path)?;
         return opencode::load_messages_sqlite(source_path);
     }
     if provider_id == "hermes" && source_path.starts_with("sqlite:") {
+        confine_sqlite_source(provider_id, source_path)?;
         return hermes::load_messages_sqlite(source_path);
     }
 
-    let path = Path::new(source_path);
+    let roots = provider_roots(provider_id)?;
+    let (path, _) = confine_existing_to_roots(provider_id, Path::new(source_path), &roots)?;
     match provider_id {
-        "codex" => codex::load_messages(path),
-        "claude" => claude::load_messages(path),
-        "opencode" => opencode::load_messages(path),
-        "openclaw" => openclaw::load_messages(path),
-        "gemini" => gemini::load_messages(path),
-        "grokbuild" => grokbuild::load_messages(path),
-        "hermes" => hermes::load_messages(path),
-        "pi" => pi::load_messages(path),
+        "codex" => codex::load_messages(&path),
+        "claude" => claude::load_messages(&path),
+        "opencode" => opencode::load_messages(&path),
+        "openclaw" => openclaw::load_messages(&path),
+        "gemini" => gemini::load_messages(&path),
+        "grokbuild" => grokbuild::load_messages(&path),
+        "hermes" => hermes::load_messages(&path),
+        "pi" => pi::load_messages(&path),
         _ => Err(format!("Unsupported provider: {provider_id}")),
     }
 }
@@ -152,51 +156,20 @@ fn delete_session_with_roots(
     source_path: &Path,
     roots: &[PathBuf],
 ) -> Result<bool, String> {
-    let validated_source = canonicalize_existing_path(source_path, "session source")?;
+    let (validated_source, validated_root) =
+        confine_existing_to_roots(provider_id, source_path, roots)?;
 
-    let mut saw_existing_root = false;
-    for root in roots {
-        if !root.exists() {
-            continue;
-        }
-
-        saw_existing_root = true;
-        let validated_root = canonicalize_existing_path(root, "session root")?;
-        if validated_source.starts_with(&validated_root) {
-            return match provider_id {
-                "codex" => codex::delete_session(&validated_root, &validated_source, session_id),
-                "claude" => claude::delete_session(&validated_root, &validated_source, session_id),
-                "opencode" => {
-                    opencode::delete_session(&validated_root, &validated_source, session_id)
-                }
-                "openclaw" => {
-                    openclaw::delete_session(&validated_root, &validated_source, session_id)
-                }
-                "gemini" => gemini::delete_session(&validated_root, &validated_source, session_id),
-                "grokbuild" => {
-                    grokbuild::delete_session(&validated_root, &validated_source, session_id)
-                }
-                "hermes" => hermes::delete_session(&validated_root, &validated_source, session_id),
-                "pi" => pi::delete_session(&validated_root, &validated_source, session_id),
-                _ => Err(format!("Unsupported provider: {provider_id}")),
-            };
-        }
+    match provider_id {
+        "codex" => codex::delete_session(&validated_root, &validated_source, session_id),
+        "claude" => claude::delete_session(&validated_root, &validated_source, session_id),
+        "opencode" => opencode::delete_session(&validated_root, &validated_source, session_id),
+        "openclaw" => openclaw::delete_session(&validated_root, &validated_source, session_id),
+        "gemini" => gemini::delete_session(&validated_root, &validated_source, session_id),
+        "grokbuild" => grokbuild::delete_session(&validated_root, &validated_source, session_id),
+        "hermes" => hermes::delete_session(&validated_root, &validated_source, session_id),
+        "pi" => pi::delete_session(&validated_root, &validated_source, session_id),
+        _ => Err(format!("Unsupported provider: {provider_id}")),
     }
-
-    if !saw_existing_root {
-        return Err(format!(
-            "Session root not found for provider {provider_id}: {}",
-            roots
-                .first()
-                .map(|root| root.display().to_string())
-                .unwrap_or_else(|| "<none>".to_string())
-        ));
-    }
-
-    Err(format!(
-        "Session source path is outside provider roots: {}",
-        source_path.display()
-    ))
 }
 
 fn provider_roots(provider_id: &str) -> Result<Vec<PathBuf>, String> {
@@ -222,6 +195,67 @@ fn canonicalize_existing_path(path: &Path, label: &str) -> Result<PathBuf, Strin
 
     path.canonicalize()
         .map_err(|e| format!("Failed to resolve {label} {}: {e}", path.display()))
+}
+
+/// Canonicalize `path` and require it to live under one of `roots`.
+///
+/// Returns `(canonical_source, canonical_root)` for the matching root so
+/// callers can both open the file and pass the confined root downstream.
+fn confine_existing_to_roots(
+    provider_id: &str,
+    path: &Path,
+    roots: &[PathBuf],
+) -> Result<(PathBuf, PathBuf), String> {
+    let validated_source = canonicalize_existing_path(path, "session source")?;
+
+    let mut saw_existing_root = false;
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+
+        saw_existing_root = true;
+        let validated_root = canonicalize_existing_path(root, "session root")?;
+        if validated_source.starts_with(&validated_root) {
+            return Ok((validated_source, validated_root));
+        }
+    }
+
+    if !saw_existing_root {
+        return Err(format!(
+            "Session root not found for provider {provider_id}: {}",
+            roots
+                .first()
+                .map(|root| root.display().to_string())
+                .unwrap_or_else(|| "<none>".to_string())
+        ));
+    }
+
+    Err(format!(
+        "Session source path is outside provider roots: {}",
+        path.display()
+    ))
+}
+
+/// SQLite sessions store `sqlite:<db_path>…`. The db file itself lives next
+/// to (not always *under*) the JSON session root, so include the provider
+/// base directory as an extra allowed root, then require `starts_with`.
+fn confine_sqlite_source(provider_id: &str, source_path: &str) -> Result<PathBuf, String> {
+    let db_path = match provider_id {
+        "opencode" => opencode::sqlite_db_path_from_source(source_path)?,
+        "hermes" => hermes::sqlite_db_path_from_source(source_path)?,
+        _ => return Err(format!("Unsupported sqlite provider: {provider_id}")),
+    };
+
+    let mut roots = provider_roots(provider_id)?;
+    match provider_id {
+        "opencode" => roots.push(opencode::get_opencode_base_dir()),
+        "hermes" => roots.push(crate::hermes_config::get_hermes_dir()),
+        _ => {}
+    }
+
+    let (validated, _) = confine_existing_to_roots(provider_id, &db_path, &roots)?;
+    Ok(validated)
 }
 
 fn collect_delete_session_outcomes<F>(
@@ -360,6 +394,58 @@ mod tests {
         assert_eq!(
             outcomes[2].error.as_deref(),
             Some("Session was not deleted")
+        );
+    }
+
+    #[test]
+    fn load_messages_rejects_path_outside_provider_roots() {
+        // Create the Codex session root under whatever HOME the current test
+        // process is using so confinement actually compares starts_with rather
+        // than bailing with "Session root not found" (other tests mutate HOME).
+        let roots = provider_roots("codex").expect("codex roots");
+        for root in &roots {
+            let _ = std::fs::create_dir_all(root);
+        }
+
+        let outside = tempdir().expect("tempdir");
+        let source = outside.path().join("session.jsonl");
+        write_codex_session(&source, "session-1");
+
+        let err = load_messages("codex", source.to_str().expect("utf8 path"))
+            .expect_err("expected outside-root path to be rejected");
+
+        assert!(
+            err.contains("outside provider roots") || err.contains("Session root not found"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_messages_rejects_etc_passwd() {
+        let err =
+            load_messages("claude", "/etc/passwd").expect_err("loading /etc/passwd must fail");
+
+        assert!(
+            err.contains("outside provider roots") || err.contains("not found"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_messages_rejects_sqlite_path_outside_provider_roots() {
+        let outside = tempdir().expect("tempdir");
+        let db = outside.path().join("opencode.db");
+        std::fs::write(&db, b"").expect("write foreign db");
+        let source = format!("sqlite:{}:ses_1", db.display());
+
+        let err = load_messages("opencode", &source)
+            .expect_err("expected outside-root sqlite path to be rejected");
+
+        assert!(
+            err.contains("outside provider roots")
+                || err.contains("expected OpenCode")
+                || err.contains("Session root not found"),
+            "unexpected error: {err}"
         );
     }
 }

@@ -282,12 +282,14 @@ fn build_provider_meta(request: &DeepLinkImportRequest) -> Result<Option<Provide
         access_token: request.usage_access_token.clone(),
         user_id: request.usage_user_id.clone(),
         template_type: None, // Deeplink providers don't specify template type (will use backward compatibility logic)
-        auto_query_interval: request.usage_auto_interval,
+        // Defense in depth: never auto-query a script that arrived via deeplink.
+        auto_query_interval: None,
         coding_plan_provider: None,
         access_key_id: None,
         secret_access_key: None,
         team_organization_id: None,
         team_project_id: None,
+        restrict_private_hosts: true,
     };
 
     Ok(Some(ProviderMeta {
@@ -1183,5 +1185,39 @@ mod tests {
         let obj = settings.as_object().unwrap();
         assert!(obj.contains_key("baseUrl"));
         assert!(obj.contains_key("apiKey"));
+    }
+
+    #[test]
+    fn deeplink_usage_script_restricts_private_hosts_and_disables_auto_query() {
+        let request = DeepLinkImportRequest {
+            resource: "provider".to_string(),
+            app: Some("claude".to_string()),
+            name: Some("Untrusted".to_string()),
+            homepage: Some("https://example.com".to_string()),
+            endpoint: Some("https://api.example.com/v1".to_string()),
+            api_key: Some("sk-test".to_string()),
+            usage_enabled: Some(true),
+            usage_script: Some("Y29kZQ==".to_string()), // "code"
+            usage_auto_interval: Some(5),
+            ..Default::default()
+        };
+
+        let provider = build_provider_from_request(&AppType::Claude, &request)
+            .expect("build provider from deeplink");
+        let script = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.usage_script.as_ref())
+            .expect("usage script");
+
+        assert!(script.enabled);
+        assert!(
+            script.restrict_private_hosts,
+            "deeplink-imported scripts must be marked untrusted"
+        );
+        assert_eq!(
+            script.auto_query_interval, None,
+            "deeplink must force auto-query off"
+        );
     }
 }

@@ -15,6 +15,8 @@ const getCurrentMock = vi.fn();
 const getAllMock = vi.fn();
 const getQueryDataMock = vi.fn();
 const invalidatePiDirectoryCachesMock = vi.fn();
+const invalidateHermesProviderCachesMock = vi.fn();
+const invalidateQueriesMock = vi.fn();
 const toastErrorMock = vi.fn();
 const toastSuccessMock = vi.fn();
 
@@ -60,9 +62,17 @@ vi.mock("@tanstack/react-query", async () => {
     ...actual,
     useQueryClient: () => ({
       getQueryData: (...args: unknown[]) => getQueryDataMock(...args),
+      invalidateQueries: (...args: unknown[]) =>
+        invalidateQueriesMock(...args),
     }),
   };
 });
+
+vi.mock("@/hooks/useHermes", () => ({
+  invalidateHermesProviderCaches: (...args: unknown[]) =>
+    invalidateHermesProviderCachesMock(...args),
+  hermesKeys: { all: ["hermes"] },
+}));
 
 vi.mock("@/lib/api", () => ({
   settingsApi: {
@@ -152,6 +162,10 @@ describe("useSettings hook", () => {
     clearClaudeOnboardingSkipMock.mockReset();
     syncCurrentProvidersLiveMock.mockReset();
     invalidatePiDirectoryCachesMock.mockReset();
+    invalidateHermesProviderCachesMock.mockReset();
+    invalidateQueriesMock.mockReset();
+    invalidateQueriesMock.mockResolvedValue(undefined);
+    invalidateHermesProviderCachesMock.mockResolvedValue(undefined);
     getCurrentMock.mockReset();
     getAllMock.mockReset();
     getQueryDataMock.mockReset();
@@ -376,6 +390,29 @@ describe("useSettings hook", () => {
     expect(payload.piConfigDir).toBe("/custom/pi");
     expect(syncCurrentProvidersLiveMock).not.toHaveBeenCalled();
     expect(invalidatePiDirectoryCachesMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("sanitizes the Hermes directory and live-syncs like other apps", async () => {
+    settingsFormMock = createSettingsFormMock({
+      settings: {
+        ...serverSettings,
+        hermesConfigDir: "  /custom/hermes  ",
+      },
+    });
+
+    const { result } = renderHook(() => useSettings());
+
+    await act(async () => {
+      await result.current.saveSettings(undefined, { silent: true });
+    });
+
+    const payload = mutateAsyncMock.mock.calls[0][0] as Settings;
+    expect(payload.hermesConfigDir).toBe("/custom/hermes");
+    expect(syncCurrentProvidersLiveMock).toHaveBeenCalledTimes(1);
+    expect(invalidateHermesProviderCachesMock).toHaveBeenCalledTimes(1);
+    expect(invalidateQueriesMock).toHaveBeenCalledWith({
+      queryKey: ["providers", "hermes"],
+    });
   });
 
   it("shows toast when Claude plugin sync fails but continues flow", async () => {

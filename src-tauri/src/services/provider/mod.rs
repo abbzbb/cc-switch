@@ -46,7 +46,7 @@ pub(crate) use live::{
 // Internal re-exports
 use live::{
     remove_hermes_provider_from_live, remove_openclaw_provider_from_live,
-    remove_opencode_provider_from_live, write_gemini_live,
+    remove_opencode_provider_from_live, write_gemini_live, LiveSnapshot,
 };
 use usage::validate_usage_script;
 
@@ -292,6 +292,7 @@ mod tests {
             secret_access_key: Some("sk-test".to_string()),
             team_organization_id: None,
             team_project_id: None,
+            restrict_private_hosts: false,
         }
     }
 
@@ -3931,6 +3932,67 @@ wire_api = "responses"
             );
         });
     }
+
+    #[test]
+    #[serial]
+    fn switch_live_write_failure_does_not_commit_current() {
+        with_test_home(|state, _home| {
+            crate::settings::reload_settings().expect("reload settings");
+
+            let old = Provider::with_id(
+                "old-provider".to_string(),
+                "Old".to_string(),
+                json!({ "env": { "ANTHROPIC_API_KEY": "old-key" } }),
+                None,
+            );
+            let new = Provider::with_id(
+                "new-provider".to_string(),
+                "New".to_string(),
+                json!({ "env": { "ANTHROPIC_API_KEY": "new-key" } }),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Claude.as_str(), &old)
+                .expect("save old");
+            state
+                .db
+                .save_provider(AppType::Claude.as_str(), &new)
+                .expect("save new");
+            state
+                .db
+                .set_current_provider(AppType::Claude.as_str(), "old-provider")
+                .expect("set db current");
+            crate::settings::set_current_provider(&AppType::Claude, Some("old-provider"))
+                .expect("set local current");
+
+            let settings_path = get_claude_settings_path();
+            if let Some(parent) = settings_path.parent() {
+                fs::create_dir_all(parent).expect("create claude dir");
+            }
+            fs::create_dir_all(&settings_path).expect("create settings.json as directory");
+
+            let result = ProviderService::switch(state, AppType::Claude, "new-provider");
+            assert!(
+                result.is_err(),
+                "switch must fail when live write cannot complete: {result:?}"
+            );
+            assert_eq!(
+                crate::settings::get_current_provider(&AppType::Claude).as_deref(),
+                Some("old-provider"),
+                "local current must stay unchanged when live write fails"
+            );
+            assert_eq!(
+                state
+                    .db
+                    .get_current_provider(AppType::Claude.as_str())
+                    .expect("read db current")
+                    .as_deref(),
+                Some("old-provider"),
+                "db current must stay unchanged when live write fails"
+            );
+        });
+    }
 }
 
 impl ProviderService {
@@ -4003,6 +4065,18 @@ impl ProviderService {
                 "{operation}失败: {error}; 回滚同时失败: {}",
                 rollback_failures.join("; ")
             ))
+        }
+    }
+
+    fn restore_live_after_current_commit_failure(
+        snapshot: Option<&LiveSnapshot>,
+        error: AppError,
+    ) -> AppError {
+        match snapshot.map(LiveSnapshot::restore) {
+            Some(Err(rollback_error)) => {
+                AppError::Message(format!("{error}; 回滚 live 同时失败: {rollback_error}"))
+            }
+            _ => error,
         }
     }
 
@@ -5110,10 +5184,24 @@ impl ProviderService {
                 _ => None,
             };
             if let Some((enable, disable)) = omo_pair {
-                state
+                let previous = state
                     .db
-                    .set_omo_provider_current(app_type.as_str(), id, enable.category)?;
-                crate::services::OmoService::write_config_to_file(state, enable)?;
+                    .get_current_omo_provider(app_type.as_str(), enable.category)?;
+                crate::services::OmoService::write_provider_config_to_file(provider, enable)?;
+                if let Err(error) =
+                    state
+                        .db
+                        .set_omo_provider_current(app_type.as_str(), id, enable.category)
+                {
+                    if let Some(previous) = previous {
+                        let _ = crate::services::OmoService::write_provider_config_to_file(
+                            &previous, enable,
+                        );
+                    } else {
+                        let _ = crate::services::OmoService::delete_config_file(enable);
+                    }
+                    return Err(error);
+                }
                 let _ = crate::services::OmoService::delete_config_file(disable);
                 return Ok(SwitchResult::default());
             }
@@ -5237,19 +5325,48 @@ impl ProviderService {
                 ));
             }
         } else {
-            // Additive mode apps skip setting is_current (no such concept).
-            if !app_type.is_additive_mode() {
-                crate::settings::set_current_provider(&app_type, Some(id))?;
-                state.db.set_current_provider(app_type.as_str(), id)?;
-            }
+            // Write live first. Committing current before the live write leaves
+            // UI/DB pointing at B while disk is still A; a later switch then
+            // backfills A's live into B's row.
+            let live_snapshot = if !app_type.is_additive_mode() {
+                LiveSnapshot::capture(&app_type)
+            } else {
+                None
+            };
 
             // Sync to live (write_gemini_live handles security flag internally for Gemini).
-            Self::write_preflighted_or_current_live(
+            if let Err(error) = Self::write_preflighted_or_current_live(
                 state,
                 &app_type,
                 provider,
                 preflighted_provider.as_ref(),
-            )?;
+            ) {
+                if let Some(snapshot) = live_snapshot.as_ref() {
+                    let _ = snapshot.restore();
+                }
+                return Err(error);
+            }
+
+            // Additive mode apps skip setting is_current (no such concept).
+            if !app_type.is_additive_mode() {
+                let previous_local_current = crate::settings::get_current_provider(&app_type);
+                if let Err(error) = crate::settings::set_current_provider(&app_type, Some(id)) {
+                    return Err(Self::restore_live_after_current_commit_failure(
+                        live_snapshot.as_ref(),
+                        error,
+                    ));
+                }
+                if let Err(error) = state.db.set_current_provider(app_type.as_str(), id) {
+                    let _ = crate::settings::set_current_provider(
+                        &app_type,
+                        previous_local_current.as_deref(),
+                    );
+                    return Err(Self::restore_live_after_current_commit_failure(
+                        live_snapshot.as_ref(),
+                        error,
+                    ));
+                }
+            }
         }
 
         // A material-less official Codex provider gets a config-only live

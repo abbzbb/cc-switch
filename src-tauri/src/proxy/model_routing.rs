@@ -1386,7 +1386,7 @@ fn live_codex_toml_lock() -> &'static Mutex<()> {
     &LOCK
 }
 
-fn with_live_codex_toml_lock<T>(update: impl FnOnce() -> T) -> T {
+pub(crate) fn with_live_codex_toml_lock<T>(update: impl FnOnce() -> T) -> T {
     let _guard = live_codex_toml_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

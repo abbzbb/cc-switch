@@ -362,6 +362,17 @@ fn build_generation_config(body: &Value) -> Option<Value> {
         config.insert("stopSequences".to_string(), value.clone());
     }
 
+    if let Some(thinking) = body.get("thinking") {
+        if thinking.get("type").and_then(Value::as_str) == Some("enabled") {
+            let mut thinking_config = Map::new();
+            thinking_config.insert("includeThoughts".to_string(), json!(true));
+            if let Some(budget) = thinking.get("budget_tokens") {
+                thinking_config.insert("thinkingBudget".to_string(), budget.clone());
+            }
+            config.insert("thinkingConfig".to_string(), Value::Object(thinking_config));
+        }
+    }
+
     if config.is_empty() {
         None
     } else {
@@ -374,7 +385,7 @@ fn convert_messages_to_contents(
     shadow_turns: &[GeminiAssistantTurn],
     supports_multimodal_function_response: bool,
 ) -> Result<Vec<Value>, ProxyError> {
-    let mut contents = Vec::new();
+    let mut contents: Vec<Value> = Vec::new();
     let mut used_shadow_indices = HashSet::new();
     let total_assistant_messages = messages
         .iter()
@@ -482,6 +493,22 @@ fn convert_messages_to_contents(
 
         if role == "assistant" {
             merge_tool_names_from_parts(&parts, &mut tool_name_by_id);
+        }
+
+        // Gemini generateContent 400s on empty `parts` (e.g. thinking-only
+        // turns skipped above) and on consecutive same-role contents.
+        if parts.is_empty() {
+            continue;
+        }
+
+        if let Some(last) = contents.last_mut() {
+            let same_role = last.get("role").and_then(|value| value.as_str()) == Some(gemini_role);
+            if same_role {
+                if let Some(existing_parts) = last.get_mut("parts").and_then(Value::as_array_mut) {
+                    existing_parts.extend(parts);
+                    continue;
+                }
+            }
         }
 
         contents.push(json!({
@@ -1254,8 +1281,12 @@ fn map_finish_reason(reason: Option<&str>, has_tool_use: bool) -> Value {
         | Some("BLOCKLIST")
         | Some("PROHIBITED_CONTENT") => Some("refusal"),
         Some(other) => {
-            log::warn!("[Claude/Gemini] Unknown Gemini finishReason `{other}`, using end_turn");
-            Some("end_turn")
+            log::warn!("[Claude/Gemini] Unknown Gemini finishReason `{other}`");
+            if has_tool_use {
+                Some("tool_use")
+            } else {
+                Some("end_turn")
+            }
         }
     };
 
@@ -1288,6 +1319,77 @@ mod tests {
         assert_eq!(result["contents"][0]["role"], "user");
         assert_eq!(result["contents"][0]["parts"][0]["text"], "Hello");
         assert_eq!(result["generationConfig"]["maxOutputTokens"], 128);
+    }
+
+    #[test]
+    fn anthropic_to_gemini_maps_enabled_thinking_config() {
+        let input = json!({
+            "model": "gemini-2.5-pro",
+            "max_tokens": 128,
+            "thinking": { "type": "enabled", "budget_tokens": 2048 },
+            "messages": [{ "role": "user", "content": "Hello" }]
+        });
+
+        let result = anthropic_to_gemini(input).unwrap();
+        assert_eq!(
+            result["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            2048
+        );
+        assert_eq!(
+            result["generationConfig"]["thinkingConfig"]["includeThoughts"],
+            true
+        );
+    }
+
+    #[test]
+    fn anthropic_to_gemini_skips_empty_parts_and_merges_same_role() {
+        let input = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{ "type": "thinking", "thinking": "secret" }]
+                },
+                { "role": "user", "content": "first" },
+                { "role": "user", "content": "second" },
+                { "role": "assistant", "content": "one" },
+                { "role": "assistant", "content": "two" }
+            ]
+        });
+
+        let result = anthropic_to_gemini(input).unwrap();
+        let contents = result["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 2);
+        assert_eq!(contents[0]["role"], "user");
+        assert_eq!(contents[0]["parts"].as_array().unwrap().len(), 2);
+        assert_eq!(contents[0]["parts"][0]["text"], "first");
+        assert_eq!(contents[0]["parts"][1]["text"], "second");
+        assert_eq!(contents[1]["role"], "model");
+        assert_eq!(contents[1]["parts"].as_array().unwrap().len(), 2);
+        assert_eq!(contents[1]["parts"][0]["text"], "one");
+        assert_eq!(contents[1]["parts"][1]["text"], "two");
+        assert!(
+            contents.iter().all(|content| content["parts"]
+                .as_array()
+                .is_some_and(|parts| !parts.is_empty())),
+            "Gemini generateContent rejects empty parts"
+        );
+    }
+
+    #[test]
+    fn gemini_unknown_finish_reason_with_tool_use_maps_to_tool_use() {
+        let input = json!({
+            "responseId": "r1",
+            "modelVersion": "gemini-2.5-pro",
+            "candidates": [{
+                "finishReason": "OTHER",
+                "content": {
+                    "parts": [{ "functionCall": { "name": "get_weather", "args": {} } }]
+                }
+            }]
+        });
+
+        let result = gemini_to_anthropic(input).unwrap();
+        assert_eq!(result["stop_reason"], "tool_use");
     }
 
     #[test]

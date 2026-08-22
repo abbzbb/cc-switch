@@ -19,7 +19,10 @@ use super::{
 };
 use crate::database::Database;
 use axum::{
-    extract::DefaultBodyLimit,
+    body::Body,
+    extract::{DefaultBodyLimit, State},
+    http::Request,
+    middleware::{self, Next},
     routing::{any, get, post},
     Router,
 };
@@ -54,6 +57,47 @@ pub struct ProxyState {
     pub kimi_oauth_manager: Option<Arc<crate::proxy::providers::kimi_oauth_auth::KimiOAuthManager>>,
     pub anthropic_oauth_manager:
         Option<Arc<crate::proxy::providers::anthropic_oauth_auth::AnthropicOAuthManager>>,
+}
+
+impl ProxyState {
+    /// Fill uptime and `active_targets` from live maps. The stored
+    /// `ProxyStatus` snapshot does not keep those fields current.
+    pub async fn aggregated_status(&self) -> ProxyStatus {
+        let mut status = self.status.read().await.clone();
+
+        if let Some(start) = *self.start_time.read().await {
+            status.uptime_seconds = start.elapsed().as_secs();
+        }
+
+        let current_providers = self.current_providers.read().await;
+        status.active_targets = current_providers
+            .iter()
+            .map(|(app_type, (provider_id, provider_name))| ActiveTarget {
+                app_type: app_type.clone(),
+                provider_id: provider_id.clone(),
+                provider_name: provider_name.clone(),
+            })
+            .collect();
+
+        status
+    }
+}
+
+async fn require_inbound_capability_for_non_loopback(
+    State(state): State<ProxyState>,
+    request: Request<Body>,
+    next: Next,
+) -> Result<axum::response::Response, ProxyError> {
+    let path = request.uri().path();
+    let peer = request.extensions().get::<SocketAddr>().copied();
+    let tokens = super::inbound_auth::inbound_capability_tokens(&state.db);
+    if super::inbound_auth::inbound_request_allowed(path, peer, request.headers(), &tokens) {
+        return Ok(next.run(request).await);
+    }
+
+    Err(ProxyError::AuthError(
+        "非本机请求需要提供入站能力令牌（x-cc-switch-proxy 或 Authorization Bearer）".to_string(),
+    ))
 }
 
 /// 代理HTTP服务器
@@ -202,7 +246,7 @@ impl ProxyServer {
             loop {
                 tokio::select! {
                     result = listener.accept() => {
-                        let (stream, _remote_addr) = match result {
+                        let (stream, remote_addr) = match result {
                             Ok(v) => v,
                             Err(e) => {
                                 log::error!("[{SRV}] accept 失败: {e}", SRV = log_srv::ACCEPT_ERR);
@@ -243,6 +287,7 @@ impl ProxyServer {
 
                                     // Insert our own header case map alongside hyper's internal one
                                     parts.extensions.insert(cases);
+                                    parts.extensions.insert(remote_addr);
 
                                     let body = axum::body::Body::new(body);
                                     let axum_req = http::Request::from_parts(parts, body);
@@ -314,25 +359,7 @@ impl ProxyServer {
     }
 
     pub async fn get_status(&self) -> ProxyStatus {
-        let mut status = self.state.status.read().await.clone();
-
-        // 计算运行时间
-        if let Some(start) = *self.state.start_time.read().await {
-            status.uptime_seconds = start.elapsed().as_secs();
-        }
-
-        // 从 current_providers HashMap 获取每个应用类型当前正在使用的 provider
-        let current_providers = self.state.current_providers.read().await;
-        status.active_targets = current_providers
-            .iter()
-            .map(|(app_type, (provider_id, provider_name))| ActiveTarget {
-                app_type: app_type.clone(),
-                provider_id: provider_id.clone(),
-                provider_name: provider_name.clone(),
-            })
-            .collect();
-
-        status
+        self.state.aggregated_status().await
     }
 
     /// 更新某个应用类型当前“目标供应商”（用于 UI 展示 active_targets）
@@ -438,6 +465,10 @@ impl ProxyServer {
             .route("/gemini/v1/*path", any(handlers::handle_gemini))
             // 提高默认请求体大小限制（避免 413 Payload Too Large）
             .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
+            .layer(middleware::from_fn_with_state(
+                self.state.clone(),
+                require_inbound_capability_for_non_loopback,
+            ))
             .with_state(self.state.clone())
     }
 
@@ -799,5 +830,165 @@ mod tests {
         );
 
         let _ = proxy.stop().await;
+    }
+
+    #[tokio::test]
+    async fn aggregated_status_fills_uptime_and_active_targets() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let proxy = ProxyServer::new(ProxyConfig::default(), db, None);
+        *proxy.state.start_time.write().await =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(42));
+        proxy
+            .state
+            .current_providers
+            .write()
+            .await
+            .insert("claude".to_string(), ("p1".to_string(), "P1".to_string()));
+
+        let status = proxy.state.aggregated_status().await;
+        assert_eq!(status.uptime_seconds, 42);
+        assert_eq!(status.active_targets.len(), 1);
+        assert_eq!(status.active_targets[0].app_type, "claude");
+        assert_eq!(status.active_targets[0].provider_id, "p1");
+        assert_eq!(status.active_targets[0].provider_name, "P1");
+    }
+
+    #[tokio::test]
+    async fn get_status_http_uses_aggregated_status() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let proxy = ProxyServer::new(
+            ProxyConfig {
+                listen_port: 0,
+                enable_logging: false,
+                non_streaming_timeout: 10,
+                ..ProxyConfig::default()
+            },
+            db,
+            None,
+        );
+        let proxy_info = proxy.start().await.expect("start test proxy");
+        proxy.set_active_target("codex", "c1", "Codex One").await;
+
+        let status: Value = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{}/status", proxy_info.port))
+            .send()
+            .await
+            .expect("GET /status")
+            .json()
+            .await
+            .expect("parse /status");
+
+        assert_eq!(status["running"], true);
+        assert_eq!(status["active_targets"][0]["app_type"], "codex");
+        assert_eq!(status["active_targets"][0]["provider_id"], "c1");
+        assert_eq!(status["active_targets"][0]["provider_name"], "Codex One");
+
+        let _ = proxy.stop().await;
+    }
+
+    #[tokio::test]
+    async fn gemini_get_strips_query_key_and_does_not_inject_json_content_type() {
+        #[derive(Debug)]
+        struct CapturedGemini {
+            path_and_query: String,
+            content_type: Option<String>,
+            goog_api_key: Option<String>,
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::<CapturedGemini>::new()));
+        let mock_app = Router::new().route(
+            "/v1beta/models",
+            get({
+                let captured = captured.clone();
+                move |request: axum::extract::Request| {
+                    let captured = captured.clone();
+                    async move {
+                        let (parts, _) = request.into_parts();
+                        captured.lock().await.push(CapturedGemini {
+                            path_and_query: parts
+                                .uri
+                                .path_and_query()
+                                .map(|value| value.as_str().to_string())
+                                .unwrap_or_else(|| parts.uri.path().to_string()),
+                            content_type: parts
+                                .headers
+                                .get(header::CONTENT_TYPE)
+                                .and_then(|value| value.to_str().ok())
+                                .map(ToString::to_string),
+                            goog_api_key: parts
+                                .headers
+                                .get("x-goog-api-key")
+                                .and_then(|value| value.to_str().ok())
+                                .map(ToString::to_string),
+                        });
+                        (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "application/json")],
+                            r#"{"models":[]}"#,
+                        )
+                    }
+                }
+            }),
+        );
+        let mock_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind mock upstream");
+        let mock_addr = mock_listener.local_addr().expect("mock upstream address");
+        let mock_handle = tokio::spawn(async move {
+            axum::serve(mock_listener, mock_app)
+                .await
+                .expect("serve mock upstream");
+        });
+
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let provider = Provider::with_id(
+            "gemini-upstream".to_string(),
+            "Gemini Upstream".to_string(),
+            json!({
+                "env": {
+                    "GOOGLE_GEMINI_BASE_URL": format!("http://{mock_addr}/v1beta"),
+                    "GEMINI_API_KEY": "upstream-gemini-secret"
+                }
+            }),
+            None,
+        );
+        db.save_provider("gemini", &provider)
+            .expect("save test provider");
+        db.set_current_provider("gemini", &provider.id)
+            .expect("select test provider");
+
+        let proxy = ProxyServer::new(
+            ProxyConfig {
+                listen_port: 0,
+                enable_logging: false,
+                non_streaming_timeout: 10,
+                ..ProxyConfig::default()
+            },
+            db,
+            None,
+        );
+        let proxy_info = proxy.start().await.expect("start test proxy");
+        let response = reqwest::Client::new()
+            .get(format!(
+                "http://127.0.0.1:{}/v1beta/models?key=PROXY_MANAGED&alt=sse",
+                proxy_info.port
+            ))
+            .send()
+            .await
+            .expect("send gemini GET");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        proxy.stop().await.expect("stop test proxy");
+        mock_handle.abort();
+
+        let captured = captured.lock().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].path_and_query, "/v1beta/models?alt=sse");
+        assert_eq!(captured[0].content_type, None);
+        assert_eq!(
+            captured[0].goog_api_key.as_deref(),
+            Some("upstream-gemini-secret")
+        );
     }
 }

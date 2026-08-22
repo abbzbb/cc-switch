@@ -68,7 +68,7 @@ pub async fn save_settings(
     let unify_codex_changed =
         merged.unify_codex_session_history != existing.unify_codex_session_history;
     let unify_codex_enabled = merged.unify_codex_session_history;
-    crate::settings::update_settings(merged).map_err(|e| e.to_string())?;
+    crate::settings::update_settings_from_frontend(merged).map_err(|e| e.to_string())?;
 
     // 统一会话开关变更时立即重写当前官方 Codex 供应商的 live 配置，
     // 不必等下一次切换才生效。

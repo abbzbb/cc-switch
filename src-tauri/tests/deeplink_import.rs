@@ -84,3 +84,34 @@ fn deeplink_import_codex_provider_builds_auth_and_config() {
         "config.toml content should contain model setting"
     );
 }
+
+#[test]
+fn deeplink_import_marks_usage_script_untrusted_and_disables_auto_query() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let url = "ccswitch://v1/import?resource=provider&app=claude&name=Untrusted%20Script&homepage=https%3A%2F%2Fexample.com&endpoint=https%3A%2F%2Fapi.example.com%2Fv1&apiKey=sk-test-claude-key&usageEnabled=true&usageAutoInterval=5&usageScript=Y29kZQ%3D%3D";
+    let request = parse_deeplink_url(url).expect("parse deeplink url");
+
+    let db = Arc::new(Database::memory().expect("create memory db"));
+    let state = AppState::new(db.clone());
+
+    let provider_id =
+        import_provider_from_deeplink(&state, request).expect("import provider from deeplink");
+
+    let providers = db.get_all_providers("claude").expect("get providers");
+    let provider = providers
+        .get(&provider_id)
+        .expect("provider created via deeplink");
+    let script = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.usage_script.as_ref())
+        .expect("usage script persisted");
+
+    assert!(script.enabled);
+    assert!(script.restrict_private_hosts);
+    assert_eq!(script.auto_query_interval, None);
+    assert_eq!(script.code, "code");
+}

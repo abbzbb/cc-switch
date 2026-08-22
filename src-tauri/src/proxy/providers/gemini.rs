@@ -23,16 +23,18 @@ pub struct OAuthCredentials {
     pub client_secret: Option<String>,
 }
 
-#[allow(dead_code)]
 impl OAuthCredentials {
     /// 检查是否需要刷新 token（有 refresh_token 但没有有效的 access_token）
     pub fn needs_refresh(&self) -> bool {
-        self.refresh_token.is_some() && self.access_token.is_empty()
+        self.refresh_token.as_deref().is_some_and(|t| !t.is_empty())
+            && self.access_token.trim().is_empty()
     }
 
     /// 检查是否可以刷新 token
     pub fn can_refresh(&self) -> bool {
-        self.refresh_token.is_some() && self.client_id.is_some() && self.client_secret.is_some()
+        self.refresh_token.as_deref().is_some_and(|t| !t.is_empty())
+            && self.client_id.as_deref().is_some_and(|id| !id.is_empty())
+            && self.client_secret.as_deref().is_some_and(|s| !s.is_empty())
     }
 }
 
@@ -198,11 +200,31 @@ impl ProviderAdapter for GeminiAdapter {
 
         match strategy {
             AuthStrategy::GoogleOAuth => {
-                // 解析 OAuth 凭证
+                // Parse stored OAuth JSON and only attach access_token when it is
+                // actually usable. `parse_oauth_credentials` accepts refresh-token
+                // only JSON and also surfaces `{"access_token":"", ...}` for
+                // expired credentials. Attaching `Some("")` would win over the
+                // raw key in `get_auth_headers` and emit `Authorization: Bearer `.
                 if let Some(creds) = self.parse_oauth_credentials(&key) {
-                    Some(AuthInfo::with_access_token(key, creds.access_token))
+                    if !creds.access_token.trim().is_empty() {
+                        Some(AuthInfo::with_access_token(key, creds.access_token))
+                    } else {
+                        if creds.needs_refresh() {
+                            log::warn!(
+                                "[Gemini OAuth] access_token missing or empty for provider `{}`{}; \
+                                 refusing empty Bearer. Refresh ~/.gemini/oauth_creds.json via the \
+                                 gemini CLI to obtain a new token.",
+                                provider.id,
+                                if creds.can_refresh() {
+                                    " (refresh_token present)"
+                                } else {
+                                    ""
+                                }
+                            );
+                        }
+                        Some(AuthInfo::new(key, AuthStrategy::GoogleOAuth))
+                    }
                 } else {
-                    // 回退到普通 API Key
                     Some(AuthInfo::new(key, AuthStrategy::Google))
                 }
             }
@@ -234,10 +256,10 @@ impl ProviderAdapter for GeminiAdapter {
     ) -> Result<Vec<(http::HeaderName, http::HeaderValue)>, ProxyError> {
         use super::adapter::auth_header_value as hv;
         use http::{HeaderName, HeaderValue};
-        Ok(match auth.strategy {
+        match auth.strategy {
             AuthStrategy::GoogleOAuth => {
-                let token = auth.access_token.as_ref().unwrap_or(&auth.api_key);
-                vec![
+                let token = oauth_bearer_token(auth)?;
+                Ok(vec![
                     (
                         HeaderName::from_static("authorization"),
                         hv(&format!("Bearer {token}"))?,
@@ -246,14 +268,35 @@ impl ProviderAdapter for GeminiAdapter {
                         HeaderName::from_static("x-goog-api-client"),
                         HeaderValue::from_static("GeminiCLI/1.0"),
                     ),
-                ]
+                ])
             }
-            _ => vec![(
+            _ => Ok(vec![(
                 HeaderName::from_static("x-goog-api-key"),
                 hv(&auth.api_key)?,
-            )],
-        })
+            )]),
+        }
     }
+}
+
+fn oauth_bearer_token(auth: &AuthInfo) -> Result<&str, ProxyError> {
+    if let Some(token) = auth
+        .access_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        return Ok(token);
+    }
+
+    let key = auth.api_key.trim();
+    if !key.is_empty() && !key.starts_with('{') {
+        return Ok(key);
+    }
+
+    Err(ProxyError::AuthError(
+        "Gemini OAuth access_token is empty; refresh ~/.gemini/oauth_creds.json via the gemini CLI"
+            .to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -435,6 +478,39 @@ mod tests {
             .unwrap();
         assert_eq!(creds.access_token, "ya29.test");
         assert_eq!(creds.refresh_token, Some("1//refresh".to_string()));
+    }
+
+    #[test]
+    fn test_extract_auth_oauth_empty_access_token_does_not_attach_empty() {
+        let adapter = GeminiAdapter::new();
+        let provider = create_provider(json!({
+            "env": {
+                "GEMINI_API_KEY": "{\"access_token\":\"\",\"refresh_token\":\"1//refresh\",\"client_id\":\"cid\",\"client_secret\":\"cs\"}"
+            }
+        }));
+
+        let auth = adapter.extract_auth(&provider).unwrap();
+        assert_eq!(auth.strategy, AuthStrategy::GoogleOAuth);
+        assert!(
+            auth.access_token.as_deref().is_none_or(|t| !t.is_empty()),
+            "empty access_token leaked into AuthInfo"
+        );
+        let err = adapter.get_auth_headers(&auth).unwrap_err();
+        assert!(
+            err.to_string().contains("access_token is empty"),
+            "expected empty-token refusal, got {err}"
+        );
+    }
+
+    #[test]
+    fn test_get_auth_headers_refuses_empty_bearer_token() {
+        let adapter = GeminiAdapter::new();
+        let auth = AuthInfo::with_access_token(
+            r#"{"access_token":"","refresh_token":"1//refresh"}"#.to_string(),
+            String::new(),
+        );
+        let err = adapter.get_auth_headers(&auth).unwrap_err();
+        assert!(err.to_string().contains("access_token is empty"));
     }
 
     #[test]

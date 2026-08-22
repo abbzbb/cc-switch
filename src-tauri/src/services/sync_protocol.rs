@@ -464,6 +464,97 @@ where
     }
 }
 
+// ─── Auto-sync upload guard ──────────────────────────────────
+
+/// Treat blank / whitespace-only cursors as "never synced".
+fn nonempty_cursor(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// Strip weak-validator prefix and surrounding quotes so `"abc"` equals `abc`.
+pub(crate) fn normalize_etag(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let without_weak = trimmed
+        .strip_prefix("W/")
+        .or_else(|| trimmed.strip_prefix("w/"))
+        .unwrap_or(trimmed)
+        .trim();
+    without_weak.trim_matches('"').to_string()
+}
+
+fn etags_equal(left: &str, right: &str) -> bool {
+    normalize_etag(left) == normalize_etag(right)
+}
+
+fn hashes_equal(left: &str, right: &str) -> bool {
+    left.trim().eq_ignore_ascii_case(right.trim())
+}
+
+fn auto_upload_download_first_error() -> AppError {
+    localized(
+        "sync.auto_upload.download_first",
+        "远端已有同步数据，请先下载后再开启自动同步，以免覆盖远端配置",
+        "Remote already has sync data. Download it first before enabling auto-sync to avoid overwriting the remote.",
+    )
+}
+
+fn auto_upload_conflict_error() -> AppError {
+    localized(
+        "sync.auto_upload.conflict",
+        "远端数据已变更，自动上传已取消。请先下载或使用手动上传。",
+        "Remote data has changed; auto-upload aborted. Download first or use manual upload.",
+    )
+}
+
+/// Decide whether auto-sync may upload the local snapshot.
+///
+/// - Empty remote: allow (first seed).
+/// - Remote exists and local has never synced (`last_remote_etag` and
+///   `last_remote_manifest_hash` both empty): refuse so a second device cannot
+///   last-write-wins over an existing remote.
+/// - Remote exists and local has a cursor: allow only when etag and/or hash
+///   match; any mismatch is a conflict.
+pub(crate) fn should_allow_auto_upload(
+    local_etag: Option<&str>,
+    local_hash: Option<&str>,
+    remote_exists: bool,
+    remote_etag: Option<&str>,
+    remote_hash: Option<&str>,
+) -> Result<(), AppError> {
+    let local_etag = nonempty_cursor(local_etag);
+    let local_hash = nonempty_cursor(local_hash);
+    let remote_etag = nonempty_cursor(remote_etag);
+    let remote_hash = nonempty_cursor(remote_hash);
+
+    if !remote_exists {
+        return Ok(());
+    }
+
+    if local_etag.is_none() && local_hash.is_none() {
+        return Err(auto_upload_download_first_error());
+    }
+
+    let etag_match = match (local_etag, remote_etag) {
+        (Some(local), Some(remote)) => Some(etags_equal(local, remote)),
+        _ => None,
+    };
+    let hash_match = match (local_hash, remote_hash) {
+        (Some(local), Some(remote)) => Some(hashes_equal(local, remote)),
+        _ => None,
+    };
+
+    if etag_match == Some(false) || hash_match == Some(false) {
+        return Err(auto_upload_conflict_error());
+    }
+    if etag_match == Some(true) || hash_match == Some(true) {
+        return Ok(());
+    }
+
+    // Local has a cursor but nothing was comparable (server omitted ETag and
+    // we could not hash the remote). Refuse rather than last-write-wins.
+    Err(auto_upload_conflict_error())
+}
+
 // ─── Tests ───────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -743,5 +834,81 @@ mod tests {
             size: data.len() as u64,
         };
         assert!(verify_artifact(data, "test.bin", &meta).is_ok());
+    }
+
+    #[test]
+    fn auto_upload_allows_empty_remote() {
+        assert!(should_allow_auto_upload(None, None, false, None, None).is_ok());
+        assert!(should_allow_auto_upload(Some("etag"), Some("hash"), false, None, None).is_ok());
+    }
+
+    #[test]
+    fn auto_upload_denies_when_remote_exists_and_local_has_no_cursor() {
+        let err = should_allow_auto_upload(None, None, true, Some("etag"), Some("hash"))
+            .expect_err("fresh device must download first");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Download") || msg.contains("下载"),
+            "unexpected error: {msg}"
+        );
+
+        let err = should_allow_auto_upload(Some(""), Some("  "), true, Some("e"), Some("h"))
+            .expect_err("blank cursors count as never synced");
+        let msg = err.to_string();
+        assert!(msg.contains("Download") || msg.contains("下载"));
+    }
+
+    #[test]
+    fn auto_upload_allows_matching_etag() {
+        assert!(should_allow_auto_upload(Some("\"abc\""), None, true, Some("abc"), None).is_ok());
+        assert!(should_allow_auto_upload(Some("abc"), None, true, Some("\"abc\""), None).is_ok());
+        assert!(should_allow_auto_upload(Some("W/\"abc\""), None, true, Some("abc"), None).is_ok());
+    }
+
+    #[test]
+    fn auto_upload_allows_matching_hash() {
+        assert!(
+            should_allow_auto_upload(None, Some("deadbeef"), true, None, Some("DEADBEEF")).is_ok()
+        );
+    }
+
+    #[test]
+    fn auto_upload_denies_etag_mismatch() {
+        let err = should_allow_auto_upload(Some("old"), None, true, Some("new"), None)
+            .expect_err("etag mismatch is a conflict");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("changed") || msg.contains("变更") || msg.contains("conflict"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn auto_upload_denies_hash_mismatch() {
+        let err = should_allow_auto_upload(None, Some("aaa"), true, None, Some("bbb"))
+            .expect_err("hash mismatch is a conflict");
+        let msg = err.to_string();
+        assert!(msg.contains("changed") || msg.contains("变更"));
+    }
+
+    #[test]
+    fn auto_upload_denies_when_etag_matches_but_hash_differs() {
+        assert!(
+            should_allow_auto_upload(Some("e"), Some("h1"), true, Some("e"), Some("h2")).is_err()
+        );
+    }
+
+    #[test]
+    fn auto_upload_denies_when_local_cursor_is_not_comparable() {
+        assert!(should_allow_auto_upload(Some("e"), None, true, None, None).is_err());
+        assert!(should_allow_auto_upload(None, Some("h"), true, None, None).is_err());
+    }
+
+    #[test]
+    fn normalize_etag_strips_quotes_and_weak_prefix() {
+        assert_eq!(normalize_etag("\"abc\""), "abc");
+        assert_eq!(normalize_etag("abc"), "abc");
+        assert_eq!(normalize_etag("W/\"abc\""), "abc");
+        assert_eq!(normalize_etag("  \"abc\"  "), "abc");
     }
 }

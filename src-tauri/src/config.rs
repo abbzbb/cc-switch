@@ -290,23 +290,32 @@ fn sort_json_keys(value: &Value) -> Value {
     }
 }
 
+fn serialize_sorted_json<T: Serialize>(data: &T) -> Result<Vec<u8>, AppError> {
+    let value = serde_json::to_value(data).map_err(|e| AppError::JsonSerialize { source: e })?;
+    let sorted_value = sort_json_keys(&value);
+    let json = serde_json::to_string_pretty(&sorted_value)
+        .map_err(|e| AppError::JsonSerialize { source: e })?;
+    Ok(json.into_bytes())
+}
+
+fn write_json_bytes(path: &Path, contents: &[u8], private: bool) -> Result<(), AppError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+    }
+    if private {
+        atomic_write_private(path, contents)
+    } else {
+        atomic_write(path, contents)
+    }
+}
+
 /// 写入 JSON 配置文件并返回实际写入的字节。
 pub fn write_json_file_with_contents<T: Serialize>(
     path: &Path,
     data: &T,
 ) -> Result<Vec<u8>, AppError> {
-    // 确保目录存在
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
-
-    let value = serde_json::to_value(data).map_err(|e| AppError::JsonSerialize { source: e })?;
-    let sorted_value = sort_json_keys(&value);
-    let json = serde_json::to_string_pretty(&sorted_value)
-        .map_err(|e| AppError::JsonSerialize { source: e })?;
-
-    let contents = json.into_bytes();
-    atomic_write(path, &contents)?;
+    let contents = serialize_sorted_json(data)?;
+    write_json_bytes(path, &contents, false)?;
     Ok(contents)
 }
 
@@ -315,12 +324,26 @@ pub fn write_json_file<T: Serialize>(path: &Path, data: &T) -> Result<(), AppErr
     write_json_file_with_contents(path, data).map(|_| ())
 }
 
+/// 以 0600 原子写入 JSON 配置文件（凭据文件：Claude settings.json、Codex auth.json）。
+pub fn write_json_file_private<T: Serialize>(path: &Path, data: &T) -> Result<(), AppError> {
+    let contents = serialize_sorted_json(data)?;
+    write_json_bytes(path, &contents, true)
+}
+
 /// 原子写入文本文件（用于 TOML/纯文本）
 pub fn write_text_file(path: &Path, data: &str) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
     }
     atomic_write(path, data.as_bytes())
+}
+
+/// 以 0600 原子写入文本文件（凭据文件：Gemini `.env` 等）。
+pub fn write_text_file_private(path: &Path, data: &str) -> Result<(), AppError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+    }
+    atomic_write_private(path, data.as_bytes())
 }
 
 /// 原子写入：写入临时文件后 rename 替换，避免半写状态
@@ -733,6 +756,41 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&sort_json_keys(&empty_arr)).unwrap(),
             "[]"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_json_file_private_creates_0600_file_and_replaces_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.json");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_json_file_private(&path, &serde_json::json!({ "token": "secret" })).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let parsed: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(parsed["token"], "secret");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_text_file_private_creates_0600_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        write_text_file_private(&path, "GEMINI_API_KEY=secret\n").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "GEMINI_API_KEY=secret\n"
         );
     }
 

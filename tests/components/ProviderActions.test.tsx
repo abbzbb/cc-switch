@@ -148,3 +148,27 @@ describe("ProviderActions Pi provider switching", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe("ProviderActions pending switch", () => {
+  it("disables switch while an action is pending", async () => {
+    const user = userEvent.setup();
+    const onSwitch = vi.fn();
+    render(
+      <ProviderActions
+        appId="claude"
+        isCurrent={false}
+        isActionPending
+        onSwitch={onSwitch}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    const enableButton = screen.getByRole("button", {
+      name: /provider\.enable|启用/,
+    });
+    expect(enableButton).toBeDisabled();
+    await user.click(enableButton);
+    expect(onSwitch).not.toHaveBeenCalled();
+  });
+});

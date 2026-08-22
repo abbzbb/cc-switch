@@ -9,6 +9,7 @@ import {
   useSettingsQuery,
   useSaveSettingsMutation,
 } from "@/lib/query";
+import { invalidateHermesProviderCaches } from "@/hooks/useHermes";
 import type { Settings } from "@/types";
 import { useSettingsForm, type SettingsFormState } from "./useSettingsForm";
 import {
@@ -200,6 +201,7 @@ export function useSettings(): UseSettingsResult {
         const sanitizedOpenclawDir = sanitizeDir(
           mergedSettings.openclawConfigDir,
         );
+        const sanitizedHermesDir = sanitizeDir(mergedSettings.hermesConfigDir);
         const sanitizedPiDir = sanitizeDir(mergedSettings.piConfigDir);
         const {
           webdavSync: _ignoredWebdavSync,
@@ -215,6 +217,7 @@ export function useSettings(): UseSettingsResult {
           grokConfigDir: sanitizedGrokDir,
           opencodeConfigDir: sanitizedOpencodeDir,
           openclawConfigDir: sanitizedOpenclawDir,
+          hermesConfigDir: sanitizedHermesDir,
           piConfigDir: sanitizedPiDir,
           language: mergedSettings.language,
         };
@@ -335,6 +338,7 @@ export function useSettings(): UseSettingsResult {
         const sanitizedOpenclawDir = sanitizeDir(
           mergedSettings.openclawConfigDir,
         );
+        const sanitizedHermesDir = sanitizeDir(mergedSettings.hermesConfigDir);
         const sanitizedPiDir = sanitizeDir(mergedSettings.piConfigDir);
         const previousAppDir = initialAppConfigDir;
         const previousClaudeDir = sanitizeDir(data?.claudeConfigDir);
@@ -343,6 +347,7 @@ export function useSettings(): UseSettingsResult {
         const previousGrokDir = sanitizeDir(data?.grokConfigDir);
         const previousOpencodeDir = sanitizeDir(data?.opencodeConfigDir);
         const previousOpenclawDir = sanitizeDir(data?.openclawConfigDir);
+        const previousHermesDir = sanitizeDir(data?.hermesConfigDir);
         const previousPiDir = sanitizeDir(data?.piConfigDir);
         const {
           webdavSync: _ignoredWebdavSync,
@@ -358,6 +363,7 @@ export function useSettings(): UseSettingsResult {
           grokConfigDir: sanitizedGrokDir,
           opencodeConfigDir: sanitizedOpencodeDir,
           openclawConfigDir: sanitizedOpenclawDir,
+          hermesConfigDir: sanitizedHermesDir,
           piConfigDir: sanitizedPiDir,
           language: mergedSettings.language,
         };
@@ -446,6 +452,7 @@ export function useSettings(): UseSettingsResult {
         const grokDirChanged = sanitizedGrokDir !== previousGrokDir;
         const opencodeDirChanged = sanitizedOpencodeDir !== previousOpencodeDir;
         const openclawDirChanged = sanitizedOpenclawDir !== previousOpenclawDir;
+        const hermesDirChanged = sanitizedHermesDir !== previousHermesDir;
         const piDirChanged = sanitizedPiDir !== previousPiDir;
         if (
           !pluginSynced &&
@@ -454,7 +461,8 @@ export function useSettings(): UseSettingsResult {
             geminiDirChanged ||
             grokDirChanged ||
             opencodeDirChanged ||
-            openclawDirChanged)
+            openclawDirChanged ||
+            hermesDirChanged)
         ) {
           const syncResult = await syncCurrentProvidersLiveSafe();
           if (!syncResult.ok) {
@@ -463,6 +471,12 @@ export function useSettings(): UseSettingsResult {
               syncResult.error,
             );
           }
+        }
+        if (hermesDirChanged) {
+          await invalidateHermesProviderCaches(queryClient);
+          await queryClient.invalidateQueries({
+            queryKey: ["providers", "hermes"],
+          });
         }
         if (piDirChanged) {
           await invalidatePiDirectoryCaches(queryClient);

@@ -186,8 +186,7 @@ fn row_to_json(row: &rusqlite::Row, columns: &[String]) -> Value {
 
 /// Load messages from the Hermes SQLite database.
 pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String> {
-    let (db_path, session_id) = parse_sqlite_source(source)
-        .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
+    let (db_path, session_id) = resolve_sqlite_source(source)?;
 
     let conn = Connection::open_with_flags(
         &db_path,
@@ -231,22 +230,12 @@ pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String>
 
 /// Delete a session from the Hermes SQLite database.
 pub fn delete_session_sqlite(session_id: &str, source: &str) -> Result<bool, String> {
-    let (db_path, ref_session_id) = parse_sqlite_source(source)
-        .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
-    let db_path = db_path
-        .canonicalize()
-        .map_err(|e| format!("Failed to canonicalize Hermes database path: {e}"))?;
-    let expected_db_path = get_hermes_db_path()
-        .canonicalize()
-        .map_err(|e| format!("Failed to canonicalize expected Hermes database path: {e}"))?;
+    let (db_path, ref_session_id) = resolve_sqlite_source(source)?;
 
     if ref_session_id != session_id {
         return Err(format!(
             "Hermes SQLite session ID mismatch: expected {session_id}, found {ref_session_id}"
         ));
-    }
-    if db_path != expected_db_path {
-        return Err("SQLite path does not match expected Hermes database".to_string());
     }
 
     let conn =
@@ -269,7 +258,7 @@ pub fn delete_session_sqlite(session_id: &str, source: &str) -> Result<bool, Str
     Ok(deleted > 0)
 }
 
-fn parse_sqlite_source(source: &str) -> Option<(PathBuf, String)> {
+pub(crate) fn parse_sqlite_source(source: &str) -> Option<(PathBuf, String)> {
     let rest = source.strip_prefix("sqlite:")?;
     let hash_pos = rest.rfind('#')?;
     let db_path = PathBuf::from(&rest[..hash_pos]);
@@ -278,6 +267,30 @@ fn parse_sqlite_source(source: &str) -> Option<(PathBuf, String)> {
         return None;
     }
     Some((db_path, session_id))
+}
+
+pub(crate) fn sqlite_db_path_from_source(source: &str) -> Result<PathBuf, String> {
+    parse_sqlite_source(source)
+        .map(|(path, _)| path)
+        .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))
+}
+
+fn resolve_sqlite_source(source: &str) -> Result<(PathBuf, String), String> {
+    let (db_path, session_id) = parse_sqlite_source(source)
+        .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
+    let db_path = db_path
+        .canonicalize()
+        .map_err(|e| format!("Failed to canonicalize Hermes database path: {e}"))?;
+    let expected_db_path = get_hermes_db_path()
+        .canonicalize()
+        .map_err(|e| format!("Failed to canonicalize expected Hermes database path: {e}"))?;
+    if db_path != expected_db_path {
+        return Err(format!(
+            "Session source path is outside provider roots: {}",
+            db_path.display()
+        ));
+    }
+    Ok((db_path, session_id))
 }
 
 // ── JSONL scanning ──────────────────────────────────────────────────

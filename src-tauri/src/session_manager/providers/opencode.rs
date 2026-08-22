@@ -29,7 +29,7 @@ pub(crate) fn get_opencode_data_dir() -> PathBuf {
     get_opencode_base_dir().join("storage")
 }
 
-fn get_opencode_db_path() -> PathBuf {
+pub(crate) fn get_opencode_db_path() -> PathBuf {
     get_opencode_base_dir().join("opencode.db")
 }
 
@@ -85,12 +85,37 @@ fn scan_sessions_json() -> Vec<SessionMeta> {
 /// Uses `rfind(":ses_")` to split the path from the session ID because the
 /// db path itself may contain colons (e.g. `C:\Users\...` on Windows).
 /// This relies on the OpenCode convention that session IDs start with `ses_`.
-fn parse_sqlite_source(source: &str) -> Option<(PathBuf, String)> {
+pub(crate) fn parse_sqlite_source(source: &str) -> Option<(PathBuf, String)> {
     let rest = source.strip_prefix("sqlite:")?;
     let sep = rest.rfind(":ses_")?;
     let db_path = PathBuf::from(&rest[..sep]);
     let session_id = rest[sep + 1..].to_string();
     Some((db_path, session_id))
+}
+
+pub(crate) fn sqlite_db_path_from_source(source: &str) -> Result<PathBuf, String> {
+    parse_sqlite_source(source)
+        .map(|(path, _)| path)
+        .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))
+}
+
+/// Canonicalize the db path and require it to be the expected OpenCode database.
+fn resolve_sqlite_source(source: &str) -> Result<(PathBuf, String), String> {
+    let (db_path, session_id) = parse_sqlite_source(source)
+        .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
+    let db_path = db_path
+        .canonicalize()
+        .map_err(|e| format!("Failed to canonicalize SQLite database path: {e}"))?;
+    let expected_db_path = get_opencode_db_path()
+        .canonicalize()
+        .map_err(|e| format!("Failed to canonicalize expected OpenCode database path: {e}"))?;
+    if db_path != expected_db_path {
+        return Err(format!(
+            "Session source path is outside provider roots: {}",
+            db_path.display()
+        ));
+    }
+    Ok((db_path, session_id))
 }
 
 fn scan_sessions_sqlite() -> Vec<SessionMeta> {
@@ -227,8 +252,7 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
 /// Load messages from the OpenCode SQLite database for a given source reference.
 /// Joins the `message` and `part` tables in memory to reconstruct full messages.
 pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String> {
-    let (db_path, session_id) = parse_sqlite_source(source)
-        .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
+    let (db_path, session_id) = resolve_sqlite_source(source)?;
 
     let conn = Connection::open_with_flags(
         &db_path,
@@ -380,22 +404,12 @@ pub fn delete_session(storage: &Path, path: &Path, session_id: &str) -> Result<b
 
 /// Delete a session from the OpenCode SQLite database.
 pub fn delete_session_sqlite(session_id: &str, source: &str) -> Result<bool, String> {
-    let (db_path, ref_session_id) = parse_sqlite_source(source)
-        .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
-    let db_path = db_path
-        .canonicalize()
-        .map_err(|e| format!("Failed to canonicalize SQLite database path: {e}"))?;
-    let expected_db_path = get_opencode_db_path()
-        .canonicalize()
-        .map_err(|e| format!("Failed to canonicalize expected OpenCode database path: {e}"))?;
+    let (db_path, ref_session_id) = resolve_sqlite_source(source)?;
 
     if ref_session_id != session_id {
         return Err(format!(
             "OpenCode SQLite session ID mismatch: expected {session_id}, found {ref_session_id}"
         ));
-    }
-    if db_path != expected_db_path {
-        return Err("SQLite path does not match expected OpenCode database".to_string());
     }
 
     let conn =
@@ -833,8 +847,15 @@ mod tests {
 
     #[test]
     fn load_messages_sqlite_reads_messages_and_parts() {
+        let _guard = opencode_env_lock().lock().expect("lock");
         let temp = tempdir().expect("tempdir");
-        let db_path = temp.path().join("opencode.db");
+        let original_xdg = std::env::var_os("XDG_DATA_HOME");
+        #[allow(deprecated)]
+        std::env::set_var("XDG_DATA_HOME", temp.path());
+
+        let base_dir = temp.path().join("opencode");
+        std::fs::create_dir_all(&base_dir).expect("create base dir");
+        let db_path = base_dir.join("opencode.db");
         let conn = Connection::open(&db_path).expect("open sqlite db");
         create_sqlite_schema(&conn);
 
@@ -892,6 +913,13 @@ mod tests {
         assert_eq!(messages[1].role, "assistant");
         assert_eq!(messages[1].content, "[Tool: bash]\nDone");
         assert_eq!(messages[1].ts, Some(2000));
+
+        #[allow(deprecated)]
+        if let Some(value) = original_xdg {
+            std::env::set_var("XDG_DATA_HOME", value);
+        } else {
+            std::env::remove_var("XDG_DATA_HOME");
+        }
     }
 
     #[test]
@@ -989,7 +1017,10 @@ mod tests {
 
         let source = format!("sqlite:{}:ses_1", db_path.display());
         let err = delete_session_sqlite("ses_1", &source).expect_err("should reject foreign db");
-        assert!(err.contains("expected OpenCode database"));
+        assert!(
+            err.contains("expected OpenCode database") || err.contains("outside provider roots"),
+            "unexpected error: {err}"
+        );
 
         #[allow(deprecated)]
         if let Some(value) = original_xdg {

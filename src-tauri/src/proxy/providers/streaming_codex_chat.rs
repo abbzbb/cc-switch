@@ -824,12 +824,23 @@ pub fn create_responses_sse_stream_from_chat_with_context<E: std::error::Error +
         let mut state = ChatToResponsesState::with_tool_context(tool_context);
         let mut stream_failed = false;
 
+        let stream = stream
+            .map(|result| (result, false))
+            .chain(futures::stream::once(async {
+                (Ok::<Bytes, E>(Bytes::new()), true)
+            }));
         tokio::pin!(stream);
 
-        while let Some(chunk) = stream.next().await {
+        while let Some((chunk, is_eof)) = stream.next().await {
+            if stream_failed {
+                break;
+            }
             match chunk {
                 Ok(bytes) => {
                     crate::proxy::sse::append_utf8_safe(&mut buffer, &mut utf8_remainder, &bytes);
+                    if is_eof && !buffer.trim().is_empty() {
+                        buffer.push_str("\n\n");
+                    }
 
                     while let Some(block) = take_sse_block(&mut buffer) {
                         if block.trim().is_empty() {
@@ -987,6 +998,18 @@ mod tests {
             2
         );
         assert_eq!(completed["response"]["usage"]["cache_read_input_tokens"], 2);
+    }
+
+    #[tokio::test]
+    async fn flushes_final_sse_chunk_without_trailing_blank_line() {
+        let output = collect(vec![
+            "data: {\"id\":\"chatcmpl_eof\",\"created\":123,\"model\":\"gpt-5.4\",\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":1,\"total_tokens\":5}}",
+        ])
+        .await;
+
+        assert!(output.contains("\"text\":\"Hello\""));
+        assert!(output.contains("event: response.completed"));
+        assert!(!output.contains("stream_truncated"));
     }
 
     #[tokio::test]

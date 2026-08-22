@@ -15,9 +15,10 @@ use crate::settings::{update_s3_sync_status, S3SyncSettings, WebDavSyncStatus};
 pub(crate) use super::sync_protocol::run_with_sync_lock;
 use super::sync_protocol::{
     apply_snapshot, build_local_snapshot, localized, persist_sync_success_best_effort, sha256_hex,
-    validate_artifact_size_limit, validate_manifest_compat, verify_artifact, ArtifactMeta,
-    RemoteLayout, SyncManifest, DB_COMPAT_VERSION, MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES,
-    PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
+    should_allow_auto_upload, validate_artifact_size_limit, validate_manifest_compat,
+    verify_artifact, ArtifactMeta, RemoteLayout, SyncManifest, DB_COMPAT_VERSION,
+    MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES, PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST,
+    REMOTE_SKILLS_ZIP,
 };
 
 #[cfg(test)]
@@ -35,12 +36,61 @@ pub async fn check_connection(settings: &S3SyncSettings) -> Result<(), AppError>
 }
 
 /// Upload local snapshot (db + skills) to remote S3.
+///
+/// Manual/explicit UI upload may overwrite the remote.
 pub async fn upload(
     db: &crate::database::Database,
     settings: &mut S3SyncSettings,
 ) -> Result<Value, AppError> {
+    upload_snapshot(db, settings, false).await
+}
+
+/// Auto-sync upload: fetch the remote first and refuse to last-write-wins.
+pub async fn upload_auto(
+    db: &crate::database::Database,
+    settings: &mut S3SyncSettings,
+) -> Result<Value, AppError> {
+    upload_snapshot(db, settings, true).await
+}
+
+async fn upload_snapshot(
+    db: &crate::database::Database,
+    settings: &mut S3SyncSettings,
+    conditional: bool,
+) -> Result<Value, AppError> {
     settings.validate()?;
     let creds = creds_for(settings);
+
+    let manifest_key = s3_key(settings, REMOTE_MANIFEST);
+    let mut remote_exists = false;
+    let mut if_match_etag: Option<String> = None;
+
+    if conditional {
+        let remote = s3::get_object(&creds, &manifest_key, MAX_MANIFEST_BYTES).await?;
+        remote_exists = remote
+            .as_ref()
+            .is_some_and(|(bytes, _etag)| !bytes.is_empty());
+        let remote_etag = remote.as_ref().and_then(|(_, etag)| etag.as_deref());
+        let remote_hash = remote
+            .as_ref()
+            .and_then(|(bytes, _etag)| (!bytes.is_empty()).then(|| sha256_hex(bytes)));
+
+        should_allow_auto_upload(
+            settings.status.last_remote_etag.as_deref(),
+            settings.status.last_remote_manifest_hash.as_deref(),
+            remote_exists,
+            remote_etag,
+            remote_hash.as_deref(),
+        )?;
+
+        if_match_etag = settings
+            .status
+            .last_remote_etag
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+    }
 
     let snapshot = build_local_snapshot(db)?;
 
@@ -51,12 +101,15 @@ pub async fn upload(
     let skills_key = s3_key(settings, REMOTE_SKILLS_ZIP);
     s3::put_object(&creds, &skills_key, snapshot.skills_zip, "application/zip").await?;
 
-    let manifest_key = s3_key(settings, REMOTE_MANIFEST);
-    s3::put_object(
+    let manifest_precondition =
+        manifest_put_precondition(conditional, remote_exists, if_match_etag.as_deref());
+
+    s3::put_object_conditional(
         &creds,
         &manifest_key,
         snapshot.manifest_bytes,
         "application/json",
+        manifest_precondition,
     )
     .await?;
 
@@ -233,6 +286,23 @@ fn creds_for(settings: &S3SyncSettings) -> S3Credentials {
     }
 }
 
+fn manifest_put_precondition<'a>(
+    conditional: bool,
+    remote_exists: bool,
+    if_match_etag: Option<&'a str>,
+) -> s3::PutPrecondition<'a> {
+    if !conditional {
+        s3::PutPrecondition::None
+    } else if remote_exists {
+        match if_match_etag {
+            Some(etag) => s3::PutPrecondition::IfMatch(etag),
+            None => s3::PutPrecondition::None,
+        }
+    } else {
+        s3::PutPrecondition::IfNoneMatchAny
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -304,5 +374,29 @@ mod tests {
         assert_eq!(creds.region, "us-west-2");
         assert_eq!(creds.bucket, "my-bucket");
         assert_eq!(creds.endpoint, "minio.local:9000");
+    }
+
+    #[test]
+    fn manual_upload_is_unconditional() {
+        assert_eq!(
+            manifest_put_precondition(false, true, Some("etag")),
+            s3::PutPrecondition::None
+        );
+    }
+
+    #[test]
+    fn auto_upload_sends_if_match_when_remote_exists() {
+        assert_eq!(
+            manifest_put_precondition(true, true, Some("etag")),
+            s3::PutPrecondition::IfMatch("etag")
+        );
+    }
+
+    #[test]
+    fn auto_upload_sends_if_none_match_when_creating() {
+        assert_eq!(
+            manifest_put_precondition(true, false, None),
+            s3::PutPrecondition::IfNoneMatchAny
+        );
     }
 }

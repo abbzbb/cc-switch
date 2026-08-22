@@ -358,12 +358,88 @@ pub(crate) async fn test_connection(creds: &S3Credentials) -> Result<(), AppErro
     Err(s3_status_error("HEAD bucket", resp.status(), &url_str))
 }
 
-/// Upload bytes to an S3 object.
+/// Conditional PUT headers for S3 uploads.
+///
+/// Auto-sync uses `IfMatch` / `IfNoneMatchAny` so a second device cannot
+/// last-write-wins. Manual upload keeps `None` (explicit overwrite).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PutPrecondition<'a> {
+    #[default]
+    None,
+    /// `If-Match: <etag>` — update only if the object ETag is unchanged.
+    IfMatch(&'a str),
+    /// `If-None-Match: *` — create only if the object does not exist.
+    IfNoneMatchAny,
+}
+
+/// Quote an ETag for `If-Match` if the stored value is bare.
+pub(crate) fn format_etag_header(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "*" {
+        return trimmed.to_string();
+    }
+    if trimmed.starts_with('"') || trimmed.starts_with("W/\"") || trimmed.starts_with("w/\"") {
+        return trimmed.to_string();
+    }
+    if let Some(rest) = trimmed
+        .strip_prefix("W/")
+        .or_else(|| trimmed.strip_prefix("w/"))
+    {
+        let inner = rest.trim().trim_matches('"');
+        return format!("W/\"{inner}\"");
+    }
+    format!("\"{trimmed}\"")
+}
+
+fn put_precondition_headers(precondition: PutPrecondition<'_>) -> Vec<(&'static str, String)> {
+    match precondition {
+        PutPrecondition::None => Vec::new(),
+        PutPrecondition::IfMatch(etag) => {
+            let trimmed = etag.trim();
+            if trimmed.is_empty() {
+                Vec::new()
+            } else {
+                vec![("if-match", format_etag_header(trimmed))]
+            }
+        }
+        PutPrecondition::IfNoneMatchAny => vec![("if-none-match", "*".to_string())],
+    }
+}
+
+fn put_precondition_failed_error() -> AppError {
+    AppError::localized(
+        "s3.put.precondition_failed",
+        "远端数据已被其他设备更新（412），未覆盖远端。",
+        "Remote data was updated by another client (412 Precondition Failed); remote was not overwritten.",
+    )
+}
+
+fn map_put_status(status: StatusCode, url: &str) -> AppError {
+    if status == StatusCode::PRECONDITION_FAILED {
+        return put_precondition_failed_error();
+    }
+    s3_status_error("PUT", status, url)
+}
+
+/// Upload bytes to an S3 object. Unconditional overwrite (manual upload).
 pub(crate) async fn put_object(
     creds: &S3Credentials,
     key: &str,
     bytes: Vec<u8>,
     content_type: &str,
+) -> Result<(), AppError> {
+    put_object_conditional(creds, key, bytes, content_type, PutPrecondition::None).await
+}
+
+/// Upload bytes to an S3 object with optional If-Match / If-None-Match.
+///
+/// A 412 Precondition Failed is a conflict and is not retried as overwrite.
+pub(crate) async fn put_object_conditional(
+    creds: &S3Credentials,
+    key: &str,
+    bytes: Vec<u8>,
+    content_type: &str,
+    precondition: PutPrecondition<'_>,
 ) -> Result<(), AppError> {
     let url_str = build_object_url(creds, key);
     let url = Url::parse(&url_str).map_err(|e| {
@@ -378,6 +454,16 @@ pub(crate) async fn put_object(
     let body_hash = sha256_hex(&bytes);
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("content-type", content_type.parse().unwrap());
+    for (name, value) in put_precondition_headers(precondition) {
+        let header_value = reqwest::header::HeaderValue::from_str(&value).map_err(|_| {
+            AppError::localized(
+                "s3.put.invalid_etag",
+                "无效的 ETag 值，无法设置条件 PUT 头",
+                "Invalid ETag value; cannot set conditional PUT header.",
+            )
+        })?;
+        headers.insert(name, header_value);
+    }
     sign_request(
         "PUT",
         &url,
@@ -399,7 +485,7 @@ pub(crate) async fn put_object(
     if resp.status().is_success() {
         return Ok(());
     }
-    Err(s3_status_error("PUT", resp.status(), &url_str))
+    Err(map_put_status(resp.status(), &url_str))
 }
 
 /// Download an S3 object. Returns `None` if the object does not exist (404).
@@ -787,6 +873,35 @@ mod tests {
     }
 
     #[test]
+    fn sig_v4_includes_if_match_when_present() {
+        let creds = S3Credentials {
+            access_key_id: "TESTKEY".to_string(),
+            secret_access_key: "TESTSECRET".to_string(),
+            region: "us-east-1".to_string(),
+            bucket: "b".to_string(),
+            endpoint: String::new(),
+        };
+
+        let now = chrono::Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let url = Url::parse("https://b.s3.us-east-1.amazonaws.com/manifest.json").unwrap();
+        let body_hash = sha256_hex(b"{}");
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
+        for (name, value) in put_precondition_headers(PutPrecondition::IfMatch("abc")) {
+            headers.insert(name, value.parse().unwrap());
+        }
+        sign_request("PUT", &url, &mut headers, &body_hash, &creds, now);
+
+        let auth = headers.get("authorization").unwrap().to_str().unwrap();
+        assert!(auth.contains("if-match"), "if-match must be signed: {auth}");
+        assert_eq!(
+            headers.get("if-match").unwrap().to_str().unwrap(),
+            "\"abc\""
+        );
+    }
+
+    #[test]
     fn sig_v4_signing_key_derivation() {
         // Verify the signing key derivation chain independently.
         // Using the same AWS example credentials and date.
@@ -848,6 +963,47 @@ mod tests {
 
         let empty = HeaderMap::new();
         assert!(ensure_content_length_within_limit(&empty, 1024, "https://example.com").is_ok());
+    }
+
+    #[test]
+    fn format_etag_header_quotes_bare_etag() {
+        assert_eq!(format_etag_header("abc"), "\"abc\"");
+        assert_eq!(format_etag_header("\"abc\""), "\"abc\"");
+        assert_eq!(format_etag_header("W/\"abc\""), "W/\"abc\"");
+        assert_eq!(format_etag_header("*"), "*");
+    }
+
+    #[test]
+    fn put_precondition_headers_if_match_and_create_only() {
+        assert_eq!(
+            put_precondition_headers(PutPrecondition::IfMatch("abc")),
+            vec![("if-match", "\"abc\"".to_string())]
+        );
+        assert_eq!(
+            put_precondition_headers(PutPrecondition::IfNoneMatchAny),
+            vec![("if-none-match", "*".to_string())]
+        );
+        assert!(put_precondition_headers(PutPrecondition::IfMatch("  ")).is_empty());
+        assert!(put_precondition_headers(PutPrecondition::None).is_empty());
+    }
+
+    #[test]
+    fn map_put_status_treats_412_as_conflict_not_generic_overwrite() {
+        let err = map_put_status(
+            StatusCode::PRECONDITION_FAILED,
+            "https://bucket.s3.us-east-1.amazonaws.com/manifest.json",
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("412") || text.contains("Precondition") || text.contains("未覆盖"),
+            "unexpected error: {text}"
+        );
+
+        let generic = map_put_status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "https://bucket.s3.us-east-1.amazonaws.com/manifest.json",
+        );
+        assert!(generic.to_string().contains("500"));
     }
 
     // ── Helper ──

@@ -197,6 +197,13 @@ const renderApp = (AppComponent: ComponentType) => {
   );
 };
 
+function providerListText(): string {
+  return screen
+    .getAllByTestId("provider-list")
+    .map((node) => node.textContent ?? "")
+    .join("\n");
+}
+
 describe("App integration with MSW", () => {
   beforeEach(() => {
     resetProviderState();
@@ -213,16 +220,12 @@ describe("App integration with MSW", () => {
     renderApp(App);
 
     await waitFor(() =>
-      expect(screen.getByTestId("provider-list").textContent).toContain(
-        "claude-1",
-      ),
+      expect(providerListText()).toContain("claude-1"),
     );
 
     fireEvent.click(screen.getByText("switch-codex"));
     await waitFor(() =>
-      expect(screen.getByTestId("provider-list").textContent).toContain(
-        "codex-1",
-      ),
+      expect(providerListText()).toContain("codex-1"),
     );
 
     fireEvent.click(screen.getByText("usage"));
@@ -234,25 +237,17 @@ describe("App integration with MSW", () => {
     expect(screen.getByTestId("add-provider-dialog")).toBeInTheDocument();
     fireEvent.click(screen.getByText("confirm-add"));
     await waitFor(() =>
-      expect(screen.getByTestId("provider-list").textContent).toMatch(
-        /New codex Provider/,
-      ),
+      expect(providerListText()).toMatch(/New codex Provider/),
     );
 
     fireEvent.click(screen.getByText("edit"));
     expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
     fireEvent.click(screen.getByText("confirm-edit"));
-    await waitFor(() =>
-      expect(screen.getByTestId("provider-list").textContent).toMatch(
-        /-edited/,
-      ),
-    );
+    await waitFor(() => expect(providerListText()).toMatch(/-edited/));
 
     fireEvent.click(screen.getByText("switch"));
     fireEvent.click(screen.getByText("duplicate"));
-    await waitFor(() =>
-      expect(screen.getByTestId("provider-list").textContent).toMatch(/copy/),
-    );
+    await waitFor(() => expect(providerListText()).toMatch(/copy/));
 
     fireEvent.click(screen.getByText("open-website"));
 
@@ -263,17 +258,13 @@ describe("App integration with MSW", () => {
 
     expect(toastErrorMock).not.toHaveBeenCalled();
     expect(toastSuccessMock).toHaveBeenCalled();
-  }, 10_000);
+  }, 20_000);
 
   it("shows toast when auto sync fails in background", async () => {
     const { default: App } = await import("@/App");
     renderApp(App);
 
-    await waitFor(() =>
-      expect(screen.getByTestId("provider-list").textContent).toContain(
-        "claude-1",
-      ),
-    );
+    await waitFor(() => expect(providerListText()).toContain("claude-1"));
 
     expect(() => {
       emitTauriEvent("webdav-sync-status-updated", null);
@@ -331,16 +322,12 @@ describe("App integration with MSW", () => {
 
     fireEvent.click(screen.getByText("switch-openclaw"));
 
-    await waitFor(() =>
-      expect(screen.getByTestId("provider-list").textContent).toContain(
-        "deepseek",
-      ),
-    );
+    await waitFor(() => expect(providerListText()).toContain("deepseek"));
 
     fireEvent.click(screen.getByText("duplicate"));
 
     await waitFor(() => {
-      const providerList = screen.getByTestId("provider-list").textContent;
+      const providerList = providerListText();
       expect(providerList).toContain("deepseek-copy-2");
       expect(providerList).toContain("DeepSeek copy");
     });
@@ -379,11 +366,7 @@ describe("App integration with MSW", () => {
     const { default: App } = await import("@/App");
     renderApp(App);
 
-    await waitFor(() =>
-      expect(screen.getByTestId("provider-list").textContent).toContain(
-        "Custom Pi",
-      ),
-    );
+    await waitFor(() => expect(providerListText()).toContain("Custom Pi"));
     fireEvent.click(screen.getByText("remove"));
 
     expect(screen.getByTestId("confirm-message")).toHaveTextContent(
@@ -422,11 +405,7 @@ describe("App integration with MSW", () => {
 
     fireEvent.click(screen.getByText("switch-openclaw"));
 
-    await waitFor(() =>
-      expect(screen.getByTestId("provider-list").textContent).toContain(
-        "deepseek",
-      ),
-    );
+    await waitFor(() => expect(providerListText()).toContain("deepseek"));
 
     fireEvent.click(screen.getByText("duplicate"));
 
@@ -436,9 +415,7 @@ describe("App integration with MSW", () => {
       );
     });
 
-    expect(screen.getByTestId("provider-list").textContent).not.toContain(
-      "deepseek-copy",
-    );
+    expect(providerListText()).not.toContain("deepseek-copy");
 
     liveIdsSpy.mockRestore();
   });

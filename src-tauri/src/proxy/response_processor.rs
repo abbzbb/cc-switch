@@ -32,8 +32,9 @@ use tokio::sync::Mutex;
 // 响应头处理
 // ============================================================================
 
-/// RFC 2616 / RFC 7230 中定义的不应被代理继续转发的响应头。
-const HOP_BY_HOP_RESPONSE_HEADERS: &[&str] = &[
+/// RFC 9110 hop-by-hop headers that a proxy must not forward in either
+/// direction. Shared with the request-side skip list in `forwarder`.
+pub(crate) const HOP_BY_HOP_HEADERS: &[&str] = &[
     "connection",
     "keep-alive",
     "proxy-authenticate",
@@ -46,9 +47,15 @@ const HOP_BY_HOP_RESPONSE_HEADERS: &[&str] = &[
     "upgrade",
 ];
 
-/// 移除响应侧 hop-by-hop 头，以及 `Connection` 中点名的扩展头。
-pub(crate) fn strip_hop_by_hop_response_headers(headers: &mut HeaderMap) {
-    let connection_listed_headers: Vec<HeaderName> = headers
+pub(crate) fn is_hop_by_hop_header(name: &str) -> bool {
+    HOP_BY_HOP_HEADERS
+        .iter()
+        .any(|header| name.eq_ignore_ascii_case(header))
+}
+
+/// Names listed in `Connection` that must be treated as hop-by-hop as well.
+pub(crate) fn connection_listed_header_names(headers: &HeaderMap) -> Vec<HeaderName> {
+    headers
         .get_all(axum::http::header::CONNECTION)
         .iter()
         .filter_map(|value| value.to_str().ok())
@@ -56,9 +63,14 @@ pub(crate) fn strip_hop_by_hop_response_headers(headers: &mut HeaderMap) {
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
-        .collect();
+        .collect()
+}
 
-    for name in HOP_BY_HOP_RESPONSE_HEADERS {
+/// 移除响应侧 hop-by-hop 头，以及 `Connection` 中点名的扩展头。
+pub(crate) fn strip_hop_by_hop_response_headers(headers: &mut HeaderMap) {
+    let connection_listed_headers = connection_listed_header_names(headers);
+
+    for name in HOP_BY_HOP_HEADERS {
         headers.remove(*name);
     }
 

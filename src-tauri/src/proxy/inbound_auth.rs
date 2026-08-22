@@ -10,6 +10,7 @@ use crate::database::Database;
 use crate::error::AppError;
 use http::HeaderMap;
 use serde_json::{json, Map, Value};
+use std::net::{IpAddr, SocketAddr};
 
 pub const LEGACY_PLACEHOLDER: &str = "PROXY_MANAGED";
 pub const INBOUND_HEADER: &str = "x-cc-switch-proxy";
@@ -46,8 +47,8 @@ pub fn is_legacy_placeholder(value: &str) -> bool {
 }
 
 pub fn is_proxy_auth_placeholder(value: &str) -> bool {
-    let trimmed = value.trim();
-    is_legacy_placeholder(trimmed) || trimmed.starts_with(TOKEN_PREFIX)
+    let token = extract_bearer(value);
+    is_legacy_placeholder(token) || token.starts_with(TOKEN_PREFIX)
 }
 
 pub fn extract_bearer(value: &str) -> &str {
@@ -57,6 +58,38 @@ pub fn extract_bearer(value: &str) -> &str {
         .or_else(|| value.trim().strip_prefix("bearer "))
         .unwrap_or(value)
         .trim()
+}
+
+pub fn is_public_health_path(path: &str) -> bool {
+    matches!(path, "/health" | "/healthz")
+}
+
+pub fn is_loopback_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback(),
+        IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
+    }
+}
+
+pub fn is_loopback_peer(peer: SocketAddr) -> bool {
+    is_loopback_ip(peer.ip())
+}
+
+/// `/health` is always public. Loopback peers keep the historical no-token
+/// CLI behavior. Any other peer must present the inbound capability token.
+pub fn inbound_peer_exempt(path: &str, peer: Option<SocketAddr>) -> bool {
+    is_public_health_path(path) || peer.is_some_and(is_loopback_peer)
+}
+
+pub fn inbound_request_allowed(
+    path: &str,
+    peer: Option<SocketAddr>,
+    headers: &HeaderMap,
+    inbound_tokens: &[String],
+) -> bool {
+    inbound_peer_exempt(path, peer) || presents_inbound_secret(headers, inbound_tokens)
 }
 
 pub fn presents_inbound_secret(headers: &HeaderMap, inbound_tokens: &[String]) -> bool {
@@ -204,13 +237,17 @@ fn set_http_header(table: &mut toml_edit::Table, token: &str) {
 mod tests {
     use super::*;
     use http::HeaderValue;
+    use std::net::SocketAddr;
 
     #[test]
     fn placeholder_detection() {
         assert!(is_proxy_auth_placeholder("PROXY_MANAGED"));
         assert!(is_proxy_auth_placeholder("Bearer PROXY_MANAGED"));
         assert!(is_proxy_auth_placeholder("ccs-proxy-abc"));
+        assert!(is_proxy_auth_placeholder("Bearer ccs-proxy-abc"));
+        assert!(is_proxy_auth_placeholder("bearer ccs-proxy-abc"));
         assert!(!is_proxy_auth_placeholder("sk-real"));
+        assert!(!is_proxy_auth_placeholder("Bearer sk-real"));
     }
 
     #[test]
@@ -249,5 +286,86 @@ mod tests {
             .as_str()
             .expect("custom headers");
         assert!(headers.contains("x-cc-switch-proxy: ccs-proxy-test"));
+    }
+
+    #[test]
+    fn non_loopback_requires_inbound_token_except_health() {
+        let tokens = vec!["ccs-proxy-secret".to_string()];
+        let peer: SocketAddr = "192.168.1.10:4000".parse().unwrap();
+        let headers = HeaderMap::new();
+
+        assert!(inbound_request_allowed(
+            "/health",
+            Some(peer),
+            &headers,
+            &tokens
+        ));
+        assert!(inbound_request_allowed(
+            "/healthz",
+            Some(peer),
+            &headers,
+            &tokens
+        ));
+        assert!(!inbound_request_allowed(
+            "/status",
+            Some(peer),
+            &headers,
+            &tokens
+        ));
+        assert!(!inbound_request_allowed(
+            "/v1/messages",
+            Some(peer),
+            &headers,
+            &tokens
+        ));
+        assert!(!inbound_request_allowed(
+            "/v1/messages",
+            None,
+            &headers,
+            &tokens
+        ));
+
+        let mut with_header = HeaderMap::new();
+        with_header.insert(INBOUND_HEADER, HeaderValue::from_static("ccs-proxy-secret"));
+        assert!(inbound_request_allowed(
+            "/status",
+            Some(peer),
+            &with_header,
+            &tokens
+        ));
+
+        let mut with_bearer = HeaderMap::new();
+        with_bearer.insert(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer ccs-proxy-secret"),
+        );
+        assert!(inbound_request_allowed(
+            "/v1/chat/completions",
+            Some(peer),
+            &with_bearer,
+            &tokens
+        ));
+
+        let loopback: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        assert!(inbound_request_allowed(
+            "/v1/messages",
+            Some(loopback),
+            &headers,
+            &tokens
+        ));
+        let v6: SocketAddr = "[::1]:9".parse().unwrap();
+        assert!(inbound_request_allowed(
+            "/v1/messages",
+            Some(v6),
+            &headers,
+            &tokens
+        ));
+        let mapped: SocketAddr = "[::ffff:127.0.0.1]:9".parse().unwrap();
+        assert!(inbound_request_allowed(
+            "/v1/messages",
+            Some(mapped),
+            &headers,
+            &tokens
+        ));
     }
 }

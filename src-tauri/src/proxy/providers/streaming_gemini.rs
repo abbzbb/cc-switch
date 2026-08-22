@@ -256,12 +256,20 @@ pub fn create_anthropic_sse_stream_from_gemini<E: std::error::Error + Send + 'st
         let mut latest_usage: Option<Value> = None;
         let mut latest_finish_reason: Option<String> = None;
         let mut blocked_text: Option<String> = None;
+        let stream = stream
+            .map(|result| (result, false))
+            .chain(futures::stream::once(async {
+                (Ok::<Bytes, E>(Bytes::new()), true)
+            }));
         tokio::pin!(stream);
 
-        while let Some(chunk) = stream.next().await {
+        while let Some((chunk, is_eof)) = stream.next().await {
             match chunk {
                 Ok(bytes) => {
                     append_utf8_safe(&mut buffer, &mut utf8_remainder, &bytes);
+                    if is_eof && !buffer.trim().is_empty() {
+                        buffer.push_str("\n\n");
+                    }
 
                     while let Some(block) = take_sse_block(&mut buffer) {
                         if block.trim().is_empty() {
@@ -640,6 +648,17 @@ mod tests {
         assert!(output.contains("\"type\":\"text_delta\""));
         assert!(output.contains("\"text\":\"Hel\""));
         assert!(output.contains("\"text\":\"lo\""));
+        assert!(output.contains("\"stop_reason\":\"end_turn\""));
+        assert!(output.contains("event: message_stop"));
+    }
+
+    #[test]
+    fn flushes_final_sse_chunk_without_trailing_blank_line() {
+        let output = collect_stream_output(vec![
+            "data: {\"responseId\":\"resp_eof\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"text\":\"Hello\"}]}}],\"usageMetadata\":{\"promptTokenCount\":10,\"totalTokenCount\":15}}",
+        ]);
+
+        assert!(output.contains("\"text\":\"Hello\""));
         assert!(output.contains("\"stop_reason\":\"end_turn\""));
         assert!(output.contains("event: message_stop"));
     }

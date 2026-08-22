@@ -3653,8 +3653,10 @@ impl ProxyService {
                             auth, config_str,
                         )
                         .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
-                        crate::codex_config::write_codex_live_config_atomic(Some(&live_config))
-                            .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
+                        crate::proxy::model_routing::with_live_codex_toml_lock(|| {
+                            crate::codex_config::write_codex_live_config_atomic(Some(&live_config))
+                        })
+                        .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
                         return Ok(());
                     }
                 }
@@ -3742,8 +3744,10 @@ impl ProxyService {
                 )
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?
             };
-            crate::codex_config::write_codex_live_config_atomic(Some(&live_config))
-                .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
+            crate::proxy::model_routing::with_live_codex_toml_lock(|| {
+                crate::codex_config::write_codex_live_config_atomic(Some(&live_config))
+            })
+            .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
             return self.write_merged_codex_routing_catalog_from_db_for(
                 provider.map(|provider| provider.id.as_str()),
             );
@@ -9580,8 +9584,10 @@ base_url = "https://third.example/v1"
         )
         .await
         .expect("seed live backup");
-        crate::codex_config::write_codex_live_config_atomic(Some("model_provider = \"any\"\n"))
-            .expect("seed logged-out live config");
+        crate::proxy::model_routing::with_live_codex_toml_lock(|| {
+            crate::codex_config::write_codex_live_config_atomic(Some("model_provider = \"any\"\n"))
+        })
+        .expect("seed logged-out live config");
 
         service
             .restore_live_config_for_app_with_fallback(&AppType::Codex)
@@ -9627,8 +9633,10 @@ base_url = "https://third.example/v1"
         )
         .await
         .expect("seed live backup");
-        crate::codex_config::write_codex_live_config_atomic(Some("model = \"gpt-5.4\"\n"))
-            .expect("seed config without auth");
+        crate::proxy::model_routing::with_live_codex_toml_lock(|| {
+            crate::codex_config::write_codex_live_config_atomic(Some("model = \"gpt-5.4\"\n"))
+        })
+        .expect("seed config without auth");
 
         service
             .restore_live_config_for_app_with_fallback(&AppType::Codex)

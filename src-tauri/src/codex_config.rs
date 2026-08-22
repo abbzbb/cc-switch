@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::config::{
-    atomic_write, delete_file, get_home_dir, path_is_within, read_json_file,
-    sanitize_provider_name, write_json_file, write_text_file,
+    atomic_write, atomic_write_private, delete_file, get_home_dir, path_is_within, read_json_file,
+    sanitize_provider_name, write_json_file, write_json_file_private, write_text_file,
 };
 use crate::error::AppError;
 use crate::model_capabilities::{image_input_capability_from_modalities, ImageInputCapability};
@@ -164,12 +164,20 @@ impl CodexLiveFileState {
     fn restore(&self) -> Result<(), AppError> {
         match self.contents.as_deref() {
             Some(contents) => {
-                atomic_write(&self.path, contents)?;
-                #[cfg(unix)]
-                if let Some(mode) = self.mode {
-                    use std::os::unix::fs::PermissionsExt;
-                    fs::set_permissions(&self.path, fs::Permissions::from_mode(mode))
-                        .map_err(|error| AppError::io(&self.path, error))?;
+                let is_auth_json = self
+                    .path
+                    .file_name()
+                    .is_some_and(|name| name == "auth.json");
+                if is_auth_json {
+                    atomic_write_private(&self.path, contents)?;
+                } else {
+                    atomic_write(&self.path, contents)?;
+                    #[cfg(unix)]
+                    if let Some(mode) = self.mode {
+                        use std::os::unix::fs::PermissionsExt;
+                        fs::set_permissions(&self.path, fs::Permissions::from_mode(mode))
+                            .map_err(|error| AppError::io(&self.path, error))?;
+                    }
                 }
                 Ok(())
             }
@@ -722,7 +730,7 @@ pub fn sync_codex_managed_oauth_live_auth_after_refresh(
     let was_recorded_managed = marker_path.exists()
         && codex_auth_matches_recorded_managed_oauth(&current_auth, account_id)?;
 
-    write_json_file(&auth_path, refreshed_auth)?;
+    write_json_file_private(&auth_path, refreshed_auth)?;
     if was_recorded_managed {
         record_codex_managed_oauth_live_auth(refreshed_auth)?;
     }
@@ -802,13 +810,13 @@ pub fn write_codex_live_atomic(
     }
 
     // 第一步：写 auth.json
-    write_json_file(&auth_path, auth)?;
+    write_json_file_private(&auth_path, auth)?;
 
     // 第二步：写 config.toml（失败则回滚 auth.json）
     if let Err(e) = write_text_file(&config_path, &cfg_text) {
         // 回滚 auth.json
         if let Some(bytes) = old_auth {
-            let _ = atomic_write(&auth_path, &bytes);
+            let _ = atomic_write_private(&auth_path, &bytes);
         } else {
             let _ = delete_file(&auth_path);
         }
@@ -3192,7 +3200,8 @@ mod tests {
             "refresh-r1",
             "2026-08-06T00:00:01Z",
         );
-        crate::config::write_json_file(&get_codex_auth_path(), &auth).expect("seed live auth R1");
+        crate::config::write_json_file_private(&get_codex_auth_path(), &auth)
+            .expect("seed live auth R1");
         crate::config::write_text_file(
             &get_codex_config_path(),
             "# cas-guard-sentinel\nmodel = \"gpt-5.5\"\nmodel_catalog_json = \"cc-switch-model-catalog.json\"\n",

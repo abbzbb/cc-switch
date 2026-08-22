@@ -64,4 +64,64 @@ describe("useApiKeyState", () => {
     });
     expect(cloudProviderConfigChange).toHaveBeenLastCalledWith(initialConfig);
   });
+
+  it("writes API key into the latest config without depending on apiKey in the sync effect", () => {
+    const onConfigChange = vi.fn();
+    let config = JSON.stringify(
+      { env: { ANTHROPIC_AUTH_TOKEN: "old", ANTHROPIC_BASE_URL: "https://x" } },
+      null,
+      2,
+    );
+
+    const { result, rerender } = renderHook(
+      ({ initialConfig }: { initialConfig: string }) =>
+        useApiKeyState({
+          initialConfig,
+          onConfigChange: (next) => {
+            config = next;
+            onConfigChange(next);
+          },
+          selectedPresetId: null,
+          category: "custom",
+          appType: "claude",
+        }),
+      { initialProps: { initialConfig: config } },
+    );
+
+    expect(result.current.apiKey).toBe("old");
+
+    act(() => {
+      result.current.handleApiKeyChange("sk-new");
+    });
+
+    const written = JSON.parse(onConfigChange.mock.calls.at(-1)?.[0]);
+    expect(written.env.ANTHROPIC_AUTH_TOKEN).toBe("sk-new");
+    expect(written.env.ANTHROPIC_BASE_URL).toBe("https://x");
+
+    rerender({ initialConfig: config });
+    expect(result.current.apiKey).toBe("sk-new");
+  });
+
+  it("syncs the input from external JSON without looping on apiKey", () => {
+    const onConfigChange = vi.fn();
+    const first = JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: "a" } });
+    const { result, rerender } = renderHook(
+      ({ initialConfig }: { initialConfig: string }) =>
+        useApiKeyState({
+          initialConfig,
+          onConfigChange,
+          selectedPresetId: null,
+          category: "custom",
+          appType: "claude",
+        }),
+      { initialProps: { initialConfig: first } },
+    );
+
+    const second = JSON.stringify({
+      env: { ANTHROPIC_AUTH_TOKEN: "b", extra: true },
+    });
+    rerender({ initialConfig: second });
+    expect(result.current.apiKey).toBe("b");
+    expect(onConfigChange).not.toHaveBeenCalled();
+  });
 });

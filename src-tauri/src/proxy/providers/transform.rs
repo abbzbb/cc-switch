@@ -386,24 +386,40 @@ fn convert_message_to_openai(
         // reasoning_parts: 仅在兼容 DeepSeek/MiMo thinking tool-call 路径时
         // 生成 reasoning_content，通用 OpenAI-compatible 路径不发送该非标准字段。
         let mut reasoning_parts = Vec::new();
+        let mut had_non_thinking_content = false;
 
         for block in blocks {
             let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
             match block_type {
                 "text" => {
+                    had_non_thinking_content = true;
                     if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
                         content_parts.push(json!({"type": "text", "text": text}));
                     }
                 }
                 "image" => {
+                    had_non_thinking_content = true;
                     if let Some(image) =
                         chat_media_part_from_tool_part(block, ToolMediaScope::ImagesOnly)
                     {
                         content_parts.push(image);
                     }
                 }
+                "document" => {
+                    had_non_thinking_content = true;
+                    if let Some(part) = anthropic_document_to_chat_part(block) {
+                        content_parts.push(part);
+                    } else {
+                        let filename = anthropic_document_filename(block);
+                        content_parts.push(json!({
+                            "type": "text",
+                            "text": format!("[document: {filename}]")
+                        }));
+                    }
+                }
                 "tool_use" => {
+                    had_non_thinking_content = true;
                     let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("");
                     let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
                     let input = block.get("input").cloned().unwrap_or(json!({}));
@@ -504,6 +520,12 @@ fn convert_message_to_openai(
             }
 
             result.push(msg);
+        } else if had_non_thinking_content {
+            // Keep the Anthropic turn even when every image/document mapping
+            // produced no Chat part (e.g. a failed image plus a document that
+            // somehow still left content_parts empty). Dropping the role
+            // message would delete the turn from the upstream prompt.
+            result.push(json!({"role": role, "content": Value::Null}));
         }
 
         return Ok(result);
@@ -512,6 +534,64 @@ fn convert_message_to_openai(
     // 其他情况直接透传
     result.push(json!({"role": role, "content": content}));
     Ok(result)
+}
+
+fn anthropic_document_filename(block: &Value) -> &str {
+    block
+        .get("title")
+        .or_else(|| block.get("filename"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("document.pdf")
+}
+
+/// Map an Anthropic `document` block to a Chat Completions file/image part.
+///
+/// Base64 PDFs become `type: file`. Image media types reuse `image_url`.
+/// URL sources (no Chat file_url equivalent) fall back to a text mention.
+fn anthropic_document_to_chat_part(block: &Value) -> Option<Value> {
+    let source = block.get("source")?;
+    let filename = anthropic_document_filename(block);
+
+    match source.get("type").and_then(Value::as_str) {
+        Some("base64") => {
+            let data = source.get("data").and_then(Value::as_str)?;
+            if data.is_empty() {
+                return None;
+            }
+            let media_type = source
+                .get("media_type")
+                .and_then(Value::as_str)
+                .unwrap_or("application/pdf");
+            if media_type.starts_with("image/") {
+                Some(json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{media_type};base64,{data}")
+                    }
+                }))
+            } else {
+                Some(json!({
+                    "type": "file",
+                    "file": {
+                        "filename": filename,
+                        "file_data": format!("data:{media_type};base64,{data}")
+                    }
+                }))
+            }
+        }
+        Some("url") => {
+            let url = source
+                .get("url")
+                .and_then(Value::as_str)
+                .filter(|url| !url.is_empty())?;
+            Some(json!({
+                "type": "text",
+                "text": format!("[document: {filename}]({url})")
+            }))
+        }
+        _ => None,
+    }
 }
 
 /// 清理工具参数的 JSON schema，并为根 schema 补齐 OpenAI 要求的 object 类型。
@@ -1308,6 +1388,81 @@ mod tests {
         assert!(result["messages"][0]["content"][0]
             .get("prompt_cache_breakpoint")
             .is_none());
+    }
+
+    #[test]
+    fn test_anthropic_to_openai_maps_document_pdf() {
+        let input = json!({
+            "model": "claude-3-opus",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "document",
+                    "title": "trace.pdf",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": "JVBERi0="
+                    }
+                }]
+            }]
+        });
+
+        let result = anthropic_to_openai(input).unwrap();
+        let part = &result["messages"][0]["content"][0];
+        assert_eq!(result["messages"][0]["role"], "user");
+        assert_eq!(part["type"], "file");
+        assert_eq!(part["file"]["filename"], "trace.pdf");
+        assert_eq!(
+            part["file"]["file_data"],
+            "data:application/pdf;base64,JVBERi0="
+        );
+    }
+
+    #[test]
+    fn test_anthropic_to_openai_keeps_document_only_turn_with_url_fallback() {
+        let input = json!({
+            "model": "claude-3-opus",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "document",
+                    "title": "manual.pdf",
+                    "source": {
+                        "type": "url",
+                        "url": "https://example.com/manual.pdf"
+                    }
+                }]
+            }]
+        });
+
+        let result = anthropic_to_openai(input).unwrap();
+        assert_eq!(result["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(result["messages"][0]["role"], "user");
+        assert_eq!(
+            result["messages"][0]["content"],
+            "[document: manual.pdf](https://example.com/manual.pdf)"
+        );
+    }
+
+    #[test]
+    fn test_anthropic_to_openai_does_not_drop_unmapped_document_turn() {
+        let input = json!({
+            "model": "claude-3-opus",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "document",
+                    "title": "notes.pdf",
+                    "source": { "type": "file_id", "file_id": "file_123" }
+                }]
+            }]
+        });
+
+        let result = anthropic_to_openai(input).unwrap();
+        assert_eq!(result["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(result["messages"][0]["role"], "user");
+        assert_eq!(result["messages"][0]["content"], "[document: notes.pdf]");
     }
 
     #[test]

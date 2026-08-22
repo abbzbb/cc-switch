@@ -11,17 +11,17 @@ use serde_json::Value;
 use crate::error::AppError;
 use crate::services::webdav::{
     auth_from_credentials, build_remote_url, ensure_remote_directories, get_bytes, head_etag,
-    path_segments, put_bytes, test_connection, WebDavAuth,
+    path_segments, put_bytes, test_connection, PutPrecondition, WebDavAuth,
 };
 use crate::settings::{update_webdav_sync_status, WebDavSyncSettings, WebDavSyncStatus};
 
 pub(crate) use super::sync_protocol::run_with_sync_lock;
 use super::sync_protocol::{
     apply_snapshot, build_local_snapshot, effective_db_compat_version, localized,
-    persist_sync_success_best_effort, sha256_hex, validate_artifact_size_limit,
-    validate_manifest_compat, verify_artifact, ArtifactMeta, RemoteLayout, SyncManifest,
-    DB_COMPAT_VERSION, MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES, PROTOCOL_VERSION,
-    REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
+    persist_sync_success_best_effort, sha256_hex, should_allow_auto_upload,
+    validate_artifact_size_limit, validate_manifest_compat, verify_artifact, ArtifactMeta,
+    RemoteLayout, SyncManifest, DB_COMPAT_VERSION, MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES,
+    PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
 };
 
 #[cfg(test)]
@@ -50,30 +50,110 @@ pub async fn check_connection(settings: &WebDavSyncSettings) -> Result<(), AppEr
 }
 
 /// Upload local snapshot (db + skills) to remote.
+///
+/// Manual/explicit UI upload may overwrite the remote.
 pub async fn upload(
     db: &crate::database::Database,
     settings: &mut WebDavSyncSettings,
+) -> Result<Value, AppError> {
+    upload_snapshot(db, settings, false).await
+}
+
+/// Auto-sync upload: fetch the remote first and refuse to last-write-wins.
+pub async fn upload_auto(
+    db: &crate::database::Database,
+    settings: &mut WebDavSyncSettings,
+) -> Result<Value, AppError> {
+    upload_snapshot(db, settings, true).await
+}
+
+async fn upload_snapshot(
+    db: &crate::database::Database,
+    settings: &mut WebDavSyncSettings,
+    conditional: bool,
 ) -> Result<Value, AppError> {
     settings.validate()?;
     let auth = auth_for(settings);
     let dir_segs = remote_dir_segments(settings, RemoteLayout::Current);
     ensure_remote_directories(&settings.base_url, &dir_segs, &auth).await?;
 
+    let manifest_url = remote_file_url(settings, RemoteLayout::Current, REMOTE_MANIFEST)?;
+    let mut write_target_exists = false;
+    let mut if_match_etag: Option<String> = None;
+
+    if conditional {
+        // Uploads always write Current. Consult Legacy only for the
+        // download-first / conflict decision so a second device cannot seed
+        // Current and hide an existing Legacy snapshot. If-Match is sent only
+        // when Current itself exists (Legacy etags are a different URL).
+        let current = fetch_remote_snapshot(settings, &auth, RemoteLayout::Current).await?;
+        write_target_exists = current
+            .as_ref()
+            .is_some_and(|snapshot| !snapshot.manifest_bytes.is_empty());
+        let remote = if write_target_exists {
+            current
+        } else {
+            fetch_remote_snapshot(settings, &auth, RemoteLayout::Legacy).await?
+        };
+        let remote_exists = remote
+            .as_ref()
+            .is_some_and(|snapshot| !snapshot.manifest_bytes.is_empty());
+        let remote_etag = remote
+            .as_ref()
+            .and_then(|snapshot| snapshot.manifest_etag.as_deref());
+        let remote_hash = remote.as_ref().and_then(|snapshot| {
+            (!snapshot.manifest_bytes.is_empty()).then(|| sha256_hex(&snapshot.manifest_bytes))
+        });
+
+        should_allow_auto_upload(
+            settings.status.last_remote_etag.as_deref(),
+            settings.status.last_remote_manifest_hash.as_deref(),
+            remote_exists,
+            remote_etag,
+            remote_hash.as_deref(),
+        )?;
+
+        if_match_etag = settings
+            .status
+            .last_remote_etag
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+    }
+
     let snapshot = build_local_snapshot(db)?;
 
     // Upload order: artifacts first, manifest last (best-effort consistency)
     let db_url = remote_file_url(settings, RemoteLayout::Current, REMOTE_DB_SQL)?;
-    put_bytes(&db_url, &auth, snapshot.db_sql, "application/sql").await?;
+    put_bytes(
+        &db_url,
+        &auth,
+        snapshot.db_sql,
+        "application/sql",
+        PutPrecondition::None,
+    )
+    .await?;
 
     let skills_url = remote_file_url(settings, RemoteLayout::Current, REMOTE_SKILLS_ZIP)?;
-    put_bytes(&skills_url, &auth, snapshot.skills_zip, "application/zip").await?;
+    put_bytes(
+        &skills_url,
+        &auth,
+        snapshot.skills_zip,
+        "application/zip",
+        PutPrecondition::None,
+    )
+    .await?;
 
-    let manifest_url = remote_file_url(settings, RemoteLayout::Current, REMOTE_MANIFEST)?;
+    let manifest_precondition =
+        manifest_put_precondition(conditional, write_target_exists, if_match_etag.as_deref());
+
     put_bytes(
         &manifest_url,
         &auth,
         snapshot.manifest_bytes,
         "application/json",
+        manifest_precondition,
     )
     .await?;
 
@@ -294,6 +374,23 @@ fn auth_for(settings: &WebDavSyncSettings) -> WebDavAuth {
     auth_from_credentials(&settings.username, &settings.password)
 }
 
+fn manifest_put_precondition<'a>(
+    conditional: bool,
+    remote_exists: bool,
+    if_match_etag: Option<&'a str>,
+) -> PutPrecondition<'a> {
+    if !conditional {
+        PutPrecondition::None
+    } else if remote_exists {
+        match if_match_etag {
+            Some(etag) => PutPrecondition::IfMatch(etag),
+            None => PutPrecondition::None,
+        }
+    } else {
+        PutPrecondition::IfNoneMatchAny
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -320,5 +417,29 @@ mod tests {
         };
         let segs = remote_dir_segments(&settings, RemoteLayout::Legacy);
         assert_eq!(segs, vec!["cc-switch-sync", "v2", "default"]);
+    }
+
+    #[test]
+    fn manual_upload_is_unconditional() {
+        assert_eq!(
+            manifest_put_precondition(false, true, Some("etag")),
+            PutPrecondition::None
+        );
+    }
+
+    #[test]
+    fn auto_upload_sends_if_match_when_remote_exists() {
+        assert_eq!(
+            manifest_put_precondition(true, true, Some("etag")),
+            PutPrecondition::IfMatch("etag")
+        );
+    }
+
+    #[test]
+    fn auto_upload_sends_if_none_match_when_creating() {
+        assert_eq!(
+            manifest_put_precondition(true, false, None),
+            PutPrecondition::IfNoneMatchAny
+        );
     }
 }

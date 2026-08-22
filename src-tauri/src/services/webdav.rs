@@ -221,30 +221,109 @@ pub async fn ensure_remote_directories(
     Ok(())
 }
 
+/// Conditional PUT headers for WebDAV uploads.
+///
+/// Auto-sync uses `IfMatch` / `IfNoneMatchAny` so a second device cannot
+/// last-write-wins. Manual upload keeps `None` (explicit overwrite).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PutPrecondition<'a> {
+    #[default]
+    None,
+    /// `If-Match: <etag>` — update only if the remote entity is unchanged.
+    IfMatch(&'a str),
+    /// `If-None-Match: *` — create only if the remote entity does not exist.
+    IfNoneMatchAny,
+}
+
+/// Quote an ETag for `If-Match` if the stored value is bare.
+pub(crate) fn format_etag_header(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "*" {
+        return trimmed.to_string();
+    }
+    if trimmed.starts_with('"') || trimmed.starts_with("W/\"") || trimmed.starts_with("w/\"") {
+        return trimmed.to_string();
+    }
+    if let Some(rest) = trimmed
+        .strip_prefix("W/")
+        .or_else(|| trimmed.strip_prefix("w/"))
+    {
+        let inner = rest.trim().trim_matches('"');
+        return format!("W/\"{inner}\"");
+    }
+    format!("\"{trimmed}\"")
+}
+
+fn put_precondition_headers(precondition: PutPrecondition<'_>) -> Vec<(&'static str, String)> {
+    match precondition {
+        PutPrecondition::None => Vec::new(),
+        PutPrecondition::IfMatch(etag) => {
+            let trimmed = etag.trim();
+            if trimmed.is_empty() {
+                Vec::new()
+            } else {
+                vec![("If-Match", format_etag_header(trimmed))]
+            }
+        }
+        PutPrecondition::IfNoneMatchAny => vec![("If-None-Match", "*".to_string())],
+    }
+}
+
+fn put_precondition_failed_error() -> AppError {
+    AppError::localized(
+        "webdav.put.precondition_failed",
+        "远端数据已被其他设备更新（412），未覆盖远端。",
+        "Remote data was updated by another client (412 Precondition Failed); remote was not overwritten.",
+    )
+}
+
+fn map_put_status(status: StatusCode, url: &str) -> AppError {
+    if status == StatusCode::PRECONDITION_FAILED {
+        return put_precondition_failed_error();
+    }
+    webdav_status_error("PUT", status, url)
+}
+
 /// PUT bytes to a remote WebDAV URL.
+///
+/// Pass [`PutPrecondition::IfMatch`] / [`PutPrecondition::IfNoneMatchAny`] for
+/// auto-sync. A 412 Precondition Failed is a conflict and is not retried.
 pub async fn put_bytes(
     url: &str,
     auth: &WebDavAuth,
     bytes: Vec<u8>,
     content_type: &str,
+    precondition: PutPrecondition<'_>,
 ) -> Result<(), AppError> {
     let client = http_client::get();
-    let resp = apply_auth(
+    let mut builder = apply_auth(
         client
             .put(url)
             .header("Content-Type", content_type)
             .body(bytes)
             .timeout(Duration::from_secs(TRANSFER_TIMEOUT_SECS)),
         auth,
-    )
-    .send()
-    .await
-    .map_err(|e| webdav_transport_error("webdav.put_failed", "PUT 请求", "PUT request", url, &e))?;
+    );
+
+    for (name, value) in put_precondition_headers(precondition) {
+        let header_value = reqwest::header::HeaderValue::from_str(&value).map_err(|_| {
+            AppError::localized(
+                "webdav.put.invalid_etag",
+                "无效的 ETag 值，无法设置条件 PUT 头",
+                "Invalid ETag value; cannot set conditional PUT header.",
+            )
+        })?;
+        builder = builder.header(name, header_value);
+    }
+
+    let resp = builder.send().await.map_err(|e| {
+        webdav_transport_error("webdav.put_failed", "PUT 请求", "PUT request", url, &e)
+    })?;
 
     if resp.status().is_success() {
         return Ok(());
     }
-    Err(webdav_status_error("PUT", resp.status(), url))
+    Err(map_put_status(resp.status(), url))
 }
 
 /// GET bytes from a remote WebDAV URL. Returns `None` on 404.
@@ -526,5 +605,52 @@ mod tests {
             err.to_string().contains("too large") || err.to_string().contains("超过"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn format_etag_header_quotes_bare_etag() {
+        assert_eq!(format_etag_header("abc"), "\"abc\"");
+        assert_eq!(format_etag_header("\"abc\""), "\"abc\"");
+        assert_eq!(format_etag_header("  abc  "), "\"abc\"");
+        assert_eq!(format_etag_header("W/\"abc\""), "W/\"abc\"");
+        assert_eq!(format_etag_header("W/abc"), "W/\"abc\"");
+        assert_eq!(format_etag_header("*"), "*");
+    }
+
+    #[test]
+    fn put_precondition_headers_if_match_and_create_only() {
+        assert_eq!(
+            put_precondition_headers(PutPrecondition::IfMatch("abc")),
+            vec![("If-Match", "\"abc\"".to_string())]
+        );
+        assert_eq!(
+            put_precondition_headers(PutPrecondition::IfNoneMatchAny),
+            vec![("If-None-Match", "*".to_string())]
+        );
+        assert!(put_precondition_headers(PutPrecondition::IfMatch("  ")).is_empty());
+        assert!(put_precondition_headers(PutPrecondition::None).is_empty());
+    }
+
+    #[test]
+    fn map_put_status_treats_412_as_conflict_not_generic_overwrite() {
+        let err = map_put_status(
+            StatusCode::PRECONDITION_FAILED,
+            "https://dav.example.com/manifest.json",
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("412") || text.contains("Precondition") || text.contains("未覆盖"),
+            "unexpected error: {text}"
+        );
+        assert!(
+            !text.contains("retry") && !text.contains("重试"),
+            "412 must not be framed as a retryable overwrite: {text}"
+        );
+
+        let generic = map_put_status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "https://dav.example.com/m",
+        );
+        assert!(generic.to_string().contains("500"));
     }
 }

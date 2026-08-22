@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::app_config::AppType;
 use crate::error::AppError;
@@ -666,12 +667,34 @@ impl AppSettings {
                         path.display(),
                         err
                     );
+                    backup_corrupt_settings_file(&path);
                     Self::default()
                 }
             }
         } else {
             Self::default()
         }
+    }
+}
+
+fn backup_corrupt_settings_file(path: &std::path::Path) {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let backup_path = path.with_file_name(format!("settings.json.corrupt-{ts}"));
+    match fs::rename(path, &backup_path) {
+        Ok(()) => log::warn!("已将损坏的设置文件备份到 {}", backup_path.display()),
+        Err(rename_err) => match fs::copy(path, &backup_path) {
+            Ok(_) => log::warn!(
+                "无法重命名损坏的设置文件（{rename_err}），已复制到 {}",
+                backup_path.display()
+            ),
+            Err(copy_err) => log::error!(
+                "无法备份损坏的设置文件 {}: rename={rename_err}; copy={copy_err}",
+                path.display()
+            ),
+        },
     }
 }
 
@@ -688,29 +711,18 @@ fn save_settings_file(settings: &AppSettings) -> Result<(), AppError> {
 
     let json = serde_json::to_string_pretty(&normalized)
         .map_err(|e| AppError::JsonSerialize { source: e })?;
-    #[cfg(unix)]
-    {
-        use std::fs::OpenOptions;
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
+    crate::config::write_text_file_private(&path, &json)
+}
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|e| AppError::io(&path, e))?;
-        file.write_all(json.as_bytes())
-            .map_err(|e| AppError::io(&path, e))?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        fs::write(&path, json).map_err(|e| AppError::io(&path, e))?;
-    }
-
-    Ok(())
+fn copy_current_provider_ids(from: &AppSettings, to: &mut AppSettings) {
+    to.current_provider_claude = from.current_provider_claude.clone();
+    to.current_provider_claude_desktop = from.current_provider_claude_desktop.clone();
+    to.current_provider_codex = from.current_provider_codex.clone();
+    to.current_provider_gemini = from.current_provider_gemini.clone();
+    to.current_provider_grokbuild = from.current_provider_grokbuild.clone();
+    to.current_provider_opencode = from.current_provider_opencode.clone();
+    to.current_provider_openclaw = from.current_provider_openclaw.clone();
+    to.current_provider_hermes = from.current_provider_hermes.clone();
 }
 
 static SETTINGS_STORE: OnceLock<RwLock<AppSettings>> = OnceLock::new();
@@ -767,13 +779,27 @@ pub fn get_settings_for_frontend() -> AppSettings {
 }
 
 pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
-    new_settings.normalize_paths();
-    save_settings_file(&new_settings)?;
-
     let mut guard = settings_store().write().unwrap_or_else(|e| {
         log::warn!("设置锁已毒化，使用恢复值: {e}");
         e.into_inner()
     });
+    new_settings.normalize_paths();
+    save_settings_file(&new_settings)?;
+    *guard = new_settings;
+    Ok(())
+}
+
+/// Frontend `save_settings` path. Holds the write lock and keeps in-memory
+/// `current_provider_*` so a stale UI blob cannot roll back a successful switch.
+/// Tests and other backend writers should use [`update_settings`] (full replace).
+pub fn update_settings_from_frontend(mut new_settings: AppSettings) -> Result<(), AppError> {
+    let mut guard = settings_store().write().unwrap_or_else(|e| {
+        log::warn!("设置锁已毒化，使用恢复值: {e}");
+        e.into_inner()
+    });
+    new_settings.normalize_paths();
+    copy_current_provider_ids(&guard, &mut new_settings);
+    save_settings_file(&new_settings)?;
     *guard = new_settings;
     Ok(())
 }
@@ -1178,6 +1204,46 @@ pub fn update_s3_sync_status(status: WebDavSyncStatus) -> Result<(), AppError> {
 mod tests {
     use super::*;
     use crate::app_config::AppType;
+    use std::path::Path;
+
+    struct IsolatedHome {
+        dir: tempfile::TempDir,
+        old_test_home: Option<std::ffi::OsString>,
+        old_home: Option<std::ffi::OsString>,
+    }
+
+    impl IsolatedHome {
+        fn new() -> Self {
+            let dir = tempfile::TempDir::new().expect("tempdir");
+            let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+            let old_home = std::env::var_os("HOME");
+            std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+            std::env::set_var("HOME", dir.path());
+            Self {
+                dir,
+                old_test_home,
+                old_home,
+            }
+        }
+
+        fn path(&self) -> &Path {
+            self.dir.path()
+        }
+    }
+
+    impl Drop for IsolatedHome {
+        fn drop(&mut self) {
+            let _ = mutate_settings(|settings| *settings = AppSettings::default());
+            match &self.old_test_home {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+            match &self.old_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
 
     #[test]
     fn visible_apps_old_settings_default_claude_desktop_visible() {
@@ -1217,5 +1283,109 @@ mod tests {
             resolve_override_path(r"~\pi\agent"),
             home.join("pi").join("agent")
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_from_file_backs_up_corrupt_settings_and_returns_default() {
+        let home = IsolatedHome::new();
+        let dir = home.path().join(".cc-switch");
+        fs::create_dir_all(&dir).expect("create app config dir");
+        let path = dir.join("settings.json");
+        let corrupt = "{ not json";
+        fs::write(&path, corrupt).expect("seed corrupt settings");
+
+        let loaded = AppSettings::load_from_file();
+        assert_eq!(loaded.show_in_tray, AppSettings::default().show_in_tray);
+        assert!(loaded.current_provider_claude.is_none());
+
+        let backups: Vec<_> = fs::read_dir(&dir)
+            .expect("read app config dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|candidate| {
+                candidate
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("settings.json.corrupt-"))
+            })
+            .collect();
+        assert_eq!(
+            backups.len(),
+            1,
+            "expected one corrupt backup, got {backups:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&backups[0]).expect("read backup"),
+            corrupt
+        );
+        assert!(
+            !path.exists(),
+            "corrupt original must be renamed aside before Default is used"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn save_settings_file_replaces_atomically_and_uses_private_mode() {
+        let home = IsolatedHome::new();
+        let settings = AppSettings {
+            language: Some("zh".to_string()),
+            current_provider_claude: Some("keep-me".to_string()),
+            ..Default::default()
+        };
+        save_settings_file(&settings).expect("save settings");
+
+        let path = home.path().join(".cc-switch").join("settings.json");
+        let loaded: AppSettings =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read settings"))
+                .expect("parse settings");
+        assert_eq!(loaded.language.as_deref(), Some("zh"));
+        assert_eq!(loaded.current_provider_claude.as_deref(), Some("keep-me"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        let leftovers: Vec<_> = fs::read_dir(path.parent().expect("parent"))
+            .expect("read dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temporary files remain: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn update_settings_preserves_in_memory_current_provider_ids() {
+        let home = IsolatedHome::new();
+        set_current_provider(&AppType::Claude, Some("live-id")).expect("seed current provider");
+
+        let mut stale = AppSettings::default();
+        stale.current_provider_claude = Some("stale-id".to_string());
+        stale.language = Some("en".to_string());
+        update_settings_from_frontend(stale).expect("update settings from frontend");
+
+        assert_eq!(
+            get_current_provider(&AppType::Claude).as_deref(),
+            Some("live-id"),
+            "in-memory current provider must win over a stale frontend blob"
+        );
+        assert_eq!(get_settings().language.as_deref(), Some("en"));
+
+        let path = home.path().join(".cc-switch").join("settings.json");
+        let saved: AppSettings =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read saved settings"))
+                .expect("parse saved settings");
+        assert_eq!(saved.current_provider_claude.as_deref(), Some("live-id"));
+        assert_eq!(saved.language.as_deref(), Some("en"));
+
+        let _ = update_settings(AppSettings::default());
     }
 }

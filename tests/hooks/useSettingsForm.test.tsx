@@ -53,6 +53,7 @@ describe("useSettingsForm Hook", () => {
     expect(settings.enableClaudePluginIntegration).toBe(false);
     expect(settings.claudeConfigDir).toBe("/Users/demo");
     expect(settings.codexConfigDir).toBeUndefined();
+    expect(settings.hermesConfigDir).toBeUndefined();
     expect(settings.language).toBe("en");
     expect(result.current.initialLanguage).toBe("en");
     expect(changeLanguageSpy).toHaveBeenCalledWith("en");
@@ -214,5 +215,115 @@ describe("useSettingsForm Hook", () => {
     });
 
     expect(changeLanguageSpy).not.toHaveBeenCalled();
+  });
+
+  it("sanitizes hermesConfigDir like the other app directories", async () => {
+    useSettingsQueryMock.mockReturnValue({
+      data: {
+        showInTray: true,
+        minimizeToTrayOnClose: true,
+        enableClaudePluginIntegration: false,
+        hermesConfigDir: "  /Users/demo/.hermes  ",
+        language: "zh",
+      },
+      isLoading: false,
+    });
+
+    const { result } = renderHook(() => useSettingsForm());
+
+    await waitFor(() => {
+      expect(result.current.settings?.hermesConfigDir).toBe(
+        "/Users/demo/.hermes",
+      );
+    });
+  });
+
+  it("keeps in-progress directory edits when only sync status changes", async () => {
+    const baseData = {
+      showInTray: true,
+      minimizeToTrayOnClose: true,
+      enableClaudePluginIntegration: false,
+      claudeConfigDir: "/origin",
+      language: "zh" as const,
+      webdavSync: {
+        enabled: true,
+        status: { lastError: null as string | null },
+      },
+    };
+    useSettingsQueryMock.mockReturnValue({
+      data: baseData,
+      isLoading: false,
+    });
+
+    const { result, rerender } = renderHook(() => useSettingsForm());
+
+    await waitFor(() => {
+      expect(result.current.settings).not.toBeNull();
+    });
+
+    act(() => {
+      result.current.updateSettings({ claudeConfigDir: "/edited" });
+    });
+    expect(result.current.settings?.claudeConfigDir).toBe("/edited");
+
+    useSettingsQueryMock.mockReturnValue({
+      data: {
+        ...baseData,
+        webdavSync: {
+          enabled: true,
+          status: { lastError: "network timeout" },
+        },
+      },
+      isLoading: false,
+    });
+    rerender();
+
+    await waitFor(() => {
+      expect(result.current.settings?.webdavSync?.status?.lastError).toBe(
+        "network timeout",
+      );
+    });
+    expect(result.current.settings?.claudeConfigDir).toBe("/edited");
+    expect(result.current.settings?.language).toBe("zh");
+  });
+
+  it("replaces dirty local state when non-status server fields change", async () => {
+    useSettingsQueryMock.mockReturnValue({
+      data: {
+        showInTray: true,
+        minimizeToTrayOnClose: true,
+        enableClaudePluginIntegration: false,
+        claudeConfigDir: "/origin",
+        language: "zh",
+      },
+      isLoading: false,
+    });
+
+    const { result, rerender } = renderHook(() => useSettingsForm());
+
+    await waitFor(() => {
+      expect(result.current.settings).not.toBeNull();
+    });
+
+    act(() => {
+      result.current.updateSettings({ claudeConfigDir: "/edited" });
+    });
+
+    useSettingsQueryMock.mockReturnValue({
+      data: {
+        showInTray: true,
+        minimizeToTrayOnClose: true,
+        enableClaudePluginIntegration: false,
+        claudeConfigDir: "/imported",
+        language: "en",
+      },
+      isLoading: false,
+    });
+    rerender();
+
+    await waitFor(() => {
+      expect(result.current.settings?.claudeConfigDir).toBe("/imported");
+    });
+    expect(result.current.settings?.language).toBe("en");
   });
 });

@@ -1,6 +1,7 @@
 use rquickjs::{Context, Function, Runtime};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use url::{Host, Url};
 
 use crate::error::AppError;
@@ -14,6 +15,7 @@ pub async fn execute_usage_script(
     access_token: Option<&str>,
     user_id: Option<&str>,
     template_type: Option<&str>,
+    restrict_private_hosts: bool,
 ) -> Result<Value, AppError> {
     // 检测是否为自定义模板模式
     // 优先使用前端传递的 template_type
@@ -25,8 +27,10 @@ pub async fn execute_usage_script(
 
     // 2. 验证 base_url 的安全性（仅当提供了 base_url 时）
     // 自定义模板模式下，用户可能不使用模板变量，而是直接在脚本中写完整 URL
-    if should_validate_base_url(base_url, is_custom_template) {
-        validate_base_url(base_url)?;
+    if restrict_private_hosts && !base_url.is_empty() {
+        validate_base_url(base_url, true)?;
+    } else if should_validate_base_url(base_url, is_custom_template) {
+        validate_base_url(base_url, false)?;
     }
 
     // 3. 在独立作用域中提取 request 配置（确保 Runtime/Context 在 await 前释放）
@@ -134,8 +138,13 @@ pub async fn execute_usage_script(
         )
     })?;
 
-    // 5. 验证请求 URL（HTTPS 强制 + 同源检查）
-    validate_request_url(&request.url, base_url, is_custom_template)?;
+    // 5. 验证请求 URL（HTTPS 强制 + 同源检查；不可信来源额外拒绝私有地址）
+    validate_request_url(
+        &request.url,
+        base_url,
+        is_custom_template,
+        restrict_private_hosts,
+    )?;
 
     // 6. 发送 HTTP 请求
     let response_data = send_http_request(&request, timeout_secs).await?;
@@ -444,7 +453,7 @@ fn build_script_with_vars(
 }
 
 /// 验证 base_url 的基本安全性
-fn validate_base_url(base_url: &str) -> Result<(), AppError> {
+fn validate_base_url(base_url: &str, restrict_private_hosts: bool) -> Result<(), AppError> {
     if base_url.is_empty() {
         return Err(AppError::localized(
             "usage_script.base_url_empty",
@@ -464,8 +473,23 @@ fn validate_base_url(base_url: &str) -> Result<(), AppError> {
 
     let is_loopback = is_loopback_host(&parsed_url);
 
-    // 必须是 HTTPS（允许 localhost 用于开发）
-    if parsed_url.scheme() != "https" && !is_loopback {
+    if restrict_private_hosts {
+        if parsed_url.scheme() != "https" {
+            return Err(AppError::localized(
+                "usage_script.base_url_https_required",
+                "不可信用量脚本的 base_url 必须使用 HTTPS 协议",
+                "Untrusted usage script base_url must use HTTPS",
+            ));
+        }
+        if host_is_restricted(&parsed_url) {
+            return Err(AppError::localized(
+                "usage_script.base_url_private_host_forbidden",
+                "不可信用量脚本不允许使用回环、私有或元数据地址",
+                "Untrusted usage scripts cannot use loopback, private, or metadata hosts",
+            ));
+        }
+    } else if parsed_url.scheme() != "https" && !is_loopback {
+        // 必须是 HTTPS（允许 localhost 用于开发）
         return Err(AppError::localized(
             "usage_script.base_url_https_required",
             "base_url 必须使用 HTTPS 协议（localhost 除外）",
@@ -503,6 +527,7 @@ fn validate_request_url(
     request_url: &str,
     base_url: &str,
     is_custom_template: bool,
+    restrict_private_hosts: bool,
 ) -> Result<(), AppError> {
     // 解析请求 URL
     let parsed_request = Url::parse(request_url).map_err(|e| {
@@ -515,9 +540,24 @@ fn validate_request_url(
 
     let is_request_loopback = is_loopback_host(&parsed_request);
 
-    // 必须使用 HTTPS（允许 localhost 用于开发）
-    // 自定义模板模式下，允许用户自行决定是否使用 HTTP（用户需自行承担安全风险）
-    if !is_custom_template && parsed_request.scheme() != "https" && !is_request_loopback {
+    if restrict_private_hosts {
+        if parsed_request.scheme() != "https" {
+            return Err(AppError::localized(
+                "usage_script.request_https_required",
+                "不可信用量脚本的请求 URL 必须使用 HTTPS 协议",
+                "Untrusted usage script request URL must use HTTPS",
+            ));
+        }
+        if host_is_restricted(&parsed_request) {
+            return Err(AppError::localized(
+                "usage_script.request_private_host_forbidden",
+                "不可信用量脚本不允许访问回环、私有或元数据地址",
+                "Untrusted usage scripts cannot target loopback, private, or metadata hosts",
+            ));
+        }
+    } else if !is_custom_template && parsed_request.scheme() != "https" && !is_request_loopback {
+        // 必须使用 HTTPS（允许 localhost 用于开发）
+        // 自定义模板模式下，允许用户自行决定是否使用 HTTP（用户需自行承担安全风险）
         return Err(AppError::localized(
             "usage_script.request_https_required",
             "请求 URL 必须使用 HTTPS 协议（localhost 除外）",
@@ -579,6 +619,14 @@ fn validate_request_url(
                 ));
             }
         }
+
+        if restrict_private_hosts && host_is_restricted(&parsed_base) {
+            return Err(AppError::localized(
+                "usage_script.base_url_private_host_forbidden",
+                "不可信用量脚本不允许使用回环、私有或元数据地址",
+                "Untrusted usage scripts cannot use loopback, private, or metadata hosts",
+            ));
+        }
     }
 
     Ok(())
@@ -594,6 +642,77 @@ fn is_loopback_host(url: &Url) -> bool {
     }
 }
 
+/// Loopback, RFC1918, link-local, CGNAT, metadata, and similar non-public hosts.
+fn host_is_restricted(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Domain(domain)) => domain_is_restricted(domain),
+        Some(Host::Ipv4(ip)) => ipv4_is_restricted(ip),
+        Some(Host::Ipv6(ip)) => ipv6_is_restricted(ip),
+        None => true,
+    }
+}
+
+fn domain_is_restricted(domain: &str) -> bool {
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+    if domain.is_empty() {
+        return true;
+    }
+    if domain == "localhost" || domain.ends_with(".localhost") {
+        return true;
+    }
+    if domain == "local" || domain.ends_with(".local") {
+        return true;
+    }
+    if domain == "metadata"
+        || domain == "metadata.google.internal"
+        || domain.ends_with(".metadata.google.internal")
+    {
+        return true;
+    }
+    if let Ok(ip) = domain.parse::<IpAddr>() {
+        return ip_is_restricted(ip);
+    }
+    false
+}
+
+fn ip_is_restricted(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => ipv4_is_restricted(v4),
+        IpAddr::V6(v6) => ipv6_is_restricted(v6),
+    }
+}
+
+fn ipv4_is_restricted(v4: Ipv4Addr) -> bool {
+    let octets = v4.octets();
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_documentation()
+        || v4.is_multicast()
+        || octets[0] == 0
+        || (octets[0] == 100 && octets[1] & 0xC0 == 64)
+}
+
+fn ipv6_is_restricted(v6: Ipv6Addr) -> bool {
+    if v6.is_loopback()
+        || v6.is_unspecified()
+        || v6.is_unique_local()
+        || v6.is_unicast_link_local()
+        || v6.is_multicast()
+    {
+        return true;
+    }
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        return ipv4_is_restricted(v4);
+    }
+    if let Some(v4) = v6.to_ipv4() {
+        return ipv4_is_restricted(v4);
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -601,7 +720,7 @@ mod tests {
     #[test]
     fn test_https_bypass_prevention() {
         // 非本地域名的 HTTP 应该被拒绝
-        let result = validate_base_url("http://127.0.0.1.evil.com/api");
+        let result = validate_base_url("http://127.0.0.1.evil.com/api", false);
         assert!(
             result.is_err(),
             "Should reject HTTP for non-localhost domains"
@@ -619,6 +738,7 @@ mod tests {
             "http://10.37.192.156:18344/user/balance",
             "http://10.37.192.156:8090/anthropic",
             true,
+            false,
         );
         assert!(
             result.is_ok(),
@@ -667,7 +787,7 @@ mod tests {
         ];
 
         for (base_url, request_url, should_match) in test_cases {
-            let result = validate_request_url(request_url, base_url, false);
+            let result = validate_request_url(request_url, base_url, false, false);
 
             if should_match {
                 assert!(
@@ -712,6 +832,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
             ));
         let elapsed = start.elapsed();
 
@@ -723,6 +844,54 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(15),
             "interruption took too long: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn untrusted_script_rejects_loopback_and_private_hosts() {
+        let cases = [
+            "http://127.0.0.1/usage",
+            "https://127.0.0.1/usage",
+            "https://localhost/usage",
+            "https://[::1]/usage",
+            "https://10.0.0.1/usage",
+            "https://172.16.1.2/usage",
+            "https://192.168.1.1/usage",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://metadata.google.internal/",
+        ];
+
+        for url in cases {
+            let result = validate_request_url(url, "", false, true);
+            assert!(
+                result.is_err(),
+                "deeplink-untrusted script must reject {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn untrusted_script_allows_public_https() {
+        let result = validate_request_url(
+            "https://api.example.com/v1/usage",
+            "https://api.example.com",
+            false,
+            true,
+        );
+        assert!(
+            result.is_ok(),
+            "public https must be allowed for untrusted scripts: {}",
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn trusted_in_app_script_still_allows_localhost_http() {
+        let result = validate_request_url("http://127.0.0.1:8080/usage", "", false, false);
+        assert!(
+            result.is_ok(),
+            "manually configured scripts keep localhost-for-dev: {}",
+            result.unwrap_err()
         );
     }
 }

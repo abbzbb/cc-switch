@@ -18,6 +18,7 @@ pub(crate) async fn execute_and_format_usage_result(
     access_token: Option<&str>,
     user_id: Option<&str>,
     template_type: Option<&str>,
+    restrict_private_hosts: bool,
 ) -> Result<UsageResult, AppError> {
     match usage_script::execute_usage_script(
         script_code,
@@ -27,6 +28,7 @@ pub(crate) async fn execute_and_format_usage_result(
         access_token,
         user_id,
         template_type,
+        restrict_private_hosts,
     )
     .await
     {
@@ -128,7 +130,16 @@ pub async fn query_usage(
     app_type: AppType,
     provider_id: &str,
 ) -> Result<UsageResult, AppError> {
-    let (script_code, timeout, api_key, base_url, access_token, user_id, template_type) = {
+    let (
+        script_code,
+        timeout,
+        api_key,
+        base_url,
+        access_token,
+        user_id,
+        template_type,
+        restrict_private_hosts,
+    ) = {
         let providers = state.db.get_all_providers(app_type.as_str())?;
         let provider = providers.get(provider_id).ok_or_else(|| {
             AppError::localized(
@@ -173,6 +184,7 @@ pub async fn query_usage(
             usage_script.access_token.clone(),
             usage_script.user_id.clone(),
             usage_script.template_type.clone(),
+            usage_script.restrict_private_hosts,
         )
     };
 
@@ -184,6 +196,7 @@ pub async fn query_usage(
         access_token.as_deref(),
         user_id.as_deref(),
         template_type.as_deref(),
+        restrict_private_hosts,
     )
     .await
 }
@@ -215,6 +228,13 @@ pub async fn test_usage_script(
     // explicit values win, empty ones fall back to the provider config.
     let (api_key, base_url) = resolve_script_credentials(&app_type, provider, api_key, base_url);
 
+    let restrict_private_hosts = provider
+        .meta
+        .as_ref()
+        .and_then(|m| m.usage_script.as_ref())
+        .map(|s| s.restrict_private_hosts)
+        .unwrap_or(false);
+
     execute_and_format_usage_result(
         script_code,
         &api_key,
@@ -223,6 +243,7 @@ pub async fn test_usage_script(
         access_token,
         user_id,
         template_type,
+        restrict_private_hosts,
     )
     .await
 }

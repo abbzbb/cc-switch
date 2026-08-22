@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 #[cfg(not(target_os = "windows"))]
 use std::fs;
+#[cfg(not(target_os = "windows"))]
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -119,23 +121,30 @@ fn check_system_env(keywords: &[EnvKeyword]) -> Result<Vec<EnvConflict>, String>
     Ok(conflicts)
 }
 
+/// User-owned shell rc files that env delete/restore may rewrite.
+/// Never includes `/etc/*`.
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn user_shell_rc_files(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".bashrc"),
+        home.join(".bash_profile"),
+        home.join(".zshrc"),
+        home.join(".zprofile"),
+        home.join(".profile"),
+        home.join(".config").join("fish").join("config.fish"),
+    ]
+}
+
 /// Check shell configuration files for environment variable exports (Unix only)
 #[cfg(not(target_os = "windows"))]
 fn check_shell_configs(keywords: &[EnvKeyword]) -> Result<Vec<EnvConflict>, String> {
     let mut conflicts = Vec::new();
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let config_files = vec![
-        format!("{}/.bashrc", home),
-        format!("{}/.bash_profile", home),
-        format!("{}/.zshrc", home),
-        format!("{}/.zprofile", home),
-        format!("{}/.profile", home),
-        "/etc/profile".to_string(),
-        "/etc/bashrc".to_string(),
-    ];
+    let home = crate::config::get_home_dir();
+    let config_files = user_shell_rc_files(&home);
 
     for file_path in config_files {
+        let file_path = file_path.to_string_lossy().to_string();
         if let Ok(content) = fs::read_to_string(&file_path) {
             // Parse lines for export statements
             for (line_num, line) in content.lines().enumerate() {
@@ -175,6 +184,8 @@ fn check_shell_configs(keywords: &[EnvKeyword]) -> Result<Vec<EnvConflict>, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(target_os = "windows"))]
+    use std::path::Path;
 
     #[test]
     fn test_get_keywords() {
@@ -231,5 +242,16 @@ mod tests {
         assert!(matches_env_keyword("anthropic_base_url", &keywords));
         assert!(!matches_env_keyword("MY_ANTHROPIC_API_KEY", &keywords));
         assert!(!matches_env_keyword("NOT_ANTHROPIC", &keywords));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn user_shell_rc_files_never_include_etc() {
+        let files = user_shell_rc_files(Path::new("/home/user"));
+        assert!(files.iter().all(|p| !p.starts_with("/etc")));
+        assert!(files.iter().any(|p| p.ends_with(".bashrc")));
+        assert!(files
+            .iter()
+            .any(|p| p.ends_with(Path::new(".config/fish/config.fish"))));
     }
 }

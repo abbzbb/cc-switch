@@ -291,7 +291,11 @@ function App() {
     return target?.provider_id;
   }, [proxyStatus?.active_targets, proxyAppId]);
 
-  const { data, isLoading, refetch } = useProvidersQuery(activeApp, {
+  const {
+    data,
+    isLoading: isProvidersQueryLoading,
+    refetch,
+  } = useProvidersQuery(activeApp, {
     isProxyRunning: currentAppUsesProxy && isProxyRunning,
   });
   const { data: piCurrentState } = usePiCurrentState(activeApp === "pi");
@@ -326,6 +330,7 @@ function App() {
     deleteProvider,
     saveUsageScript,
     setAsDefaultModel,
+    isLoading: isProviderActionPending,
   } = useProviderActions(
     activeApp,
     currentAppUsesProxy && isProxyRunning,
@@ -863,6 +868,12 @@ function App() {
       duplicatedProvider.addToLive = false;
     }
 
+    try {
+      await addProvider(duplicatedProvider);
+    } catch {
+      return;
+    }
+
     if (provider.sortIndex !== undefined) {
       const updates = Object.values(providers)
         .filter(
@@ -886,12 +897,9 @@ function App() {
               defaultValue: "排序更新失败",
             }),
           );
-          return; // 如果排序更新失败，不继续添加
         }
       }
     }
-
-    await addProvider(duplicatedProvider);
   };
 
   const confirmActionMessage = useMemo(() => {
@@ -942,16 +950,9 @@ function App() {
 
   const handleImportSuccess = async () => {
     try {
-      await queryClient.invalidateQueries({
-        queryKey: ["providers"],
-        refetchType: "all",
-      });
-      await queryClient.refetchQueries({
-        queryKey: ["providers"],
-        type: "all",
-      });
+      await queryClient.invalidateQueries();
     } catch (error) {
-      console.error("[App] Failed to refresh providers after import", error);
+      console.error("[App] Failed to refresh queries after import", error);
       await refetch();
     }
     try {
@@ -1104,17 +1105,21 @@ function App() {
                       providers={providers}
                       currentProviderId={currentProviderId}
                       appId={activeApp}
-                      isLoading={isLoading}
+                      isLoading={isProvidersQueryLoading}
+                      isActionPending={isProviderActionPending}
                       isProxyRunning={currentAppUsesProxy && isProxyRunning}
                       isProxyTakeover={
                         isProxyRunning && isCurrentAppTakeoverActive
                       }
                       activeProviderId={activeProviderId}
-                      onSwitch={
-                        activeApp === "pi"
-                          ? handleEnablePiProvider
-                          : switchProvider
-                      }
+                      onSwitch={(provider) => {
+                        if (isProviderActionPending) return;
+                        if (activeApp === "pi") {
+                          void handleEnablePiProvider(provider);
+                          return;
+                        }
+                        void switchProvider(provider);
+                      }}
                       onEdit={(provider) => {
                         setEditingProvider(provider);
                       }}
@@ -1147,9 +1152,15 @@ function App() {
                       onCreate={() => setIsAddOpen(true)}
                       onSetAsDefault={
                         activeApp === "openclaw"
-                          ? setAsDefaultModel
+                          ? (provider, modelId) => {
+                              if (isProviderActionPending) return;
+                              void setAsDefaultModel(provider, modelId);
+                            }
                           : activeApp === "hermes"
-                            ? switchProvider
+                            ? (provider) => {
+                                if (isProviderActionPending) return;
+                                void switchProvider(provider);
+                              }
                             : undefined
                       }
                     />
