@@ -48,7 +48,9 @@ fn openai_stream_usage_event_filter(data: &str) -> bool {
 }
 
 pub fn codex_stream_usage_event_filter(data: &str) -> bool {
-    data.contains("\"response.completed\"") || data.contains("\"usage\"")
+    data.contains("\"response.completed\"")
+        || data.contains("\"response.incomplete\"")
+        || data.contains("\"usage\"")
 }
 
 fn gemini_stream_usage_event_filter(data: &str) -> bool {
@@ -101,11 +103,17 @@ fn codex_auto_model_extractor(events: &[Value], fallback_model: &str) -> String 
     events
         .iter()
         .find_map(|e| {
-            if e.get("type")?.as_str()? == "response.completed" {
-                e.get("response")?
-                    .get("model")?
-                    .as_str()
+            let event_type = e.get("type")?.as_str()?;
+            if event_type == "response.completed" || event_type == "response.incomplete" {
+                e.get("response")
+                    .and_then(|response| response.get("model"))
+                    .and_then(|model| model.as_str())
                     .filter(|m| !m.is_empty())
+                    .or_else(|| {
+                        e.get("model")
+                            .and_then(|model| model.as_str())
+                            .filter(|m| !m.is_empty())
+                    })
             } else {
                 None
             }

@@ -769,11 +769,17 @@ impl RequestForwarder {
                 } else {
                     body.clone()
                 };
-            if let Some(model) = self
-                .attempt_upstream_models
-                .as_ref()
-                .and_then(|models| models.get(attempt_index))
-            {
+            // Same-card retry passes `vec![provider]`, so attempt_index is 0.
+            // Combo lists are aligned with the original chain — do not rewrite
+            // onto models[0] (the first card) when retrying a later hop.
+            let rewrite_model = self.attempt_upstream_models.as_ref().and_then(|models| {
+                if providers.len() == 1 && models.len() > 1 {
+                    None
+                } else {
+                    models.get(attempt_index)
+                }
+            });
+            if let Some(model) = rewrite_model {
                 provider_body["model"] = serde_json::json!(model);
             }
 
@@ -1358,7 +1364,18 @@ impl RequestForwarder {
         // Route requests to the provider's real upstream model before applying
         // the optional Responses -> Chat/Anthropic bridge.
         if matches!(app_type, AppType::GrokBuild) {
-            super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
+            // Combo (and same-card combo retry) already put the hop's upstream
+            // id on `body.model`. Do not fall back to the card default when
+            // that id is missing from modelCatalog.
+            let pinned_combo_model = self.attempt_upstream_models.as_ref().is_some_and(|models| {
+                mapped_body
+                    .get("model")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|model| models.iter().any(|item| item == model))
+            });
+            if !pinned_combo_model {
+                super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
+            }
         }
 
         if is_copilot {
