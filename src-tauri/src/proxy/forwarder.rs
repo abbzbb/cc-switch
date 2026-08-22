@@ -507,6 +507,36 @@ impl RequestForwarder {
         })
     }
 
+    async fn note_attempt_success(
+        &self,
+        provider: &Provider,
+        app_type_str: &str,
+        used_half_open_permit: bool,
+        response_headers: Option<&http::HeaderMap>,
+    ) {
+        self.record_success_result(&provider.id, app_type_str, used_half_open_permit)
+            .await;
+        self.note_official_pool_outcome(provider, None, response_headers)
+            .await;
+        {
+            let mut current_providers = self.current_providers.write().await;
+            current_providers.insert(
+                app_type_str.to_string(),
+                (provider.id.clone(), provider.name.clone()),
+            );
+        }
+        {
+            let mut status = self.status.write().await;
+            status.success_requests += 1;
+            status.last_error = None;
+            self.maybe_promote_current_after_success(&mut status, provider, app_type_str);
+            if status.total_requests > 0 {
+                status.success_rate =
+                    (status.success_requests as f32 / status.total_requests as f32) * 100.0;
+            }
+        }
+    }
+
     async fn record_success_result(
         &self,
         provider_id: &str,
@@ -565,6 +595,9 @@ impl RequestForwarder {
             ProxyError::UpstreamError { status, .. } => *status >= 500,
             _ => false,
         };
+
+        self.note_official_pool_outcome(provider, Some(&retry_err), None)
+            .await;
 
         if is_provider_error {
             let _ = self
@@ -774,37 +807,13 @@ impl RequestForwarder {
                 Ok((response, claude_api_format, outbound_model)) => {
                     // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；
                     // HalfOpen 探测仍同步等待，保证 permit 与熔断状态及时释放。
-                    self.record_success_result(&provider.id, app_type_str, used_half_open_permit)
-                        .await;
-                    self.note_official_pool_outcome(provider, None, Some(response.headers()))
-                        .await;
-
-                    // 更新当前应用类型使用的 provider
-                    {
-                        let mut current_providers = self.current_providers.write().await;
-                        current_providers.insert(
-                            app_type_str.to_string(),
-                            (provider.id.clone(), provider.name.clone()),
-                        );
-                    }
-
-                    // 更新成功统计
-                    {
-                        let mut status = self.status.write().await;
-                        status.success_requests += 1;
-                        status.last_error = None;
-                        self.maybe_promote_current_after_success(
-                            &mut status,
-                            provider,
-                            app_type_str,
-                        );
-                        // 重新计算成功率
-                        if status.total_requests > 0 {
-                            status.success_rate = (status.success_requests as f32
-                                / status.total_requests as f32)
-                                * 100.0;
-                        }
-                    }
+                    self.note_attempt_success(
+                        provider,
+                        app_type_str,
+                        used_half_open_permit,
+                        Some(response.headers()),
+                    )
+                    .await;
 
                     return Ok(ForwardResult {
                         response,
@@ -865,37 +874,13 @@ impl RequestForwarder {
                                     log::info!(
                                         "[{app_type_str}] [Media] Unsupported-image retry succeeded"
                                     );
-                                    self.record_success_result(
-                                        &provider.id,
+                                    self.note_attempt_success(
+                                        provider,
                                         app_type_str,
                                         used_half_open_permit,
+                                        Some(response.headers()),
                                     )
                                     .await;
-
-                                    {
-                                        let mut current_providers =
-                                            self.current_providers.write().await;
-                                        current_providers.insert(
-                                            app_type_str.to_string(),
-                                            (provider.id.clone(), provider.name.clone()),
-                                        );
-                                    }
-
-                                    {
-                                        let mut status = self.status.write().await;
-                                        status.success_requests += 1;
-                                        status.last_error = None;
-                                        self.maybe_promote_current_after_success(
-                                            &mut status,
-                                            provider,
-                                            app_type_str,
-                                        );
-                                        if status.total_requests > 0 {
-                                            status.success_rate = (status.success_requests as f32
-                                                / status.total_requests as f32)
-                                                * 100.0;
-                                        }
-                                    }
 
                                     return Ok(ForwardResult {
                                         response,
@@ -997,40 +982,13 @@ impl RequestForwarder {
                                 {
                                     Ok((response, claude_api_format, outbound_model)) => {
                                         log::info!("[{app_type_str}] [RECT-002] 整流重试成功");
-                                        self.record_success_result(
-                                            &provider.id,
+                                        self.note_attempt_success(
+                                            provider,
                                             app_type_str,
                                             used_half_open_permit,
+                                            Some(response.headers()),
                                         )
                                         .await;
-
-                                        // 更新当前应用类型使用的 provider
-                                        {
-                                            let mut current_providers =
-                                                self.current_providers.write().await;
-                                            current_providers.insert(
-                                                app_type_str.to_string(),
-                                                (provider.id.clone(), provider.name.clone()),
-                                            );
-                                        }
-
-                                        // 更新成功统计
-                                        {
-                                            let mut status = self.status.write().await;
-                                            status.success_requests += 1;
-                                            status.last_error = None;
-                                            self.maybe_promote_current_after_success(
-                                                &mut status,
-                                                provider,
-                                                app_type_str,
-                                            );
-                                            if status.total_requests > 0 {
-                                                status.success_rate = (status.success_requests
-                                                    as f32
-                                                    / status.total_requests as f32)
-                                                    * 100.0;
-                                            }
-                                        }
 
                                         return Ok(ForwardResult {
                                             response,
@@ -1149,37 +1107,13 @@ impl RequestForwarder {
                             {
                                 Ok((response, claude_api_format, outbound_model)) => {
                                     log::info!("[{app_type_str}] [RECT-011] budget 整流重试成功");
-                                    self.record_success_result(
-                                        &provider.id,
+                                    self.note_attempt_success(
+                                        provider,
                                         app_type_str,
                                         used_half_open_permit,
+                                        Some(response.headers()),
                                     )
                                     .await;
-
-                                    {
-                                        let mut current_providers =
-                                            self.current_providers.write().await;
-                                        current_providers.insert(
-                                            app_type_str.to_string(),
-                                            (provider.id.clone(), provider.name.clone()),
-                                        );
-                                    }
-
-                                    {
-                                        let mut status = self.status.write().await;
-                                        status.success_requests += 1;
-                                        status.last_error = None;
-                                        self.maybe_promote_current_after_success(
-                                            &mut status,
-                                            provider,
-                                            app_type_str,
-                                        );
-                                        if status.total_requests > 0 {
-                                            status.success_rate = (status.success_requests as f32
-                                                / status.total_requests as f32)
-                                                * 100.0;
-                                        }
-                                    }
 
                                     return Ok(ForwardResult {
                                         response,
@@ -1268,6 +1202,8 @@ impl RequestForwarder {
                             );
                             log::warn!("[{app_type_str}] [{log_code}] {log_message}");
 
+                            self.note_official_pool_outcome(provider, Some(&e), None)
+                                .await;
                             last_error = Some(e);
                             last_provider = Some(provider.clone());
                             // 继续尝试下一个供应商
@@ -1842,6 +1778,42 @@ impl RequestForwarder {
             );
         }
 
+        // Native Responses passthrough to xAI/Grok (abbzbb#12): inject a stable
+        // `prompt_cache_key` so consecutive turns pin to the same cache server.
+        // Chat Completions uses `x-grok-conv-id` instead (header assembly below).
+        // Only a client-provided session / existing body key / inbound conv id
+        // is eligible — never a generated per-request UUID.
+        if matches!(app_type, AppType::Codex | AppType::GrokBuild)
+            && !codex_responses_to_chat
+            && !codex_responses_to_anthropic
+        {
+            let explicit_prompt_cache_key = request_body
+                .get("prompt_cache_key")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+                .map(ToString::to_string);
+            let inbound_grok_conv_id = headers
+                .get("x-grok-conv-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(ToString::to_string);
+            if super::providers::inject_xai_responses_prompt_cache_key(
+                provider,
+                &mut request_body,
+                explicit_prompt_cache_key.as_deref(),
+                inbound_grok_conv_id.as_deref(),
+                self.session_client_provided
+                    .then_some(self.session_id.as_str()),
+            ) {
+                log::debug!(
+                    "[Codex] Injected xAI prompt_cache_key for native Responses (provider={})",
+                    provider.id
+                );
+            }
+        }
+
         if matches!(app_type, AppType::Codex | AppType::GrokBuild) {
             self.apply_media_prevention(&mut request_body, provider);
         }
@@ -1876,6 +1848,22 @@ impl RequestForwarder {
             &filtered_body,
             self.session_client_provided,
         );
+        let xai_conv_id = if super::providers::should_send_xai_conv_id_header(provider) {
+            let inbound_grok_conv_id = headers
+                .get("x-grok-conv-id")
+                .and_then(|value| value.to_str().ok());
+            super::providers::resolve_prompt_cache_routing_key(
+                filtered_body
+                    .get("prompt_cache_key")
+                    .and_then(|value| value.as_str()),
+                inbound_grok_conv_id,
+                self.session_client_provided
+                    .then_some(self.session_id.as_str()),
+            )
+            .map(str::to_string)
+        } else {
+            None
+        };
         let request_is_streaming =
             is_streaming_request(&effective_endpoint, &filtered_body, headers);
         let force_identity_encoding = needs_transform
@@ -2425,6 +2413,11 @@ impl RequestForwarder {
             ordered_headers.insert(name, value);
         }
 
+        // xAI per-server prompt cache: pin Chat (and Responses) requests to the
+        // same origin with a stable conversation id. Keep an inbound value if
+        // Grok Build already sent one.
+        insert_xai_grok_conv_id_header(&mut ordered_headers, xai_conv_id.as_deref());
+
         // 序列化请求体。GET/HEAD 是 idempotent/safe 方法，按 HTTP 语义不应携带 body；
         // 强行附带 JSON body 会让某些上游（如 Google Gemini 的 models.list）拒绝请求。
         let body_bytes = if matches!(method, &http::Method::GET | &http::Method::HEAD) {
@@ -2937,7 +2930,16 @@ impl RequestForwarder {
         // Every retry would reuse the selected account's inbound Authorization
         // header against another card, so no official-route error may fail over.
         if super::providers::is_codex_official_provider(provider) {
-            return ErrorCategory::NonRetryable;
+            // Combo remaining hops have their own credentials; do not abort
+            // the chain on an Official 429/5xx. Pin / pool / classic failover
+            // stay single-card and must not reuse this Authorization.
+            let combo_has_more_hops = self
+                .attempt_upstream_models
+                .as_ref()
+                .is_some_and(|models| models.len() > 1);
+            if !combo_has_more_hops {
+                return ErrorCategory::NonRetryable;
+            }
         }
 
         // xAI OAuth mirrors the same rule for token acquisition: a local
@@ -3540,6 +3542,18 @@ fn rewrite_codex_alpha_search_full_url(
     }
 
     Ok(rewritten)
+}
+
+fn insert_xai_grok_conv_id_header(headers: &mut http::HeaderMap, conv_id: Option<&str>) {
+    if headers.contains_key("x-grok-conv-id") {
+        return;
+    }
+    let Some(conv_id) = conv_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return;
+    };
+    if let Ok(value) = http::HeaderValue::from_str(conv_id) {
+        headers.insert("x-grok-conv-id", value);
+    }
 }
 
 fn build_codex_oauth_session_headers(
@@ -4351,6 +4365,27 @@ mod tests {
             map.get("x-codex-window-id"),
             Some(&HeaderValue::from_static("session-123:0"))
         );
+    }
+
+    #[test]
+    fn xai_grok_conv_id_header_keeps_inbound_and_fills_when_missing() {
+        let mut headers = HeaderMap::new();
+        insert_xai_grok_conv_id_header(&mut headers, Some("codex_session-123"));
+        assert_eq!(
+            headers.get("x-grok-conv-id"),
+            Some(&HeaderValue::from_static("codex_session-123"))
+        );
+
+        insert_xai_grok_conv_id_header(&mut headers, Some("other-id"));
+        assert_eq!(
+            headers.get("x-grok-conv-id"),
+            Some(&HeaderValue::from_static("codex_session-123"))
+        );
+
+        let mut empty = HeaderMap::new();
+        insert_xai_grok_conv_id_header(&mut empty, Some("   "));
+        insert_xai_grok_conv_id_header(&mut empty, None);
+        assert!(empty.get("x-grok-conv-id").is_none());
     }
 
     #[test]

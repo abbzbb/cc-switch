@@ -76,6 +76,23 @@ impl OfficialPoolState {
         self.affinity.get(session_id).map(String::as_str)
     }
 
+    pub fn forget_provider(&mut self, provider_id: &str) {
+        let provider_id = provider_id.trim();
+        if provider_id.is_empty() {
+            return;
+        }
+        self.cooldown_until.remove(provider_id);
+        let sessions: Vec<String> = self
+            .affinity
+            .iter()
+            .filter(|(_, bound)| bound.as_str() == provider_id)
+            .map(|(session, _)| session.clone())
+            .collect();
+        for session in sessions {
+            self.clear_session(&session);
+        }
+    }
+
     pub fn note_cooldown(&mut self, provider_id: &str, now: Instant) {
         self.cooldown_until
             .insert(provider_id.to_string(), now + OFFICIAL_POOL_COOLDOWN);

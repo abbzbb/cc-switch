@@ -222,6 +222,70 @@ export function providerUpstreamModelIds(provider: {
   return ids;
 }
 
+export type ComboConfigOption = {
+  value: string;
+  slug: string;
+  label: string;
+  appId: string;
+  models: string[];
+};
+
+export type ComboConfigApp = {
+  appId: string;
+  providers: Array<
+    RoutingSlugInput & {
+      settingsConfig?: Record<string, unknown>;
+      meta?: {
+        claudeDesktopModelRoutes?: Record<string, { model?: string }>;
+      };
+    }
+  >;
+};
+
+/** First-level combo picker rows: one option per provider config. */
+export function buildComboConfigOptions(
+  apps: ComboConfigApp[],
+): ComboConfigOption[] {
+  const options: ComboConfigOption[] = [];
+  const seen = new Set<string>();
+  for (const app of apps) {
+    const slugs = assignRoutingSlugs(app.providers);
+    for (const provider of app.providers) {
+      const id = provider.id?.trim();
+      if (!id || seen.has(id)) continue;
+      const slug = slugs.get(id);
+      if (!slug) continue;
+      seen.add(id);
+      const name = provider.name?.trim();
+      options.push({
+        value: id,
+        slug,
+        label: name ? `${slug} · ${name}` : slug,
+        appId: app.appId,
+        models: providerUpstreamModelIds(provider),
+      });
+    }
+  }
+  return options;
+}
+
+export function groupComboConfigOptions(
+  options: ComboConfigOption[],
+): Array<{ appId: string; options: ComboConfigOption[] }> {
+  const groups: Array<{ appId: string; options: ComboConfigOption[] }> = [];
+  const indexByApp = new Map<string, number>();
+  for (const option of options) {
+    const existing = indexByApp.get(option.appId);
+    if (existing === undefined) {
+      indexByApp.set(option.appId, groups.length);
+      groups.push({ appId: option.appId, options: [option] });
+    } else {
+      groups[existing].options.push(option);
+    }
+  }
+  return groups;
+}
+
 export function formatComboTargets(targets: ComboTarget[]): string {
   return targets
     .map((target) => {

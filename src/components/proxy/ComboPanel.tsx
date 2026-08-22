@@ -1,10 +1,21 @@
 import { useMemo, useState } from "react";
-import { Loader2, Plus, Trash2 } from "lucide-react";
+import { ChevronDown, Loader2, Plus, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Select,
   SelectContent,
@@ -21,14 +32,16 @@ import type { ComboStrategy, ComboTarget, ModelCombo } from "@/types/proxy";
 import { useProvidersQuery } from "@/lib/query/queries";
 import { getAppLabel } from "@/config/appConfig";
 import {
+  buildComboConfigOptions,
   clampStickyLimit,
   formatComboTargets,
+  groupComboConfigOptions,
   isReservedComboId,
   isValidComboId,
   normalizeComboId,
   parseComboTargets,
-  providerUpstreamModelIds,
   resolveComboHop,
+  type ComboConfigOption,
 } from "@/utils/combo";
 import {
   assignRoutingSlugs,
@@ -43,6 +56,8 @@ export function ComboPanel() {
   const codexProviders = useProvidersQuery("codex");
   const claudeProviders = useProvidersQuery("claude");
   const desktopProviders = useProvidersQuery("claude-desktop");
+  const geminiProviders = useProvidersQuery("gemini");
+  const grokProviders = useProvidersQuery("grokbuild");
   const upsert = useUpsertModelCombo();
   const remove = useDeleteModelCombo();
   const [id, setId] = useState("");
@@ -96,42 +111,14 @@ export function ComboPanel() {
       desktopProviders.data?.providers,
     ],
   );
-  const slugOptions = useMemo(() => {
-    const seen = new Set<string>();
-    const options: Array<{ slug: string; label: string }> = [];
-    for (const app of resolveApps) {
-      const slugs = assignRoutingSlugs(app.providers);
-      for (const provider of app.providers) {
-        const slug = slugs.get(provider.id);
-        if (!slug || seen.has(slug)) continue;
-        seen.add(slug);
-        options.push({ slug, label: `${slug} · ${provider.name}` });
-      }
-    }
-    return options;
-  }, [resolveApps]);
-
-  const modelsForSlug = (slug: string) => {
-    const seen = new Set<string>();
-    const models: string[] = [];
-    const want = slug.trim().toLowerCase();
-    if (!want) return models;
-    for (const app of resolveApps) {
-      const slugs = assignRoutingSlugs(app.providers);
-      for (const provider of app.providers) {
-        const assigned = slugs.get(provider.id);
-        if (assigned !== want && provider.id.toLowerCase() !== want) {
-          continue;
-        }
-        for (const model of providerUpstreamModelIds(provider)) {
-          if (seen.has(model)) continue;
-          seen.add(model);
-          models.push(model);
-        }
-      }
-    }
-    return models;
-  };
+  const configOptions = useMemo(
+    () => buildComboConfigOptions(resolveApps),
+    [resolveApps],
+  );
+  const configGroups = useMemo(
+    () => groupComboConfigOptions(configOptions),
+    [configOptions],
+  );
 
   const resetForm = () => {
     setId("");
@@ -239,9 +226,19 @@ export function ComboPanel() {
       return;
     }
     const reservedSlugs = new Set(
-      resolveApps.flatMap((app) => [
-        ...assignRoutingSlugs(app.providers).values(),
-      ]),
+      [
+        ...resolveApps,
+        {
+          providers: providersInAssignOrder(
+            Object.values(geminiProviders.data?.providers ?? {}),
+          ),
+        },
+        {
+          providers: providersInAssignOrder(
+            Object.values(grokProviders.data?.providers ?? {}),
+          ),
+        },
+      ].flatMap((app) => [...assignRoutingSlugs(app.providers).values()]),
     );
     if (reservedSlugs.has(comboId.toLowerCase())) {
       toast.error(
@@ -255,10 +252,19 @@ export function ComboPanel() {
     const renaming =
       Boolean(editingId) && editingId!.toLowerCase() !== comboId.toLowerCase();
     try {
+      const targets = parsed.targets.map((target) => {
+        for (const app of resolveApps) {
+          const hop = resolveComboHop(target, app.providers);
+          if (hop.matched && hop.providerId) {
+            return { ...target, provider: hop.providerId };
+          }
+        }
+        return target;
+      });
       await upsert.mutateAsync({
         combo: {
           id: comboId,
-          targets: parsed.targets,
+          targets,
           strategy,
           stickyLimit: clampStickyLimit(stickyLimit),
         },
@@ -442,69 +448,41 @@ export function ComboPanel() {
       <div className="space-y-1.5">
         <Label className="text-xs">
           {t("proxy.combos.targets", {
-            defaultValue: "目标（从已分配 slug 选择）",
+            defaultValue: "目标（配置 → 模型名）",
           })}
         </Label>
         <div className="space-y-2">
           {targetDrafts.map((draft, index) => {
-            const models = modelsForSlug(draft.provider);
-            const modelOptions =
-              draft.model && !models.includes(draft.model)
-                ? [...models, draft.model]
-                : models;
-            const slugChoices =
-              draft.provider &&
-              !slugOptions.some((option) => option.slug === draft.provider)
-                ? [
-                    ...slugOptions,
-                    { slug: draft.provider, label: draft.provider },
-                  ]
-                : slugOptions;
+            const selected = configOptions.find(
+              (option) =>
+                option.value === draft.provider ||
+                option.slug === draft.provider.trim().toLowerCase(),
+            );
             return (
               <div
                 key={`${draft.provider}-${draft.model}-${index}`}
                 className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_5rem_auto]"
               >
-                <Select
-                  value={draft.provider || undefined}
-                  onValueChange={(value) =>
-                    updateDraft(index, { provider: value, model: "" })
+                <ConfigModelCascade
+                  groups={configGroups}
+                  selected={selected}
+                  model={draft.model}
+                  onPick={(option, model) =>
+                    updateDraft(index, {
+                      provider: option.value,
+                      model,
+                    })
                   }
-                >
-                  <SelectTrigger>
-                    <SelectValue
-                      placeholder={t("proxy.combos.pickSlug", {
-                        defaultValue: "选择 slug",
-                      })}
-                    />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {slugChoices.map((option) => (
-                      <SelectItem key={option.slug} value={option.slug}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <>
-                  <Input
-                    value={draft.model}
-                    list={`combo-models-${index}`}
-                    onChange={(event) =>
-                      updateDraft(index, { model: event.target.value })
-                    }
-                    placeholder={t("proxy.combos.pickModel", {
-                      defaultValue: "模型",
-                    })}
-                  />
-                  {modelOptions.length > 0 ? (
-                    <datalist id={`combo-models-${index}`}>
-                      {modelOptions.map((model) => (
-                        <option key={model} value={model} />
-                      ))}
-                    </datalist>
-                  ) : null}
-                </>
+                />
+                <Input
+                  value={draft.model}
+                  onChange={(event) =>
+                    updateDraft(index, { model: event.target.value })
+                  }
+                  placeholder={t("proxy.combos.pickModel", {
+                    defaultValue: "模型",
+                  })}
+                />
                 <Input
                   type="number"
                   min={1}
@@ -625,6 +603,16 @@ export function ComboPanel() {
                           "请求时会跳过 {{route}}：没有目录应用的卡匹配这个 slug 或 id。",
                       })}
                     </p>
+                  ) : anyMatched &&
+                    hops.some((hop) => !hop.matched) &&
+                    canResolveHops ? (
+                    <p className="text-[11px] text-amber-600 dark:text-amber-500">
+                      {t("proxy.combos.hopPartial", {
+                        route,
+                        defaultValue:
+                          "{{route}} 只在部分应用匹配；未匹配的应用请求时会跳过这一跳。",
+                      })}
+                    </p>
                   ) : null}
                 </div>
               );
@@ -654,5 +642,98 @@ export function ComboPanel() {
         ) : null}
       </div>
     </div>
+  );
+}
+
+function ConfigModelCascade({
+  groups,
+  selected,
+  model,
+  onPick,
+}: {
+  groups: Array<{ appId: string; options: ComboConfigOption[] }>;
+  selected?: ComboConfigOption;
+  model: string;
+  onPick: (option: ComboConfigOption, model: string) => void;
+}) {
+  const { t } = useTranslation();
+  const trigger = selected
+    ? model.trim()
+      ? `${selected.slug}/${model.trim()}`
+      : selected.label
+    : t("proxy.combos.pickConfigModel", {
+        defaultValue: "选择配置 / 模型",
+      });
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          className="h-9 w-full justify-between font-normal"
+        >
+          <span className="truncate">{trigger}</span>
+          <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="start"
+        className="max-h-80 w-[min(20rem,var(--radix-dropdown-menu-trigger-width))] overflow-y-auto"
+      >
+        {groups.length === 0 ? (
+          <DropdownMenuItem disabled>
+            {t("proxy.combos.noConfigs", {
+              defaultValue: "没有可加入目录的配置",
+            })}
+          </DropdownMenuItem>
+        ) : (
+          groups.map((group, groupIndex) => (
+            <div key={group.appId}>
+              {groupIndex > 0 ? <DropdownMenuSeparator /> : null}
+              <DropdownMenuLabel>{getAppLabel(group.appId)}</DropdownMenuLabel>
+              {group.options.map((option) => (
+                <DropdownMenuSub key={`${group.appId}:${option.value}`}>
+                  <DropdownMenuSubTrigger>
+                    {option.label}
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent className="max-h-64 min-w-[12rem] overflow-y-auto">
+                    {option.models.length > 0 ? (
+                      option.models.map((item) => (
+                        <DropdownMenuItem
+                          key={item}
+                          onSelect={() => onPick(option, item)}
+                        >
+                          {item}
+                        </DropdownMenuItem>
+                      ))
+                    ) : (
+                      <DropdownMenuItem disabled>
+                        {t("proxy.combos.noModels", {
+                          defaultValue: "这张卡还没有模型",
+                        })}
+                      </DropdownMenuItem>
+                    )}
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      onSelect={() =>
+                        onPick(
+                          option,
+                          selected?.value === option.value ? model : "",
+                        )
+                      }
+                    >
+                      {t("proxy.combos.customModel", {
+                        defaultValue: "输入其他模型…",
+                      })}
+                    </DropdownMenuItem>
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+              ))}
+            </div>
+          ))
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

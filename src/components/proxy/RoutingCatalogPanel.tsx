@@ -6,7 +6,9 @@ import { Switch } from "@/components/ui/switch";
 import { useProvidersQuery } from "@/lib/query/queries";
 import { useSetProviderRoutingCatalog } from "@/lib/query/proxy";
 import { getAppLabel } from "@/config/appConfig";
+import { providerUpstreamModelIds } from "@/utils/combo";
 import {
+  aliasInnerSlashes,
   assignRoutingSlugs,
   providersInAssignOrder,
 } from "@/utils/routingSlug";
@@ -19,6 +21,50 @@ type RoutingCatalogApp = (typeof ROUTING_CATALOG_APPS)[number];
 
 function isCatalogEnabled(provider: Provider): boolean {
   return provider.meta?.routingCatalog !== false;
+}
+
+const CATALOG_MODEL_PREVIEW = 6;
+
+function CatalogModelList({
+  slug,
+  provider,
+}: {
+  slug: string;
+  provider: Provider;
+}) {
+  const { t } = useTranslation();
+  const models = providerUpstreamModelIds(provider);
+  if (models.length === 0) {
+    return (
+      <p className="text-[11px] text-muted-foreground/80">
+        {t("proxy.routingCards.noModels", {
+          defaultValue: "还没有可写入目录的模型",
+        })}
+      </p>
+    );
+  }
+  const shown = models.slice(0, CATALOG_MODEL_PREVIEW);
+  const extra = models.length - shown.length;
+  return (
+    <ul className="mt-1 space-y-0.5">
+      {shown.map((model) => (
+        <li
+          key={model}
+          className="truncate font-mono text-[11px] text-muted-foreground"
+        >
+          {slug}/{aliasInnerSlashes(model)}
+        </li>
+      ))}
+      {extra > 0 ? (
+        <li className="text-[11px] text-muted-foreground/80">
+          {t("proxy.routingCards.moreModels", {
+            count: extra,
+            defaultValue: "另有 {{count}} 个模型",
+          })}
+        </li>
+      ) : null}
+    </ul>
+  );
 }
 
 function AppCatalogGroup({
@@ -145,6 +191,7 @@ function AppCatalogGroup({
                     defaultValue: "路由 {{slug}}",
                   })}
                 </p>
+                <CatalogModelList slug={slug} provider={provider} />
               </div>
               <Switch
                 checked={enabled}

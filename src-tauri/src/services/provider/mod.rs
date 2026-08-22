@@ -4265,6 +4265,24 @@ impl ProviderService {
         }
     }
 
+    fn drop_codex_discovery_and_rewrite(state: &AppState, app_type: &AppType, provider_id: &str) {
+        if matches!(app_type, AppType::Codex) {
+            crate::proxy::model_routing::drop_routing_discovery_cache_entry(provider_id);
+        }
+        Self::rewrite_codex_catalog_projection(state, app_type);
+    }
+
+    fn forget_provider_route_state(state: &AppState, app_type: &AppType, provider_id: &str) {
+        let proxy = state.proxy_service.clone();
+        let app = app_type.as_str().to_string();
+        let id = provider_id.to_string();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                proxy.forget_provider_route_state(&app, &id).await;
+            });
+        }
+    }
+
     /// List all providers for an app type
     pub fn list(
         state: &AppState,
@@ -4332,6 +4350,7 @@ impl ProviderService {
             // cannot observe a partially saved binding.
             if effective_current.is_some() {
                 state.db.save_provider(app_type.as_str(), &provider)?;
+                Self::drop_codex_discovery_and_rewrite(state, &app_type, &provider.id);
                 return Ok(true);
             }
 
@@ -4373,12 +4392,13 @@ impl ProviderService {
                 ));
             }
 
+            Self::drop_codex_discovery_and_rewrite(state, &app_type, &provider.id);
             return Ok(true);
         }
 
         // Save to database
         state.db.save_provider(app_type.as_str(), &provider)?;
-        Self::rewrite_codex_catalog_projection(state, &app_type);
+        Self::drop_codex_discovery_and_rewrite(state, &app_type, &provider.id);
 
         // Additive mode apps (OpenCode, OpenClaw): optionally write to live config.
         if app_type.is_additive_mode() {
@@ -4517,7 +4537,9 @@ impl ProviderService {
 
             Self::set_provider_live_config_managed(&mut provider, false);
             state.db.save_provider(app_type.as_str(), &provider)?;
-            Self::rewrite_codex_catalog_projection(state, &app_type);
+            Self::drop_codex_discovery_and_rewrite(state, &app_type, &provider.id);
+            crate::proxy::model_routing::drop_routing_discovery_cache_entry(&original_id);
+            Self::forget_provider_route_state(state, &app_type, &original_id);
             state.db.delete_provider(app_type.as_str(), &original_id)?;
 
             if crate::settings::get_current_provider(&app_type).as_deref() == Some(&original_id) {
@@ -4611,7 +4633,7 @@ impl ProviderService {
             // DB current/live inconsistent with the subsequent save.
             if !is_current {
                 state.db.save_provider(app_type.as_str(), &provider)?;
-                Self::rewrite_codex_catalog_projection(state, &app_type);
+                Self::drop_codex_discovery_and_rewrite(state, &app_type, &provider.id);
                 return Ok(true);
             }
 
@@ -4742,7 +4764,7 @@ impl ProviderService {
 
         // Save to database
         state.db.save_provider(app_type.as_str(), &provider)?;
-        Self::rewrite_codex_catalog_projection(state, &app_type);
+        Self::drop_codex_discovery_and_rewrite(state, &app_type, &provider.id);
 
         if is_current {
             // 如果 Claude 代理接管处于激活状态，并且代理服务正在运行：
@@ -4877,6 +4899,7 @@ impl ProviderService {
                 }
             }
             state.db.delete_provider(app_type.as_str(), id)?;
+            Self::forget_provider_route_state(state, &app_type, id);
             return Ok(());
         }
 
@@ -4890,7 +4913,11 @@ impl ProviderService {
             ));
         }
 
-        state.db.delete_provider(app_type.as_str(), id)
+        state.db.delete_provider(app_type.as_str(), id)?;
+        crate::proxy::model_routing::drop_routing_discovery_cache_entry(id);
+        Self::rewrite_codex_catalog_projection(state, &app_type);
+        Self::forget_provider_route_state(state, &app_type, id);
+        Ok(())
     }
 
     /// Remove provider from live config only (for additive mode apps like OpenCode, OpenClaw)

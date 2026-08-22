@@ -474,6 +474,13 @@ impl ProxyServer {
             .reset_provider_breaker(provider_id, app_type)
             .await;
     }
+
+    pub async fn forget_provider_route_state(&self, app_type: &str, provider_id: &str) {
+        self.state
+            .provider_router
+            .forget_provider(app_type, provider_id)
+            .await;
+    }
 }
 
 #[cfg(test)]

@@ -817,7 +817,7 @@ pub fn map_proxy_request_model(mut body: Value, provider: &Provider) -> Result<V
             // Bare `gpt-*` that are not on the card stay fail-closed.
             crate::proxy::model_routing::provider_upstream_model_ids(provider)
                 .into_iter()
-                .find(|id| id == requested)
+                .find(|id| crate::proxy::model_routing::models_match(id, requested))
         })
         .ok_or_else(|| {
             AppError::localized(
