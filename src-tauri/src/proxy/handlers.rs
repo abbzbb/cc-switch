@@ -1080,6 +1080,28 @@ async fn handle_responses_for_app(
             if let Some(provider) = err.provider.take() {
                 ctx.provider = provider;
             }
+            if provider_is_xai_prompt_cache_upstream(&ctx.provider)
+                && is_xai_empty_stream_error(&err.error)
+            {
+                log::warn!(
+                    "[Codex] Grok Responses first hop empty stream ({}); rewriting to incomplete (provider={})",
+                    err.error,
+                    ctx.provider.id
+                );
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    header::CONTENT_TYPE,
+                    header::HeaderValue::from_static("text/event-stream"),
+                );
+                let response =
+                    transform_codex_responses_continue::reasoning_only_to_incomplete_response(
+                        StatusCode::OK,
+                        headers,
+                        Bytes::new(),
+                        true,
+                    );
+                return process_response(response, &ctx, &state, &CODEX_PARSER_CONFIG, None).await;
+            }
             log_forward_error(&state, &ctx, is_stream, &err.error);
             return build_codex_proxy_error_response(&ctx, &endpoint, &err.error);
         }
@@ -1172,10 +1194,11 @@ async fn handle_responses_for_app(
     .await
 }
 
-/// Grok/xAI native Responses: if a hop completes with only reasoning, retry
-/// the same card (not the failover chain) with a developer nudge. Still empty
-/// after two continues → rewrite `response.completed` to `incomplete` so Codex
-/// does not treat the turn as finished (abbzbb#14).
+/// Grok/xAI native Responses: empty hops (reasoning-only, missing
+/// `response.completed`, zero usage, short progress-only text) retry the same
+/// card with a developer nudge. A mid-inspect decode/truncation retries the
+/// current request once. Still empty/broken → rewrite to `response.incomplete`
+/// so Codex does not finish the turn or see a 502 (abbzbb#14, abbzbb#16).
 #[allow(clippy::too_many_arguments)]
 async fn apply_xai_reasoning_continue(
     forwarder: &RequestForwarder,
@@ -1194,18 +1217,120 @@ async fn apply_xai_reasoning_continue(
     }
 
     let mut continues = 0u32;
+    let mut stream_retries = 0u32;
     loop {
-        let inspected =
-            transform_codex_responses_continue::inspect_native_responses_turn(result.response)
+        let idle_timeout = ctx.streaming_timeout_config().idle_timeout;
+        let idle_timeout = if idle_timeout > 0 {
+            Some(std::time::Duration::from_secs(idle_timeout))
+        } else {
+            None
+        };
+        let inspected = match idle_timeout {
+            Some(idle) => {
+                transform_codex_responses_continue::inspect_native_responses_turn_timed(
+                    result.response,
+                    Some(idle),
+                )
                 .await
-                .map_err(|error| ForwardError {
-                    error,
-                    provider: Some(result.provider.clone()),
-                })?;
+            }
+            None => {
+                transform_codex_responses_continue::inspect_native_responses_turn(result.response)
+                    .await
+            }
+        };
         match inspected {
             transform_codex_responses_continue::InspectedTurn::Passthrough(response) => {
                 result.response = response;
                 return Ok(result);
+            }
+            transform_codex_responses_continue::InspectedTurn::StreamBroken {
+                status,
+                headers: response_headers,
+                body,
+                is_sse,
+                error,
+                leftover_event,
+                leftover_bytes,
+            } => {
+                match transform_codex_responses_continue::same_card_followup(
+                    transform_codex_responses_continue::SameCardKind::StreamBroken,
+                    stream_retries,
+                    continues,
+                ) {
+                    transform_codex_responses_continue::SameCardFollowup::RetryOriginal => {}
+                    transform_codex_responses_continue::SameCardFollowup::RewriteIncomplete => {
+                        log::warn!(
+                            "[Codex] Grok Responses stream still broken after {stream_retries} retry(s) ({error}; event={leftover_event:?} leftover={leftover_bytes} bytes); rewriting to incomplete (provider={})",
+                            result.provider.id
+                        );
+                        result.response =
+                            transform_codex_responses_continue::reasoning_only_to_incomplete_response(
+                                status,
+                                response_headers,
+                                body,
+                                is_sse,
+                            );
+                        return Ok(result);
+                    }
+                    transform_codex_responses_continue::SameCardFollowup::ContinueEmpty => {
+                        log::error!(
+                            "[Codex] Grok Responses stream-broken followup mismatch; rewriting to incomplete (provider={})",
+                            result.provider.id
+                        );
+                        result.response =
+                            transform_codex_responses_continue::reasoning_only_to_incomplete_response(
+                                status,
+                                response_headers,
+                                body,
+                                is_sse,
+                            );
+                        return Ok(result);
+                    }
+                }
+                stream_retries += 1;
+                log::warn!(
+                    "[Codex] Grok Responses stream broke while inspecting ({error}; event={leftover_event:?} leftover={leftover_bytes} bytes); retrying same card {stream_retries}/{} (provider={})",
+                    transform_codex_responses_continue::XAI_STREAM_DECODE_RETRY_LIMIT,
+                    result.provider.id
+                );
+                let provider = result.provider.clone();
+                let outbound = result.outbound_model.clone();
+                match forward_same_xai_card(
+                    forwarder,
+                    app_type,
+                    method.clone(),
+                    endpoint,
+                    request_body,
+                    headers,
+                    extensions,
+                    provider,
+                    outbound.as_deref(),
+                )
+                .await
+                {
+                    Ok(next) => {
+                        result = next;
+                        ctx.provider = result.provider.clone();
+                        if result.outbound_model.is_some() {
+                            ctx.outbound_model = result.outbound_model.clone();
+                        }
+                        continue;
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "[Codex] Grok Responses stream-broken retry forward failed ({}); rewriting buffered hop to incomplete (provider={})",
+                            err.error,
+                            result.provider.id
+                        );
+                        result.response = transform_codex_responses_continue::reasoning_only_to_incomplete_response(
+                            status,
+                            response_headers,
+                            body,
+                            is_sse,
+                        );
+                        return Ok(result);
+                    }
+                }
             }
             transform_codex_responses_continue::InspectedTurn::ReasoningOnly {
                 status,
@@ -1213,75 +1338,162 @@ async fn apply_xai_reasoning_continue(
                 body,
                 completed_response,
                 is_sse,
+                reason,
             } => {
-                if let Some(usage) = TokenUsage::from_codex_response_auto(&completed_response)
-                    .filter(TokenUsage::has_billable_tokens)
-                {
-                    let outbound = result
-                        .outbound_model
-                        .clone()
-                        .unwrap_or_else(|| ctx.request_model.clone());
-                    log_usage(
-                        state,
-                        &result.provider.id,
-                        ctx.app_type_str,
-                        outbound.as_str(),
-                        &ctx.request_model,
-                        outbound.as_str(),
-                        usage,
-                        ctx.latency_ms(),
-                        None,
-                        is_sse,
-                        status.as_u16(),
-                        Some(ctx.session_id.clone()),
-                    )
-                    .await;
-                }
-
-                if continues < transform_codex_responses_continue::XAI_REASONING_CONTINUE_LIMIT {
-                    continues += 1;
-                    log::info!(
-                        "[Codex] Grok Responses completed with reasoning only; continuing {continues}/{} (provider={})",
-                        transform_codex_responses_continue::XAI_REASONING_CONTINUE_LIMIT,
-                        result.provider.id
-                    );
-                    transform_codex_responses_continue::prepare_reasoning_continue_request(
-                        request_body,
-                    );
-                    let provider = result.provider.clone();
-                    result = forwarder
-                        .forward_with_retry(
-                            app_type,
-                            method.clone(),
-                            endpoint,
-                            request_body.clone(),
-                            headers.clone(),
-                            extensions.clone(),
-                            vec![provider],
-                        )
-                        .await?;
-                    ctx.provider = result.provider.clone();
-                    if result.outbound_model.is_some() {
-                        ctx.outbound_model = result.outbound_model.clone();
+                match transform_codex_responses_continue::same_card_followup(
+                    transform_codex_responses_continue::SameCardKind::EmptyHop,
+                    stream_retries,
+                    continues,
+                ) {
+                    transform_codex_responses_continue::SameCardFollowup::ContinueEmpty => {}
+                    transform_codex_responses_continue::SameCardFollowup::RewriteIncomplete => {
+                        log::warn!(
+                            "[Codex] Grok Responses still empty ({}) after {continues} continue(s); rewriting to incomplete (provider={})",
+                            reason.as_str(),
+                            result.provider.id
+                        );
+                        result.response = transform_codex_responses_continue::reasoning_only_to_incomplete_response_with_usage(
+                            status,
+                            response_headers,
+                            body,
+                            is_sse,
+                            Some(&completed_response),
+                        );
+                        return Ok(result);
                     }
-                    continue;
+                    transform_codex_responses_continue::SameCardFollowup::RetryOriginal => {
+                        log::error!(
+                            "[Codex] Grok Responses empty-hop followup mismatch; rewriting to incomplete (provider={})",
+                            result.provider.id
+                        );
+                        result.response = transform_codex_responses_continue::reasoning_only_to_incomplete_response_with_usage(
+                            status,
+                            response_headers,
+                            body,
+                            is_sse,
+                            Some(&completed_response),
+                        );
+                        return Ok(result);
+                    }
                 }
 
-                log::warn!(
-                    "[Codex] Grok Responses still reasoning-only after {continues} continue(s); rewriting completed to incomplete (provider={})",
+                continues += 1;
+                stream_retries = 0;
+                log::info!(
+                    "[Codex] Grok Responses empty hop ({}); continuing {continues}/{} (provider={})",
+                    reason.as_str(),
+                    transform_codex_responses_continue::XAI_REASONING_CONTINUE_LIMIT,
                     result.provider.id
                 );
-                result.response =
-                    transform_codex_responses_continue::reasoning_only_to_incomplete_response(
-                        status,
-                        response_headers,
-                        body,
-                        is_sse,
-                    );
-                return Ok(result);
+                transform_codex_responses_continue::prepare_reasoning_continue_request(
+                    request_body,
+                );
+                let provider = result.provider.clone();
+                let outbound = result.outbound_model.clone();
+                match forward_same_xai_card(
+                    forwarder,
+                    app_type,
+                    method.clone(),
+                    endpoint,
+                    request_body,
+                    headers,
+                    extensions,
+                    provider,
+                    outbound.as_deref(),
+                )
+                .await
+                {
+                    Ok(next) => {
+                        if let Some(usage) =
+                            TokenUsage::from_codex_response_auto(&completed_response)
+                                .filter(TokenUsage::has_billable_tokens)
+                        {
+                            let outbound_id = outbound
+                                .clone()
+                                .unwrap_or_else(|| ctx.request_model.clone());
+                            log_usage(
+                                state,
+                                &result.provider.id,
+                                ctx.app_type_str,
+                                outbound_id.as_str(),
+                                &ctx.request_model,
+                                outbound_id.as_str(),
+                                usage,
+                                ctx.latency_ms(),
+                                None,
+                                is_sse,
+                                status.as_u16(),
+                                Some(ctx.session_id.clone()),
+                            )
+                            .await;
+                        }
+                        result = next;
+                        ctx.provider = result.provider.clone();
+                        if result.outbound_model.is_some() {
+                            ctx.outbound_model = result.outbound_model.clone();
+                        }
+                        continue;
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "[Codex] Grok Responses empty-hop continue forward failed ({}); rewriting buffered hop to incomplete (provider={})",
+                            err.error,
+                            result.provider.id
+                        );
+                        result.response = transform_codex_responses_continue::reasoning_only_to_incomplete_response_with_usage(
+                            status,
+                            response_headers,
+                            body,
+                            is_sse,
+                            Some(&completed_response),
+                        );
+                        return Ok(result);
+                    }
+                }
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn forward_same_xai_card(
+    forwarder: &RequestForwarder,
+    app_type: &AppType,
+    method: http::Method,
+    endpoint: &str,
+    request_body: &Value,
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    provider: crate::provider::Provider,
+    outbound_model: Option<&str>,
+) -> Result<ForwardResult, ForwardError> {
+    let mut body = request_body.clone();
+    if let Some(model) = outbound_model {
+        if let Some(object) = body.as_object_mut() {
+            object.insert("model".to_string(), json!(model));
+        }
+    }
+    forwarder
+        .forward_with_retry(
+            app_type,
+            method,
+            endpoint,
+            body,
+            headers.clone(),
+            extensions.clone(),
+            vec![provider],
+        )
+        .await
+}
+
+fn is_xai_empty_stream_error(error: &ProxyError) -> bool {
+    let message = error.to_string();
+    message.contains("流式响应在首包到达前结束")
+        || message.contains("Responses stream ended before producing output")
+        || message.contains("Failed while validating Responses stream start")
+        || message.contains("读取流式响应首包失败")
+        || message.contains("流式响应首包超时")
+        || message.contains("Responses stream produced no semantic output")
 }
 
 /// 处理 /v1/responses/compact 请求（OpenAI Responses Compact API - Codex CLI 透传）

@@ -5,6 +5,19 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.11] - 2026-08-22
+
+Grok/xAI empty or truncated Responses hops no longer 502 or finish a Codex turn.
+
+### Fixed
+
+- **Grok empty/truncated Responses hops 502 or finish the Codex turn (#16)**: Inspecting a native xAI stream no longer turns a chunk decode/TCP reset into `转发失败` 502. The same card is retried once; still broken (or a retry that cannot connect) is rewritten to `response.incomplete`. A first hop that returns 200 with an empty body is rewritten the same way instead of 502. Inspect honors the streaming idle timeout. HTTP 200 with no `response.completed`, empty or all-zero usage, or a short progress-only sentence (and no tool call) joins the existing reasoning-only continue loop instead of looking finished. Token-prefixed progress (`I'll` / `我`) is held until a terminal event, and a prefix delta plus a full progress `output_item` still continues. Inspect and incomplete rewrite split glued SSE frames the same way. A complete last frame is not poisoned by a trailing incomplete UTF-8 byte. Visible `output_text.delta` is treated as a real answer even if `completed.output` is empty. Discarded continue hops log usage once; rewritten incomplete hops keep usage on `response.incomplete` and are not logged as all-zero rows. Continue never lowers an already-high `max_output_tokens`. Combo same-card retries keep the hop's outbound model (including Grok Build).
+
+### Upgrade notes
+
+- No database schema migration — `SCHEMA_VERSION` stays at 16.
+- Restart CC Switch. Existing Codex threads keep working; a dropped Grok SSE hop should retry or show incomplete instead of a 502 or an empty `task_complete`.
+
 ## [3.20.10] - 2026-08-22
 
 Grok/xAI no longer finish a Codex turn after a reasoning-only Responses hop.

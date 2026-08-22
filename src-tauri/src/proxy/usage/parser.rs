@@ -292,6 +292,11 @@ impl TokenUsage {
     ///
     /// 注意：记录原始 input_tokens，费用计算时再减去 cached_tokens
     pub fn from_codex_response_auto(body: &Value) -> Option<Self> {
+        let body = if body.get("usage").is_none() {
+            body.get("response").unwrap_or(body)
+        } else {
+            body
+        };
         let usage = body.get("usage")?;
 
         // 检测格式：OpenAI 使用 prompt_tokens，Codex 使用 input_tokens
@@ -312,14 +317,15 @@ impl TokenUsage {
     pub fn from_codex_stream_events_auto(events: &[Value]) -> Option<Self> {
         log::debug!("[Codex] 智能解析流式事件，共 {} 个事件", events.len());
 
-        // 先尝试 Codex Responses API 格式 (response.completed 事件)
+        // Codex Responses terminal events (completed or rewritten incomplete).
         for event in events {
             if let Some(event_type) = event.get("type").and_then(|v| v.as_str()) {
-                if event_type == "response.completed" {
+                if event_type == "response.completed" || event_type == "response.incomplete" {
+                    log::debug!("[Codex] 找到 {event_type} 事件");
                     if let Some(response) = event.get("response") {
-                        log::debug!("[Codex] 找到 response.completed 事件");
                         return Self::from_codex_response_auto(response);
                     }
+                    return Self::from_codex_response_auto(event);
                 }
             }
         }
@@ -1150,6 +1156,43 @@ mod tests {
         assert_eq!(usage.output_tokens, 500);
         assert_eq!(usage.cache_read_tokens, 200);
         assert_eq!(usage.model, Some("o3".to_string()));
+    }
+
+    #[test]
+    fn test_codex_stream_events_auto_incomplete() {
+        let events = vec![json!({
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_1",
+                "status": "incomplete",
+                "model": "grok-4.6",
+                "usage": {
+                    "input_tokens": 12,
+                    "output_tokens": 8
+                }
+            }
+        })];
+        let usage = TokenUsage::from_codex_stream_events_auto(&events).unwrap();
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.output_tokens, 8);
+        assert_eq!(usage.model, Some("grok-4.6".to_string()));
+    }
+
+    #[test]
+    fn test_codex_response_auto_nested_incomplete_envelope() {
+        let body = json!({
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_1",
+                "usage": {
+                    "input_tokens": 3,
+                    "output_tokens": 4
+                }
+            }
+        });
+        let usage = TokenUsage::from_codex_response_auto(&body).unwrap();
+        assert_eq!(usage.input_tokens, 3);
+        assert_eq!(usage.output_tokens, 4);
     }
 
     #[test]
