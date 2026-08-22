@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildComboConfigOptions,
   clampStickyLimit,
+  groupComboConfigOptions,
   isReservedComboId,
   isValidComboId,
   normalizeComboId,
@@ -126,5 +128,65 @@ describe("providerUpstreamModelIds", () => {
         },
       }),
     ).toEqual(["k2", "extra", "sonnet", "grok-4.5", "opus"]);
+  });
+});
+
+describe("buildComboConfigOptions", () => {
+  it("groups configs then models and keeps provider id as the value", () => {
+    const options = buildComboConfigOptions([
+      {
+        appId: "codex",
+        providers: [
+          {
+            id: "kimi",
+            name: "Kimi",
+            settingsConfig: { modelCatalog: { models: [{ model: "k2" }] } },
+          },
+          {
+            id: "grok",
+            name: "Grok",
+            settingsConfig: {
+              modelCatalog: { models: [{ model: "grok-4.6" }] },
+            },
+          },
+        ],
+      },
+      {
+        appId: "claude",
+        providers: [
+          {
+            id: "kimi-claude",
+            name: "Kimi",
+            settingsConfig: { env: { ANTHROPIC_MODEL: "k2" } },
+          },
+        ],
+      },
+    ]);
+    expect(options).toEqual([
+      {
+        value: "kimi",
+        slug: "kimi",
+        label: "kimi · Kimi",
+        appId: "codex",
+        models: ["k2"],
+      },
+      {
+        value: "grok",
+        slug: "grok",
+        label: "grok · Grok",
+        appId: "codex",
+        models: ["grok-4.6"],
+      },
+      {
+        value: "kimi-claude",
+        slug: "kimi-claude",
+        label: "kimi-claude · Kimi",
+        appId: "claude",
+        models: ["k2"],
+      },
+    ]);
+    expect(
+      groupComboConfigOptions(options).map((group) => group.appId),
+    ).toEqual(["codex", "claude"]);
   });
 });

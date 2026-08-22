@@ -4145,6 +4145,18 @@ impl ProxyService {
         self.server.read().await.is_some()
     }
 
+    pub async fn forget_provider_route_state(&self, app_type: &str, provider_id: &str) {
+        {
+            let mut pool = self.official_pool.write().await;
+            pool.forget_provider(provider_id);
+        }
+        if let Some(server) = self.server.read().await.as_ref() {
+            server
+                .forget_provider_route_state(app_type, provider_id)
+                .await;
+        }
+    }
+
     /// 热更新熔断器配置
     ///
     /// 如果代理服务器正在运行，将新配置应用到所有已创建的熔断器实例

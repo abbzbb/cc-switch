@@ -30,7 +30,12 @@ use crate::{
         },
     },
 };
-use std::{collections::HashMap, str::FromStr, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, VecDeque},
+    str::FromStr,
+    sync::Arc,
+    time::Instant,
+};
 use tokio::sync::RwLock;
 
 /// Providers selected for one request, optionally with per-attempt upstream models.
@@ -50,6 +55,24 @@ impl ProviderSelection {
             attempt_upstream_models: None,
             promote_current_on_success: true,
         }
+    }
+}
+
+fn circuit_app_type_from_key(key: &str) -> &str {
+    let mut best_len = 0usize;
+    for app in AppType::all() {
+        let prefix = app.as_str();
+        if key.starts_with(prefix)
+            && key.as_bytes().get(prefix.len()) == Some(&b':')
+            && prefix.len() > best_len
+        {
+            best_len = prefix.len();
+        }
+    }
+    if best_len > 0 {
+        &key[..best_len]
+    } else {
+        key.split(':').next().unwrap_or("claude")
     }
 }
 
@@ -151,6 +174,7 @@ pub struct ProviderRouter {
     official_pool: Arc<RwLock<OfficialPoolState>>,
     /// Codex session → last third-party routed pick (Grok, …).
     session_follow: Arc<RwLock<HashMap<String, SessionModelFollow>>>,
+    session_follow_order: Arc<RwLock<VecDeque<String>>>,
 }
 
 impl ProviderRouter {
@@ -170,6 +194,7 @@ impl ProviderRouter {
             combo_rr: Arc::new(RwLock::new(HashMap::new())),
             official_pool,
             session_follow: Arc::new(RwLock::new(HashMap::new())),
+            session_follow_order: Arc::new(RwLock::new(VecDeque::new())),
         }
     }
 
@@ -322,7 +347,7 @@ impl ProviderRouter {
                     })?;
                 Ok(ProviderSelection {
                     providers: vec![provider],
-                    attempt_upstream_models: followed.is_some().then_some(vec![upstream_model]),
+                    attempt_upstream_models: Some(vec![upstream_model]),
                     promote_current_on_success: false,
                 })
             }
@@ -386,17 +411,25 @@ impl ProviderRouter {
         model: String,
         displaced_default: Option<String>,
     ) {
-        let mut map = self.session_follow.write().await;
-        if map.len() >= 256 && !map.contains_key(session_id) {
-            map.clear();
+        const SESSION_FOLLOW_CAP: usize = 256;
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return;
         }
-        map.insert(
-            session_id.to_string(),
-            SessionModelFollow {
-                model,
-                displaced_default,
-            },
-        );
+        let mut map = self.session_follow.write().await;
+        let mut order = self.session_follow_order.write().await;
+        let follow = SessionModelFollow {
+            model,
+            displaced_default,
+        };
+        if map.insert(session_id.to_string(), follow).is_none() {
+            order.push_back(session_id.to_string());
+            while order.len() > SESSION_FOLLOW_CAP {
+                if let Some(oldest) = order.pop_front() {
+                    map.remove(&oldest);
+                }
+            }
+        }
     }
 
     async fn try_official_pool(
@@ -691,6 +724,13 @@ impl ProviderRouter {
         self.reset_circuit_breaker(&circuit_key).await;
     }
 
+    pub async fn forget_provider(&self, app_type: &str, provider_id: &str) {
+        let circuit_key = format!("{app_type}:{provider_id}");
+        self.circuit_breakers.write().await.remove(&circuit_key);
+        let mut pool = self.official_pool.write().await;
+        pool.forget_provider(provider_id);
+    }
+
     /// 仅释放 HalfOpen permit，不影响健康统计（neutral 接口）
     ///
     /// 用于整流器等场景：请求结果不应计入 Provider 健康度，
@@ -764,7 +804,7 @@ impl ProviderRouter {
         }
 
         // 从 key 中提取 app_type (格式: "app_type:provider_id")
-        let app_type = key.split(':').next().unwrap_or("claude");
+        let app_type = circuit_app_type_from_key(key);
 
         // 按应用独立读取熔断器配置
         let config = match self.db.get_proxy_config_for_app(app_type).await {
@@ -1269,7 +1309,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(grok.providers[0].id, "grok");
-        assert_eq!(grok.attempt_upstream_models, None);
+        assert_eq!(
+            grok.attempt_upstream_models.as_deref(),
+            Some(["grok-4.6".to_string()].as_slice())
+        );
 
         let followed = router
             .select_providers_for_request_with_session(
@@ -1309,6 +1352,35 @@ mod tests {
         assert_eq!(
             followed_codes.attempt_upstream_models.as_deref(),
             Some(["grok-4.6".to_string()].as_slice())
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn session_follow_does_not_steal_known_third_party_gpt_pin() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        db.save_provider("codex", &managed_codex_official("codex-official", "acct-1"))
+            .unwrap();
+        db.save_provider("codex", &catalog_provider("grok", "Grok", "grok-4.6"))
+            .unwrap();
+        db.save_provider("codex", &catalog_provider("codes", "Niuma", "gpt-5.4"))
+            .unwrap();
+        db.set_current_provider("codex", "codex-official").unwrap();
+
+        let router = ProviderRouter::new(db);
+        router
+            .select_providers_for_request_with_session("codex", "grok/grok-4.6", Some("sess-1"))
+            .await
+            .unwrap();
+        let pinned = router
+            .select_providers_for_request_with_session("codex", "codes/gpt-5.4", Some("sess-1"))
+            .await
+            .unwrap();
+        assert_eq!(pinned.providers[0].id, "codes");
+        assert_eq!(
+            pinned.attempt_upstream_models.as_deref(),
+            Some(["gpt-5.4".to_string()].as_slice())
         );
     }
 

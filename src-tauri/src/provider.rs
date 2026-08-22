@@ -520,7 +520,8 @@ pub struct ProviderMeta {
     /// identity when available; generated session IDs are not sent upstream.
     #[serde(rename = "promptCacheKey", skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
-    /// Session-based prompt-cache routing for Codex Responses -> Chat conversions.
+    /// Session-based prompt-cache routing for Codex Chat conversions and native
+    /// xAI/Grok Responses (`prompt_cache_key` + `x-grok-conv-id`).
     /// "auto" enables known-compatible upstreams; "enabled" / "disabled" are overrides.
     #[serde(rename = "promptCacheRouting", skip_serializing_if = "Option::is_none")]
     pub prompt_cache_routing: Option<String>,

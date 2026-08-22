@@ -1136,7 +1136,7 @@ export function CodexFormFields({
                   <p className="text-xs leading-relaxed text-muted-foreground">
                     {t("codexConfig.promptCacheRoutingHint", {
                       defaultValue:
-                        "自动模式仅对已确认兼容的上游发送 prompt_cache_key；开启可用于其他兼容网关，关闭可避免严格网关因未知字段返回 400。只使用客户端提供的稳定会话 ID。",
+                        "自动模式仅对已确认兼容的上游发送 prompt_cache_key（OpenAI Chat、Kimi Coding、xAI/Grok）；开启可用于其他兼容网关，关闭可避免严格网关因未知字段返回 400。只使用客户端提供的稳定会话 ID。xAI/Grok 会同时带上 x-grok-conv-id，把多轮请求钉在同一台缓存服务器上。",
                     })}
                   </p>
                 </div>

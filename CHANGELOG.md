@@ -5,6 +5,24 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.9] - 2026-08-22
+
+Grok/xAI conversations reuse prompt cache across turns, and Combo picks models in a config → model menu.
+
+### Added
+
+- **Combo two-level picker**: targets are chosen as config → model name instead of a flat slug list. Routing catalog cards also preview the models they will write.
+
+### Fixed
+
+- **Grok/xAI prompt cache stuck at ~128 tokens (#12)**: Codex native Responses to xAI OAuth, `api.x.ai`, and niuma.codes inject a stable `prompt_cache_key` and `x-grok-conv-id` from the Codex session so multi-turn requests pin to the same cache server. Explicit body keys and inbound Grok Build conversation ids win; generated per-request UUIDs are never sent. Unknown strict gateways stay off in auto mode.
+- **Routing catalog / session follow races**: discovery cache updates under one lock; deleting or editing a card drops its discovery row and official-pool affinity; session follow is LRU-capped instead of wiping all 256 entries.
+
+### Upgrade notes
+
+- No database schema migration — `SCHEMA_VERSION` stays at 16.
+- Restart CC Switch so the local proxy injects cache routing. Existing Codex threads keep working; cache hits should climb on later turns of the same session.
+
 ## [3.20.8] - 2026-08-21
 
 The unified Codex catalog no longer double-prefixes Grok ids or copies Official models into the Grok namespace.

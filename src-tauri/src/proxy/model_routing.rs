@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 use toml_edit::DocumentMut;
 
@@ -53,7 +54,12 @@ pub fn routing_discovery_cache_path() -> PathBuf {
     get_codex_config_dir().join(ROUTING_DISCOVERY_FILENAME)
 }
 
-pub fn load_routing_discovery_cache() -> HashMap<String, Vec<String>> {
+fn discovery_cache_lock() -> &'static Mutex<()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    &LOCK
+}
+
+fn load_routing_discovery_cache_unlocked() -> HashMap<String, Vec<String>> {
     let path = routing_discovery_cache_path();
     let Ok(text) = std::fs::read_to_string(path) else {
         return HashMap::new();
@@ -61,8 +67,43 @@ pub fn load_routing_discovery_cache() -> HashMap<String, Vec<String>> {
     serde_json::from_str(&text).unwrap_or_default()
 }
 
-pub fn save_routing_discovery_cache(cache: &HashMap<String, Vec<String>>) {
+fn save_routing_discovery_cache_unlocked(cache: &HashMap<String, Vec<String>>) {
     let _ = write_json_file(&routing_discovery_cache_path(), cache);
+}
+
+pub fn load_routing_discovery_cache() -> HashMap<String, Vec<String>> {
+    let _guard = discovery_cache_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    load_routing_discovery_cache_unlocked()
+}
+
+#[cfg(test)]
+pub fn save_routing_discovery_cache(cache: &HashMap<String, Vec<String>>) {
+    let _guard = discovery_cache_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    save_routing_discovery_cache_unlocked(cache);
+}
+
+/// Load-modify-save under one lock so concurrent refreshes cannot drop inserts.
+pub fn mutate_routing_discovery_cache(update: impl FnOnce(&mut HashMap<String, Vec<String>>)) {
+    let _guard = discovery_cache_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut cache = load_routing_discovery_cache_unlocked();
+    update(&mut cache);
+    save_routing_discovery_cache_unlocked(&cache);
+}
+
+pub fn drop_routing_discovery_cache_entry(provider_id: &str) {
+    let id = provider_id.trim();
+    if id.is_empty() {
+        return;
+    }
+    mutate_routing_discovery_cache(|cache| {
+        cache.remove(id);
+    });
 }
 
 /// Result of inspecting a request model id against the app's provider cards.
@@ -205,6 +246,53 @@ pub fn alias_inner_slashes(model: &str) -> String {
     model.replace('/', "-")
 }
 
+/// Flattened leftover copies of `{sibling_slug}/{model}` (`default-gpt-5.6-sol`).
+/// Native ids that merely share a hyphen prefix with a sibling (`kimi-k2` on
+/// a `packy` card) are not included.
+fn flattened_namespace_copies(
+    providers: &[Provider],
+    slugs: &HashMap<String, String>,
+) -> HashMap<String, HashSet<String>> {
+    let mut by_slug: HashMap<String, HashSet<String>> = HashMap::new();
+    for provider in providers {
+        let Some(slug) = slugs.get(&provider.id) else {
+            continue;
+        };
+        let slug_l = slug.to_ascii_lowercase();
+        let entry = by_slug.entry(slug_l.clone()).or_default();
+        let mut push = |model: &str| {
+            let aliased = alias_inner_slashes(model.trim());
+            if aliased.is_empty() {
+                return;
+            }
+            entry.insert(format!("{slug_l}-{aliased}"));
+        };
+        for id in provider_upstream_model_ids(provider) {
+            push(&id);
+        }
+        if is_codex_official_provider(provider) {
+            for seed in OFFICIAL_CATALOG_SEED {
+                push(seed);
+            }
+        }
+    }
+    by_slug
+}
+
+fn foreign_flattened_ids(
+    this_slug: &str,
+    copies_by_slug: &HashMap<String, HashSet<String>>,
+) -> HashSet<String> {
+    let this = this_slug.trim().to_ascii_lowercase();
+    let mut out = HashSet::new();
+    for (slug, copies) in copies_by_slug {
+        if slug != &this {
+            out.extend(copies.iter().cloned());
+        }
+    }
+    out
+}
+
 /// Bare upstream id to advertise under `this_slug`, or `None` if `raw` belongs
 /// to another routing namespace.
 ///
@@ -217,6 +305,7 @@ pub(crate) fn bare_catalog_model_id(
     raw: &str,
     this_slug: &str,
     known_slugs: &HashSet<String>,
+    foreign_flattened: &HashSet<String>,
 ) -> Option<String> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -234,7 +323,7 @@ pub(crate) fn bare_catalog_model_id(
             return None;
         }
         if prefix == this {
-            return bare_catalog_model_id(rest, this_slug, known_slugs);
+            return bare_catalog_model_id(rest, this_slug, known_slugs, foreign_flattened);
         }
         if known_slugs
             .iter()
@@ -245,17 +334,8 @@ pub(crate) fn bare_catalog_model_id(
         return Some(alias_inner_slashes(raw));
     }
 
-    if let Some((head, rest)) = raw.split_once('-') {
-        let head = head.to_ascii_lowercase();
-        if !head.is_empty()
-            && head != this
-            && !rest.is_empty()
-            && known_slugs
-                .iter()
-                .any(|slug| slug.eq_ignore_ascii_case(&head))
-        {
-            return None;
-        }
+    if foreign_flattened.contains(&raw.to_ascii_lowercase()) {
+        return None;
     }
 
     let doubled = format!("{this}-{this}-");
@@ -269,6 +349,9 @@ pub(crate) fn bare_catalog_model_id(
         raw
     };
     if peeled.is_empty() {
+        return None;
+    }
+    if foreign_flattened.contains(&peeled.to_ascii_lowercase()) {
         return None;
     }
     Some(alias_inner_slashes(peeled))
@@ -473,8 +556,24 @@ pub fn strip_routing_prefix_from_body(mut body: Value, provider: &Provider) -> V
     if rest.is_empty() || !routing_slug_belongs_to_provider(slug, provider) {
         return body;
     }
-    body["model"] = json!(rest);
+    body["model"] = json!(resolve_advertised_upstream(provider, rest));
     body
+}
+
+/// Map a catalog alias (`org-model`) back to the card's advertised id (`org/model`).
+pub fn resolve_advertised_upstream(provider: &Provider, requested: &str) -> String {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return requested.to_string();
+    }
+    let ids = provider_upstream_model_ids(provider);
+    if let Some(id) = ids.iter().find(|id| id.eq_ignore_ascii_case(requested)) {
+        return id.clone();
+    }
+    if let Some(id) = ids.iter().find(|id| models_match(id, requested)) {
+        return id.clone();
+    }
+    requested.to_string()
 }
 
 fn routing_slug_belongs_to_provider(slug: &str, provider: &Provider) -> bool {
@@ -514,7 +613,7 @@ pub fn decide_model_route(providers: &[Provider], request_model: &str) -> ModelR
         }) {
             return ModelRouteDecision::Pinned {
                 provider_id: provider.id.clone(),
-                upstream_model: rest.to_string(),
+                upstream_model: resolve_advertised_upstream(provider, rest),
             };
         }
     }
@@ -530,7 +629,7 @@ pub fn decide_model_route(providers: &[Provider], request_model: &str) -> ModelR
     if matches.len() == 1 {
         return ModelRouteDecision::Pinned {
             provider_id: matches[0].id.clone(),
-            upstream_model: trimmed.to_string(),
+            upstream_model: resolve_advertised_upstream(matches[0], trimmed),
         };
     }
 
@@ -643,6 +742,7 @@ pub fn build_merged_codex_routing_catalog_with_combos(
         .values()
         .map(|slug| slug.to_ascii_lowercase())
         .collect();
+    let copies_by_slug = flattened_namespace_copies(providers, &slugs);
     let discovery = load_routing_discovery_cache();
     let hide_unprefixed_official = catalog_has_non_official_participant(providers);
     let mut models = Vec::new();
@@ -656,6 +756,7 @@ pub fn build_merged_codex_routing_catalog_with_combos(
         let Some(slug) = slugs.get(&provider.id) else {
             continue;
         };
+        let foreign_flattened = foreign_flattened_ids(slug, &copies_by_slug);
         let is_official = is_codex_official_provider(provider);
         let keep_unprefixed = is_official && !hide_unprefixed_official;
         let profile = resolve_codex_catalog_tool_profile(provider);
@@ -690,7 +791,7 @@ pub fn build_merged_codex_routing_catalog_with_combos(
             let have: HashSet<String> = entries
                 .iter()
                 .filter_map(|entry| entry.get("slug").and_then(Value::as_str))
-                .filter_map(|id| bare_catalog_model_id(id, slug, &known_slugs))
+                .filter_map(|id| bare_catalog_model_id(id, slug, &known_slugs, &foreign_flattened))
                 .flat_map(|id| [id.clone(), alias_inner_slashes(&id)])
                 .collect();
             let extra: Vec<String> = advertised_model_ids_for_catalog(
@@ -698,7 +799,7 @@ pub fn build_merged_codex_routing_catalog_with_combos(
                 discovery.get(&provider.id).map(Vec::as_slice),
             )
             .into_iter()
-            .filter_map(|id| bare_catalog_model_id(&id, slug, &known_slugs))
+            .filter_map(|id| bare_catalog_model_id(&id, slug, &known_slugs, &foreign_flattened))
             .filter(|id| !have.contains(id) && !have.contains(&alias_inner_slashes(id)))
             .filter(|id| !is_non_coding_discovery_model(id))
             .collect();
@@ -718,7 +819,9 @@ pub fn build_merged_codex_routing_catalog_with_combos(
             if original_slug.is_empty() {
                 continue;
             }
-            let Some(bare) = bare_catalog_model_id(&original_slug, slug, &known_slugs) else {
+            let Some(bare) =
+                bare_catalog_model_id(&original_slug, slug, &known_slugs, &foreign_flattened)
+            else {
                 continue;
             };
 
@@ -810,16 +913,18 @@ pub fn rewrite_live_codex_toml_for_shared_catalog(
     providers: &[Provider],
     current_provider_id: Option<&str>,
 ) -> Result<(), AppError> {
-    let config = crate::codex_config::read_codex_config_text()?;
-    if config.trim().is_empty() {
-        return Ok(());
-    }
-    let next =
-        rewrite_codex_toml_text_for_routing_takeover(&config, providers, current_provider_id)?;
-    if next == config {
-        return Ok(());
-    }
-    crate::codex_config::write_codex_live_config_atomic(Some(&next))
+    with_live_codex_toml_lock(|| {
+        let config = crate::codex_config::read_codex_config_text()?;
+        if config.trim().is_empty() {
+            return Ok(());
+        }
+        let next =
+            rewrite_codex_toml_text_for_routing_takeover(&config, providers, current_provider_id)?;
+        if next == config {
+            return Ok(());
+        }
+        crate::codex_config::write_codex_live_config_atomic(Some(&next))
+    })
 }
 
 fn rewrite_codex_toml_text_for_routing_takeover(
@@ -1064,7 +1169,21 @@ fn live_model_for_current_provider(
     if live_model_belongs_to_provider(providers, current_model, current_provider_id) {
         return namespaced_live_model(providers, current_model);
     }
+    // A session pick of `grok/grok-4.6` must survive catalog-only refresh even
+    // when the logical current card is still Official.
+    if is_third_party_routed_pin(providers, current_model) {
+        return None;
+    }
     Some(current_default)
+}
+
+fn is_third_party_routed_pin(providers: &[Provider], model: &str) -> bool {
+    match decide_model_route(providers, model) {
+        ModelRouteDecision::Pinned { provider_id, .. } => providers
+            .iter()
+            .any(|provider| provider.id == provider_id && !is_codex_official_provider(provider)),
+        ModelRouteDecision::Default => false,
+    }
 }
 
 fn live_model_belongs_to_provider(providers: &[Provider], model: &str, provider_id: &str) -> bool {
@@ -1230,15 +1349,17 @@ pub fn request_should_follow_session(
     {
         return true;
     }
-    let leaf = catalog_model_leaf(trimmed);
-    if leaf.starts_with("gpt-") || leaf.starts_with("codex-") {
+    if is_official_auxiliary_model(trimmed) {
         return true;
     }
     match decide_model_route(providers, trimmed) {
         ModelRouteDecision::Pinned { provider_id, .. } => providers
             .iter()
             .any(|provider| provider.id == provider_id && is_codex_official_provider(provider)),
-        ModelRouteDecision::Default => false,
+        ModelRouteDecision::Default => {
+            let leaf = catalog_model_leaf(trimmed);
+            leaf.starts_with("gpt-") || leaf.starts_with("codex-")
+        }
     }
 }
 
@@ -1260,14 +1381,28 @@ pub fn provider_rejects_remote_compact(provider: &Provider) -> bool {
 /// Write a third-party session pick into live `config.toml` `model` so the
 /// next Codex process (and any helper that rereads the file) stops calling
 /// Official. Official ids are never persisted here.
+fn live_codex_toml_lock() -> &'static Mutex<()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    &LOCK
+}
+
+fn with_live_codex_toml_lock<T>(update: impl FnOnce() -> T) -> T {
+    let _guard = live_codex_toml_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    update()
+}
+
 pub fn persist_third_party_live_codex_model(model: &str) {
-    let Some(next) = live_codex_model_persist_update(model) else {
-        return;
-    };
-    match crate::codex_config::write_codex_live_config_atomic(Some(&next)) {
-        Ok(()) => log::info!("[Codex] persisted live model = {model}"),
-        Err(error) => log::warn!("[Codex] failed to persist live model {model}: {error}"),
-    }
+    with_live_codex_toml_lock(|| {
+        let Some(next) = live_codex_model_persist_update(model) else {
+            return;
+        };
+        match crate::codex_config::write_codex_live_config_atomic(Some(&next)) {
+            Ok(()) => log::info!("[Codex] persisted live model = {model}"),
+            Err(error) => log::warn!("[Codex] failed to persist live model {model}: {error}"),
+        }
+    });
 }
 
 pub fn current_live_codex_model() -> Option<String> {
@@ -1718,9 +1853,53 @@ mod tests {
     #[test]
     fn inner_slash_alias_matches() {
         let kimi = provider("kimi", "Kimi", &["org/model"]);
-        match decide_model_route(&[kimi], "org-model") {
-            ModelRouteDecision::Pinned { provider_id, .. } => assert_eq!(provider_id, "kimi"),
+        match decide_model_route(&[kimi.clone()], "org-model") {
+            ModelRouteDecision::Pinned {
+                provider_id,
+                upstream_model,
+            } => {
+                assert_eq!(provider_id, "kimi");
+                assert_eq!(upstream_model, "org/model");
+            }
             other => panic!("{other:?}"),
+        }
+        match decide_model_route(&[kimi.clone()], "kimi/org-model") {
+            ModelRouteDecision::Pinned {
+                provider_id,
+                upstream_model,
+            } => {
+                assert_eq!(provider_id, "kimi");
+                assert_eq!(upstream_model, "org/model");
+            }
+            other => panic!("{other:?}"),
+        }
+        match decide_model_route(&[kimi.clone()], "kimi/org/model") {
+            ModelRouteDecision::Pinned { upstream_model, .. } => {
+                assert_eq!(upstream_model, "org/model");
+            }
+            other => panic!("{other:?}"),
+        }
+        let stripped = strip_routing_prefix_from_body(json!({ "model": "kimi/org-model" }), &kimi);
+        assert_eq!(stripped["model"], "org/model");
+    }
+
+    #[test]
+    fn opt_out_card_still_pins_by_slug() {
+        let mut hidden = provider("hidden", "Hidden", &["secret-model"]);
+        hidden.meta = Some(ProviderMeta {
+            routing_catalog: Some(false),
+            ..Default::default()
+        });
+        let visible = provider("kimi", "Kimi", &["k2"]);
+        match decide_model_route(&[hidden, visible], "hidden/secret-model") {
+            ModelRouteDecision::Pinned {
+                provider_id,
+                upstream_model,
+            } => {
+                assert_eq!(provider_id, "hidden");
+                assert_eq!(upstream_model, "secret-model");
+            }
+            other => panic!("opt-out must still pin by slug, got {other:?}"),
         }
     }
 
@@ -2218,7 +2397,7 @@ mod tests {
         assert_eq!(
             shared_catalog_live_rewrite(&providers, Some("grok/grok-4.6"), None, Some("default"),),
             SharedCatalogLiveRewrite {
-                model: Some("default/gpt-5.4".into()),
+                model: None,
                 clear_review_model: false,
             }
         );
@@ -2340,15 +2519,17 @@ mod tests {
             "codes/gpt-5.4",
             &follow_codes
         ));
-        assert!(request_should_follow_session(
-            &providers,
-            "codes/gpt-5.6-sol",
-            &follow_codes
-        ));
+        assert!(
+            !request_should_follow_session(&providers, "codes/gpt-5.6-sol", &follow_codes),
+            "a known non-Official slug pin must not be stolen by gpt-* leaf follow"
+        );
         assert!(!request_should_follow_session(
             &providers,
             "kimi/k2",
             &follow_codes
+        ));
+        assert!(request_should_follow_session(
+            &providers, "gpt-5.5", &follow
         ));
     }
 
@@ -2676,33 +2857,52 @@ base_url = "http://127.0.0.1:15721/v1"
     #[test]
     fn bare_catalog_id_peels_own_prefix_and_drops_foreign() {
         let slugs = known(&["default", "grok"]);
+        let foreign = HashSet::from(["default-gpt-5.6-sol".to_string()]);
         assert_eq!(
-            bare_catalog_model_id("grok-4.6", "grok", &slugs).as_deref(),
+            bare_catalog_model_id("grok-4.6", "grok", &slugs, &foreign).as_deref(),
             Some("grok-4.6")
         );
         assert_eq!(
-            bare_catalog_model_id("grok/grok-4.6", "grok", &slugs).as_deref(),
+            bare_catalog_model_id("grok/grok-4.6", "grok", &slugs, &foreign).as_deref(),
             Some("grok-4.6")
         );
         assert_eq!(
-            bare_catalog_model_id("grok/grok-grok-4.6", "grok", &slugs).as_deref(),
+            bare_catalog_model_id("grok/grok-grok-4.6", "grok", &slugs, &foreign).as_deref(),
             Some("grok-4.6")
         );
         assert_eq!(
-            bare_catalog_model_id("default/gpt-5.6-sol", "grok", &slugs),
+            bare_catalog_model_id("default/gpt-5.6-sol", "grok", &slugs, &foreign),
             None
         );
         assert_eq!(
-            bare_catalog_model_id("default-gpt-5.6-sol", "grok", &slugs),
+            bare_catalog_model_id("default-gpt-5.6-sol", "grok", &slugs, &foreign),
             None
         );
         assert_eq!(
-            bare_catalog_model_id("grok/default-gpt-5.6-sol", "grok", &slugs),
+            bare_catalog_model_id("grok/default-gpt-5.6-sol", "grok", &slugs, &foreign),
             None
         );
         assert_eq!(
-            bare_catalog_model_id("org/custom", "grok", &slugs).as_deref(),
+            bare_catalog_model_id("org/custom", "grok", &slugs, &foreign).as_deref(),
             Some("org-custom")
+        );
+        assert_eq!(
+            bare_catalog_model_id("kimi-k2", "packy", &slugs, &foreign).as_deref(),
+            Some("kimi-k2"),
+            "native ids that only share a hyphen prefix with a sibling slug must stay"
+        );
+    }
+
+    #[test]
+    fn sibling_native_hyphen_ids_stay_in_merged_catalog() {
+        let kimi = provider("kimi", "Kimi", &["kimi-k2"]);
+        let packy = provider("packy", "Packy", &["kimi-k2", "kimi-for-coding"]);
+        let slugs = catalog_slugs(&[kimi, packy]);
+        assert!(slugs.contains(&"kimi/kimi-k2".to_string()), "{slugs:?}");
+        assert!(slugs.contains(&"packy/kimi-k2".to_string()), "{slugs:?}");
+        assert!(
+            slugs.contains(&"packy/kimi-for-coding".to_string()),
+            "{slugs:?}"
         );
     }
 

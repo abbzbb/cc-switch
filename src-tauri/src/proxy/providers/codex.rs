@@ -84,26 +84,28 @@ pub fn should_convert_codex_responses_to_chat(provider: &Provider, endpoint: &st
     ) && codex_provider_uses_chat_completions(provider)
 }
 
-/// Whether a converted Codex Responses request may send `prompt_cache_key` to
-/// its Chat Completions upstream. Unknown OpenAI-compatible gateways default to
-/// false because many reject unsupported request fields with HTTP 400.
-pub fn should_send_codex_chat_prompt_cache_key(provider: &Provider) -> bool {
-    match provider
+fn prompt_cache_routing_mode(provider: &Provider) -> &str {
+    provider
         .meta
         .as_ref()
         .and_then(|meta| meta.prompt_cache_routing.as_deref())
         .unwrap_or("auto")
-    {
-        "enabled" => return true,
-        "disabled" => return false,
-        _ => {}
+}
+
+/// Upstream base URL used for prompt-cache host detection. xAI OAuth ignores
+/// editable form URLs and always targets `api.x.ai`.
+fn codex_provider_configured_base_url(provider: &Provider) -> Option<String> {
+    if provider.is_xai_oauth() {
+        return Some(super::XAI_API_BASE_URL.to_string());
     }
 
-    let base_url = provider
+    provider
         .settings_config
         .get("base_url")
         .or_else(|| provider.settings_config.get("baseURL"))
         .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
         .map(ToString::to_string)
         .or_else(|| {
             provider
@@ -111,19 +113,75 @@ pub fn should_send_codex_chat_prompt_cache_key(provider: &Provider) -> bool {
                 .get("config")
                 .and_then(|value| value.as_str())
                 .and_then(extract_codex_base_url_from_toml)
-        });
+        })
+}
 
-    let Some(base_url) = base_url else {
+fn parsed_provider_host_and_path(provider: &Provider) -> Option<(String, String)> {
+    let base_url = codex_provider_configured_base_url(provider)?;
+    let url = url::Url::parse(&base_url).ok()?;
+    let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
+    Some((host, url.path().to_string()))
+}
+
+/// Hosts whose prompt cache is per-server and need a stable conversation
+/// routing id (`prompt_cache_key` on Responses, `x-grok-conv-id` on Chat).
+fn is_xai_prompt_cache_host(host: &str) -> bool {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    host == "api.x.ai"
+        || host == "x.ai"
+        || host.ends_with(".x.ai")
+        || host == "niuma.codes"
+        || host.ends_with(".niuma.codes")
+}
+
+/// Whether this provider's real upstream is an xAI/Grok-style cache router.
+fn provider_is_xai_prompt_cache_upstream(provider: &Provider) -> bool {
+    provider.is_xai_oauth()
+        || parsed_provider_host_and_path(provider)
+            .is_some_and(|(host, _path)| is_xai_prompt_cache_host(&host))
+}
+
+/// Resolve a stable cache-routing key. Explicit body key wins, then an inbound
+/// `x-grok-conv-id`, then a real client-provided session ID. Generated
+/// per-request UUIDs must never be passed in as `client_session_id`.
+pub fn resolve_prompt_cache_routing_key<'a>(
+    explicit_key: Option<&'a str>,
+    inbound_grok_conv_id: Option<&'a str>,
+    client_session_id: Option<&'a str>,
+) -> Option<&'a str> {
+    explicit_key
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .or_else(|| {
+            inbound_grok_conv_id
+                .map(str::trim)
+                .filter(|conv_id| !conv_id.is_empty())
+        })
+        .or_else(|| {
+            client_session_id
+                .map(str::trim)
+                .filter(|session_id| !session_id.is_empty())
+        })
+}
+
+/// Whether a converted Codex Responses request may send `prompt_cache_key` to
+/// its Chat Completions upstream. Unknown OpenAI-compatible gateways default to
+/// false because many reject unsupported request fields with HTTP 400.
+pub fn should_send_codex_chat_prompt_cache_key(provider: &Provider) -> bool {
+    match prompt_cache_routing_mode(provider) {
+        "enabled" => return true,
+        "disabled" => return false,
+        _ => {}
+    }
+
+    let Some((host, path)) = parsed_provider_host_and_path(provider) else {
         return false;
     };
-    let Ok(url) = url::Url::parse(&base_url) else {
-        return false;
-    };
 
-    match url.host_str() {
-        Some("api.openai.com") => true,
-        Some("api.kimi.com") => {
-            let path = url.path().trim_end_matches('/');
+    match host.as_str() {
+        "api.openai.com" => true,
+        "api.kimi.com" => {
+            let path = path.trim_end_matches('/');
             path == "/coding" || path.starts_with("/coding/")
         }
         _ => false,
@@ -143,19 +201,60 @@ pub fn inject_codex_chat_prompt_cache_key(
         return false;
     }
 
-    let key = explicit_key
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
-        .or_else(|| {
-            client_session_id
-                .map(str::trim)
-                .filter(|session_id| !session_id.is_empty())
-        });
-    let Some(key) = key else {
+    let Some(key) = resolve_prompt_cache_routing_key(explicit_key, None, client_session_id) else {
         return false;
     };
 
     chat_body["prompt_cache_key"] = JsonValue::String(key.to_string());
+    true
+}
+
+/// Whether a native-Responses Codex/Grok request should send `prompt_cache_key`.
+///
+/// xAI stores the prompt cache per server; without this field (or
+/// `x-grok-conv-id` on Chat) load-balancing only hits a tiny shared prefix
+/// (~128 tokens). Auto-enable for xAI OAuth, `*.x.ai`, and niuma.codes.
+/// Unknown strict gateways stay off unless the user opts in — they often 400
+/// on unrecognized body fields. Chat Completions to xAI uses the header
+/// instead; do not add xAI hosts to [`should_send_codex_chat_prompt_cache_key`].
+pub fn should_send_xai_responses_prompt_cache_key(provider: &Provider) -> bool {
+    match prompt_cache_routing_mode(provider) {
+        "enabled" => true,
+        "disabled" => false,
+        _ => provider_is_xai_prompt_cache_upstream(provider),
+    }
+}
+
+/// `x-grok-conv-id` is xAI-specific. Even with routing forced on, only send it
+/// to xAI-like hosts so unknown gateways are not given a foreign header.
+pub fn should_send_xai_conv_id_header(provider: &Provider) -> bool {
+    match prompt_cache_routing_mode(provider) {
+        "disabled" => false,
+        _ => provider_is_xai_prompt_cache_upstream(provider),
+    }
+}
+
+/// Inject `prompt_cache_key` on the native Responses passthrough. An explicit
+/// body key wins; then inbound `x-grok-conv-id` (Grok Build already sends it);
+/// then a real client-provided session ID. Never a generated UUID.
+pub fn inject_xai_responses_prompt_cache_key(
+    provider: &Provider,
+    responses_body: &mut JsonValue,
+    explicit_key: Option<&str>,
+    inbound_grok_conv_id: Option<&str>,
+    client_session_id: Option<&str>,
+) -> bool {
+    if !should_send_xai_responses_prompt_cache_key(provider) || !responses_body.is_object() {
+        return false;
+    }
+
+    let Some(key) =
+        resolve_prompt_cache_routing_key(explicit_key, inbound_grok_conv_id, client_session_id)
+    else {
+        return false;
+    };
+
+    responses_body["prompt_cache_key"] = JsonValue::String(key.to_string());
     true
 }
 
@@ -1274,6 +1373,161 @@ wire_api = "responses"
             Some("session-key"),
         ));
         assert!(unsupported_body.get("prompt_cache_key").is_none());
+    }
+
+    fn xai_oauth_provider() -> Provider {
+        let mut provider = create_provider(json!({ "auth": {}, "config": "" }));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("xai_oauth".to_string()),
+            ..Default::default()
+        });
+        provider
+    }
+
+    #[test]
+    fn xai_prompt_cache_routing_auto_enables_xai_hosts_not_unknown() {
+        let xai_api = create_provider(json!({
+            "base_url": "https://api.x.ai/v1"
+        }));
+        let xai_toml = create_provider(json!({
+            "config": r#"
+model_provider = "xai"
+[model_providers.xai]
+base_url = "https://api.x.ai/v1"
+wire_api = "responses"
+"#
+        }));
+        let niuma = create_provider(json!({
+            "base_url": "https://niuma.codes/v1"
+        }));
+        let regional = create_provider(json!({
+            "base_url": "https://us-east-1.api.x.ai/v1"
+        }));
+        let unknown = create_provider(json!({
+            "base_url": "https://strict.example.com/v1"
+        }));
+        let openai = create_provider(json!({
+            "base_url": "https://api.openai.com/v1"
+        }));
+
+        assert!(should_send_xai_responses_prompt_cache_key(
+            &xai_oauth_provider()
+        ));
+        assert!(should_send_xai_responses_prompt_cache_key(&xai_api));
+        assert!(should_send_xai_responses_prompt_cache_key(&xai_toml));
+        assert!(should_send_xai_responses_prompt_cache_key(&niuma));
+        assert!(should_send_xai_responses_prompt_cache_key(&regional));
+        assert!(!should_send_xai_responses_prompt_cache_key(&unknown));
+        assert!(!should_send_xai_responses_prompt_cache_key(&openai));
+
+        assert!(should_send_xai_conv_id_header(&xai_oauth_provider()));
+        assert!(should_send_xai_conv_id_header(&niuma));
+        assert!(!should_send_xai_conv_id_header(&unknown));
+        assert!(!should_send_xai_conv_id_header(&openai));
+
+        // Chat Completions to xAI uses x-grok-conv-id, not a body field that
+        // a strict Chat parser may 400 on.
+        assert!(!should_send_codex_chat_prompt_cache_key(&xai_api));
+        assert!(!should_send_codex_chat_prompt_cache_key(
+            &xai_oauth_provider()
+        ));
+    }
+
+    #[test]
+    fn xai_prompt_cache_routing_user_override_wins() {
+        let mut xai = xai_oauth_provider();
+        xai.meta.as_mut().unwrap().prompt_cache_routing = Some("disabled".to_string());
+        assert!(!should_send_xai_responses_prompt_cache_key(&xai));
+        assert!(!should_send_xai_conv_id_header(&xai));
+
+        let mut unknown = create_provider(json!({
+            "base_url": "https://strict.example.com/v1"
+        }));
+        unknown.meta = Some(crate::provider::ProviderMeta {
+            prompt_cache_routing: Some("enabled".to_string()),
+            ..Default::default()
+        });
+        assert!(should_send_xai_responses_prompt_cache_key(&unknown));
+        assert!(!should_send_xai_conv_id_header(&unknown));
+    }
+
+    #[test]
+    fn xai_responses_prompt_cache_key_prefers_explicit_then_conv_then_session() {
+        let provider = create_provider(json!({
+            "base_url": "https://api.x.ai/v1"
+        }));
+
+        let mut explicit_body = json!({ "model": "grok-4.6" });
+        assert!(inject_xai_responses_prompt_cache_key(
+            &provider,
+            &mut explicit_body,
+            Some("request-key"),
+            Some("conv-id"),
+            Some("session-key"),
+        ));
+        assert_eq!(explicit_body["prompt_cache_key"], "request-key");
+
+        let mut conv_body = json!({ "model": "grok-4.6" });
+        assert!(inject_xai_responses_prompt_cache_key(
+            &provider,
+            &mut conv_body,
+            None,
+            Some("conv-id"),
+            Some("session-key"),
+        ));
+        assert_eq!(conv_body["prompt_cache_key"], "conv-id");
+
+        let mut session_body = json!({ "model": "grok-4.6" });
+        assert!(inject_xai_responses_prompt_cache_key(
+            &provider,
+            &mut session_body,
+            None,
+            None,
+            Some("codex_d937243f-2702-4f20-97b6-c9682235ab81"),
+        ));
+        assert_eq!(
+            session_body["prompt_cache_key"],
+            "codex_d937243f-2702-4f20-97b6-c9682235ab81"
+        );
+    }
+
+    #[test]
+    fn xai_responses_prompt_cache_key_is_not_injected_without_real_session_or_support() {
+        let xai = create_provider(json!({
+            "base_url": "https://api.x.ai/v1"
+        }));
+        let mut no_session_body = json!({ "model": "grok-4.6" });
+        assert!(!inject_xai_responses_prompt_cache_key(
+            &xai,
+            &mut no_session_body,
+            None,
+            None,
+            None,
+        ));
+        assert!(no_session_body.get("prompt_cache_key").is_none());
+
+        let unknown = create_provider(json!({
+            "base_url": "https://strict.example.com/v1"
+        }));
+        let mut unsupported_body = json!({ "model": "other" });
+        assert!(!inject_xai_responses_prompt_cache_key(
+            &unknown,
+            &mut unsupported_body,
+            Some("request-key"),
+            Some("conv-id"),
+            Some("session-key"),
+        ));
+        assert!(unsupported_body.get("prompt_cache_key").is_none());
+
+        let mut not_object = json!("not-an-object");
+        assert!(!inject_xai_responses_prompt_cache_key(
+            &xai,
+            &mut not_object,
+            Some("request-key"),
+            None,
+            Some("session-key"),
+        ));
+        assert_eq!(not_object, json!("not-an-object"));
     }
 
     #[test]

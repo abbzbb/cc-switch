@@ -8,9 +8,7 @@
 use crate::codex_config::{extract_codex_api_key, extract_codex_base_url};
 use crate::provider::Provider;
 use crate::proxy::inbound_auth::is_proxy_auth_placeholder;
-use crate::proxy::model_routing::{
-    load_routing_discovery_cache, save_routing_discovery_cache, MAX_DISCOVERED_MODELS_PER_CARD,
-};
+use crate::proxy::model_routing::{mutate_routing_discovery_cache, MAX_DISCOVERED_MODELS_PER_CARD};
 use crate::proxy::providers::is_codex_official_provider;
 use crate::services::model_fetch::{self, FetchedModel};
 use std::collections::HashMap;
@@ -112,17 +110,24 @@ pub async fn discover_models_for_provider(provider: &Provider) -> Result<Vec<Str
 }
 
 pub async fn refresh_discovery_cache(providers: &[Provider]) -> HashMap<String, Vec<String>> {
-    let mut cache = load_routing_discovery_cache();
     if catalog_fetch_disabled() {
+        let mut cache = HashMap::new();
+        mutate_routing_discovery_cache(|stored| {
+            prune_discovery_keys(stored, providers);
+            cache = stored.clone();
+        });
         return cache;
     }
+    let mut updates = HashMap::new();
+    let mut drop_ids = Vec::new();
     for provider in providers {
         if provider.meta.as_ref().and_then(|meta| meta.routing_catalog) == Some(false) {
+            drop_ids.push(provider.id.clone());
             continue;
         }
         match discover_models_for_provider(provider).await {
             Ok(ids) if !ids.is_empty() => {
-                cache.insert(provider.id.clone(), ids);
+                updates.insert(provider.id.clone(), ids);
             }
             Ok(_) => {}
             Err(error) => {
@@ -134,8 +139,24 @@ pub async fn refresh_discovery_cache(providers: &[Provider]) -> HashMap<String, 
             }
         }
     }
-    save_routing_discovery_cache(&cache);
+    let mut cache = HashMap::new();
+    mutate_routing_discovery_cache(|stored| {
+        prune_discovery_keys(stored, providers);
+        for id in &drop_ids {
+            stored.remove(id);
+        }
+        stored.extend(updates);
+        cache = stored.clone();
+    });
     cache
+}
+
+fn prune_discovery_keys(cache: &mut HashMap<String, Vec<String>>, providers: &[Provider]) {
+    let keep: std::collections::HashSet<&str> = providers
+        .iter()
+        .map(|provider| provider.id.as_str())
+        .collect();
+    cache.retain(|id, _| keep.contains(id.as_str()));
 }
 
 #[cfg(test)]
