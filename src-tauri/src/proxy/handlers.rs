@@ -10,7 +10,7 @@
 use super::{
     content_encoding::{decompress_body, get_content_encoding, is_supported_content_encoding},
     error_mapper::{get_error_message, map_proxy_error_to_status},
-    forwarder::ActiveConnectionGuard,
+    forwarder::{ActiveConnectionGuard, ForwardError, ForwardResult, RequestForwarder},
     handler_config::{
         claude_stream_usage_event_filter, codex_stream_usage_event_filter, CLAUDE_PARSER_CONFIG,
         CODEX_PARSER_CONFIG, GEMINI_PARSER_CONFIG, OPENAI_PARSER_CONFIG,
@@ -19,7 +19,7 @@ use super::{
     providers::{
         codex_chat_common::extract_reasoning_field_text,
         codex_chat_history::record_responses_sse_stream,
-        get_adapter, get_claude_api_format,
+        get_adapter, get_claude_api_format, provider_is_xai_prompt_cache_upstream,
         streaming::create_anthropic_sse_stream,
         streaming_codex_anthropic::{
             create_responses_sse_stream_from_anthropic_with_context,
@@ -32,7 +32,8 @@ use super::{
             create_anthropic_sse_stream_from_responses_with_web_search_options,
         },
         transform, transform_codex_anthropic, transform_codex_chat,
-        transform_codex_responses_namespace, transform_gemini, transform_responses,
+        transform_codex_responses_continue, transform_codex_responses_namespace, transform_gemini,
+        transform_responses,
     },
     response_processor::{
         create_logged_passthrough_stream, create_usage_collector, process_response,
@@ -48,7 +49,7 @@ use super::{
 use crate::{app_config::AppType, database::PRICING_SOURCE_REQUEST};
 use axum::{
     extract::{Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, Extensions, HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -1057,18 +1058,76 @@ async fn handle_responses_for_app(
     // function-call names (see the namespace-restore dispatch below).
     let namespace_restore_map = transform_codex_responses_namespace::namespace_restore_map(&body);
 
+    let mut request_body = body;
+    let request_headers = headers;
+    let request_extensions = extensions;
+    let request_method = method;
     let forwarder = ctx.create_forwarder(&state);
     let mut result = match forwarder
         .forward_with_retry(
             &app_type,
-            method,
+            request_method.clone(),
             &endpoint,
-            body,
-            headers,
-            extensions,
+            request_body.clone(),
+            request_headers.clone(),
+            request_extensions.clone(),
             ctx.get_providers(),
         )
         .await
+    {
+        Ok(result) => result,
+        Err(mut err) => {
+            if let Some(provider) = err.provider.take() {
+                ctx.provider = provider;
+            }
+            log_forward_error(&state, &ctx, is_stream, &err.error);
+            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error);
+        }
+    };
+
+    if super::providers::should_convert_codex_responses_to_anthropic(&result.provider, &endpoint) {
+        let connection_guard = result.connection_guard.take();
+        ctx.outbound_model = result.outbound_model.take();
+        ctx.provider = result.provider;
+        return handle_codex_anthropic_to_responses_transform(
+            result.response,
+            &ctx,
+            &state,
+            is_stream,
+            connection_guard,
+            codex_tool_context,
+        )
+        .await;
+    }
+
+    if super::providers::should_convert_codex_responses_to_chat(&result.provider, &endpoint) {
+        let connection_guard = result.connection_guard.take();
+        ctx.outbound_model = result.outbound_model.take();
+        ctx.provider = result.provider;
+        return handle_codex_chat_to_responses_transform(
+            result.response,
+            &ctx,
+            &state,
+            is_stream,
+            connection_guard,
+            codex_tool_context,
+        )
+        .await;
+    }
+
+    result = match apply_xai_reasoning_continue(
+        &forwarder,
+        &mut ctx,
+        &state,
+        &app_type,
+        request_method,
+        &endpoint,
+        &mut request_body,
+        &request_headers,
+        &request_extensions,
+        result,
+    )
+    .await
     {
         Ok(result) => result,
         Err(mut err) => {
@@ -1084,30 +1143,6 @@ async fn handle_responses_for_app(
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;
-
-    if super::providers::should_convert_codex_responses_to_anthropic(&ctx.provider, &endpoint) {
-        return handle_codex_anthropic_to_responses_transform(
-            response,
-            &ctx,
-            &state,
-            is_stream,
-            connection_guard,
-            codex_tool_context,
-        )
-        .await;
-    }
-
-    if super::providers::should_convert_codex_responses_to_chat(&ctx.provider, &endpoint) {
-        return handle_codex_chat_to_responses_transform(
-            response,
-            &ctx,
-            &state,
-            is_stream,
-            connection_guard,
-            codex_tool_context,
-        )
-        .await;
-    }
 
     // Native Responses passthrough to a strict gateway (xAI): the request-side
     // flatten (in the forwarder) turned Codex `namespace` tools into flat
@@ -1135,6 +1170,118 @@ async fn handle_responses_for_app(
         connection_guard,
     )
     .await
+}
+
+/// Grok/xAI native Responses: if a hop completes with only reasoning, retry
+/// the same card (not the failover chain) with a developer nudge. Still empty
+/// after two continues → rewrite `response.completed` to `incomplete` so Codex
+/// does not treat the turn as finished (abbzbb#14).
+#[allow(clippy::too_many_arguments)]
+async fn apply_xai_reasoning_continue(
+    forwarder: &RequestForwarder,
+    ctx: &mut RequestContext,
+    state: &ProxyState,
+    app_type: &AppType,
+    method: http::Method,
+    endpoint: &str,
+    request_body: &mut Value,
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    mut result: ForwardResult,
+) -> Result<ForwardResult, ForwardError> {
+    if !provider_is_xai_prompt_cache_upstream(&result.provider) {
+        return Ok(result);
+    }
+
+    let mut continues = 0u32;
+    loop {
+        let inspected =
+            transform_codex_responses_continue::inspect_native_responses_turn(result.response)
+                .await
+                .map_err(|error| ForwardError {
+                    error,
+                    provider: Some(result.provider.clone()),
+                })?;
+        match inspected {
+            transform_codex_responses_continue::InspectedTurn::Passthrough(response) => {
+                result.response = response;
+                return Ok(result);
+            }
+            transform_codex_responses_continue::InspectedTurn::ReasoningOnly {
+                status,
+                headers: response_headers,
+                body,
+                completed_response,
+                is_sse,
+            } => {
+                if let Some(usage) = TokenUsage::from_codex_response_auto(&completed_response)
+                    .filter(TokenUsage::has_billable_tokens)
+                {
+                    let outbound = result
+                        .outbound_model
+                        .clone()
+                        .unwrap_or_else(|| ctx.request_model.clone());
+                    log_usage(
+                        state,
+                        &result.provider.id,
+                        ctx.app_type_str,
+                        outbound.as_str(),
+                        &ctx.request_model,
+                        outbound.as_str(),
+                        usage,
+                        ctx.latency_ms(),
+                        None,
+                        is_sse,
+                        status.as_u16(),
+                        Some(ctx.session_id.clone()),
+                    )
+                    .await;
+                }
+
+                if continues < transform_codex_responses_continue::XAI_REASONING_CONTINUE_LIMIT {
+                    continues += 1;
+                    log::info!(
+                        "[Codex] Grok Responses completed with reasoning only; continuing {continues}/{} (provider={})",
+                        transform_codex_responses_continue::XAI_REASONING_CONTINUE_LIMIT,
+                        result.provider.id
+                    );
+                    transform_codex_responses_continue::prepare_reasoning_continue_request(
+                        request_body,
+                    );
+                    let provider = result.provider.clone();
+                    result = forwarder
+                        .forward_with_retry(
+                            app_type,
+                            method.clone(),
+                            endpoint,
+                            request_body.clone(),
+                            headers.clone(),
+                            extensions.clone(),
+                            vec![provider],
+                        )
+                        .await?;
+                    ctx.provider = result.provider.clone();
+                    if result.outbound_model.is_some() {
+                        ctx.outbound_model = result.outbound_model.clone();
+                    }
+                    continue;
+                }
+
+                log::warn!(
+                    "[Codex] Grok Responses still reasoning-only after {continues} continue(s); rewriting completed to incomplete (provider={})",
+                    result.provider.id
+                );
+                result.response =
+                    transform_codex_responses_continue::reasoning_only_to_incomplete_response(
+                        status,
+                        response_headers,
+                        body,
+                        is_sse,
+                    );
+                return Ok(result);
+            }
+        }
+    }
 }
 
 /// 处理 /v1/responses/compact 请求（OpenAI Responses Compact API - Codex CLI 透传）

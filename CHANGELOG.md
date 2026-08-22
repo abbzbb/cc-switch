@@ -5,6 +5,19 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.10] - 2026-08-22
+
+Grok/xAI no longer finish a Codex turn after a reasoning-only Responses hop.
+
+### Fixed
+
+- **Grok reasoning-only `response.completed` ends the Codex turn (#14)**: Native Responses to xAI/niuma no longer forward a completed hop whose `output[]` is only `reasoning` (no message / tool call). The same card is auto-continued up to twice with a developer nudge and a higher `max_output_tokens`; still empty is rewritten to `response.incomplete` (`max_output_tokens`) so Codex does not show a finished turn with no answer. Grok Responses also get a default output ceiling of 16384 (32768 on `xhigh`) unless the card set `maxOutputTokens`.
+
+### Upgrade notes
+
+- No database schema migration — `SCHEMA_VERSION` stays at 16.
+- Restart CC Switch. Existing Codex threads keep working; a reasoning-only Grok hop should continue or show incomplete instead of `task_complete` with an empty message.
+
 ## [3.20.9] - 2026-08-22
 
 Grok/xAI conversations reuse prompt cache across turns, and Combo picks models in a config → model menu.

@@ -1083,7 +1083,7 @@ export function CodexFormFields({
                           })
                         : t("codexConfig.maxOutputTokensHint", {
                             defaultValue:
-                              "Codex 不会把 model_max_output_tokens 写进请求体，默认上限 8192 容易在长回答或深度思考时被截断（stop_reason=max_tokens）。此处设置会作为 Anthropic 的 max_tokens 覆盖请求值。请勿超过该模型/网关的真实输出上限，否则可能 400。留空使用默认 8192。",
+                              "Codex 不会把 model_max_output_tokens 写进请求体。Grok/xAI 原生 Responses 默认注入 16384（xhigh 为 32768）；Anthropic 路径默认 8192。可在此覆盖。超过网关真实上限可能 400。",
                           })}
                     </p>
                   </div>
