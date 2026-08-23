@@ -378,6 +378,8 @@ fn atomic_write_with_unix_mode(
         .unwrap_or_default()
         .as_nanos();
     static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    #[cfg(windows)]
+    let create_private_temp_in_wsl = unix_mode.is_some() && wsl_private_path_target(path).is_ok();
     let (tmp, mut file) = (|| -> Result<(PathBuf, fs::File), AppError> {
         let mut last_collision = None;
         for _ in 0..16 {
@@ -387,6 +389,18 @@ fn atomic_write_with_unix_mode(
                 std::process::id(),
                 uuid::Uuid::new_v4()
             ));
+            #[cfg(windows)]
+            if create_private_temp_in_wsl {
+                match create_wsl_private_temp(&candidate) {
+                    Ok(file) => return Ok((candidate, file)),
+                    Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                        last_collision = Some((candidate, source));
+                        continue;
+                    }
+                    Err(source) => return Err(AppError::io(&candidate, source)),
+                }
+            }
+
             let mut options = fs::OpenOptions::new();
             options.write(true).create_new(true);
             #[cfg(unix)]
@@ -409,64 +423,21 @@ fn atomic_write_with_unix_mode(
 
     #[cfg(windows)]
     if unix_mode.is_some() {
-        // Windows creates a new file with inherited ACLs. Restrict the empty
-        // temporary file before writing the first credential byte so shared or
-        // WSL-backed parent directories never expose a readable secret window.
-        if wsl_private_path_target(&tmp).is_ok() {
-            // The WSL server does not expose a newly created UNC entry to Linux
-            // until the creating Windows handle closes. The file is still empty.
-            drop(file);
+        // Native Windows files inherit parent ACLs, so restrict the empty temp
+        // before writing. WSL private temps are created as 0600 in Linux and
+        // returned here through a validated no-reparse handle.
+        if !create_private_temp_in_wsl {
             if let Err(source) = restrict_path_private(&tmp) {
+                drop(file);
                 let _ = fs::remove_file(&tmp);
                 return Err(AppError::io(&tmp, source));
             }
-
-            use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
-                FILE_SHARE_WRITE,
-            };
-            let mut options = fs::OpenOptions::new();
-            options
-                .write(true)
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-            file = match options.open(&tmp) {
-                Ok(file) => file,
-                Err(source) => {
-                    let _ = fs::remove_file(&tmp);
-                    return Err(AppError::io(&tmp, source));
-                }
-            };
-            let metadata = match file.metadata() {
-                Ok(metadata) => metadata,
-                Err(source) => {
+            if path.exists() {
+                if let Err(source) = restrict_path_private(path) {
                     drop(file);
                     let _ = fs::remove_file(&tmp);
-                    return Err(AppError::io(&tmp, source));
+                    return Err(AppError::io(path, source));
                 }
-            };
-            if !metadata.is_file()
-                || metadata.len() != 0
-                || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-            {
-                drop(file);
-                let _ = fs::remove_file(&tmp);
-                return Err(AppError::Config(format!(
-                    "WSL private temporary path is not an empty regular file: {}",
-                    tmp.display()
-                )));
-            }
-        } else if let Err(source) = restrict_path_private(&tmp) {
-            drop(file);
-            let _ = fs::remove_file(&tmp);
-            return Err(AppError::io(&tmp, source));
-        }
-        if path.exists() {
-            if let Err(source) = restrict_path_private(path) {
-                drop(file);
-                let _ = fs::remove_file(&tmp);
-                return Err(AppError::io(path, source));
             }
         }
     }
@@ -588,6 +559,95 @@ fn atomic_write_with_unix_mode(
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn create_wsl_private_temp(path: &Path) -> std::io::Result<fs::File> {
+    const ALREADY_EXISTS_EXIT_CODE: i32 = 73;
+    const CREATE_SCRIPT: &str =
+        "if [ -e \"$1\" ] || [ -L \"$1\" ]; then exit 73; fi\numask 077\nset -C\n: > \"$1\"";
+
+    let (distro, linux_path) = wsl_private_path_target(path)?;
+    let output = std::process::Command::new("wsl.exe")
+        .arg("-d")
+        .arg(&distro)
+        .args(["--", "sh", "-c", CREATE_SCRIPT, "cc-switch-private-temp"])
+        .arg(&linux_path)
+        .output()?;
+    if !output.status.success() {
+        let message = format!(
+            "WSL private temporary file creation failed for {linux_path}: status {}; stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        if output.status.code() == Some(ALREADY_EXISTS_EXIT_CODE) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                message,
+            ));
+        }
+        return Err(std::io::Error::other(message));
+    }
+
+    match open_wsl_private_temp(path) {
+        Ok(file) => Ok(file),
+        Err(source) => {
+            let _ = std::process::Command::new("wsl.exe")
+                .arg("-d")
+                .arg(&distro)
+                .args(["--", "rm", "-f", "--"])
+                .arg(&linux_path)
+                .status();
+            Err(source)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn open_wsl_private_temp(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
+    };
+
+    let mut last_not_found = None;
+    for attempt in 0..5 {
+        let mut options = fs::OpenOptions::new();
+        options
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        match options.open(path) {
+            Ok(file) => {
+                let metadata = file.metadata()?;
+                if !metadata.is_file()
+                    || metadata.len() != 0
+                    || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                {
+                    return Err(std::io::Error::other(format!(
+                        "WSL private temporary path is not an empty regular file: {}",
+                        path.display()
+                    )));
+                }
+                return Ok(file);
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                last_not_found = Some(source);
+                if attempt < 4 {
+                    std::thread::sleep(std::time::Duration::from_millis(50 * (attempt + 1)));
+                }
+            }
+            Err(source) => return Err(source),
+        }
+    }
+
+    Err(last_not_found.unwrap_or_else(|| {
+        std::io::Error::other(format!(
+            "WSL private temporary path did not become visible to Windows: {}",
+            path.display()
+        ))
+    }))
 }
 
 /// Restrict `path` to owner-only access: Unix mode 0600, Windows protected DACL
@@ -845,10 +905,20 @@ mod tests {
         }
 
         let dir = tempfile::Builder::new()
-            .prefix("atomic-write-contract-")
+            .prefix("atomic write 'contract-")
             .tempdir_in(&root)
             .unwrap();
         assert_atomic_write_replaces_existing_file(dir.path());
+
+        let collision_path = dir.path().join("private collision 'candidate");
+        let mut collision_file = create_wsl_private_temp(&collision_path).unwrap();
+        collision_file.write_all(b"sentinel").unwrap();
+        collision_file.sync_all().unwrap();
+        drop(collision_file);
+        let collision_error = create_wsl_private_temp(&collision_path).unwrap_err();
+        assert_eq!(collision_error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&collision_path).unwrap(), b"sentinel");
+        std::fs::remove_file(&collision_path).unwrap();
 
         let private_path = dir.path().join("private.json");
         std::fs::write(&private_path, b"old private contents").unwrap();
