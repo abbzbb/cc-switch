@@ -566,7 +566,7 @@ fn create_wsl_private_temp(path: &Path) -> std::io::Result<fs::File> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
     const ALREADY_EXISTS_EXIT_CODE: i32 = 73;
-    const CREATE_SCRIPT: &str = "encoded=$1
+    const CREATE_SCRIPT: &str = "IFS= read -r encoded || exit 74
 case $((${#encoded} % 4)) in 0) ;; 2) encoded=$encoded== ;; 3) encoded=$encoded= ;; *) exit 74 ;; esac
 path=$(printf '%s' \"$encoded\" | tr '_-' '/+' | base64 -d) || exit 74
 [ -n \"$path\" ] || exit 74
@@ -574,7 +574,7 @@ if [ -e \"$path\" ] || [ -L \"$path\" ]; then exit 73; fi
 umask 077
 set -C
 : > \"$path\"";
-    const REMOVE_SCRIPT: &str = "encoded=$1
+    const REMOVE_SCRIPT: &str = "IFS= read -r encoded || exit 74
 case $((${#encoded} % 4)) in 0) ;; 2) encoded=$encoded== ;; 3) encoded=$encoded= ;; *) exit 74 ;; esac
 path=$(printf '%s' \"$encoded\" | tr '_-' '/+' | base64 -d) || exit 74
 [ -n \"$path\" ] || exit 74
@@ -582,12 +582,7 @@ rm -f -- \"$path\"";
 
     let (distro, linux_path) = wsl_private_path_target(path)?;
     let encoded_path = URL_SAFE_NO_PAD.encode(linux_path.as_bytes());
-    let output = std::process::Command::new("wsl.exe")
-        .arg("-d")
-        .arg(&distro)
-        .args(["--", "sh", "-c", CREATE_SCRIPT, "cc-switch-private-temp"])
-        .arg(&encoded_path)
-        .output()?;
+    let output = run_wsl_path_script(&distro, CREATE_SCRIPT, &encoded_path)?;
     if !output.status.success() {
         let message = format!(
             "WSL private temporary file creation failed for {linux_path}: status {}; stderr: {}",
@@ -606,21 +601,40 @@ rm -f -- \"$path\"";
     match open_wsl_private_temp(path) {
         Ok(file) => Ok(file),
         Err(source) => {
-            let _ = std::process::Command::new("wsl.exe")
-                .arg("-d")
-                .arg(&distro)
-                .args([
-                    "--",
-                    "sh",
-                    "-c",
-                    REMOVE_SCRIPT,
-                    "cc-switch-private-temp-cleanup",
-                ])
-                .arg(&encoded_path)
-                .status();
+            let _ = run_wsl_path_script(&distro, REMOVE_SCRIPT, &encoded_path);
             Err(source)
         }
     }
+}
+
+#[cfg(windows)]
+fn run_wsl_path_script(
+    distro: &std::ffi::OsStr,
+    script: &str,
+    encoded_path: &str,
+) -> std::io::Result<std::process::Output> {
+    use std::process::Stdio;
+
+    let mut child = std::process::Command::new("wsl.exe")
+        .arg("-d")
+        .arg(distro)
+        .args(["--", "sh", "-c", script])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let write_result = match child.stdin.take() {
+        Some(mut stdin) => stdin
+            .write_all(encoded_path.as_bytes())
+            .and_then(|_| stdin.write_all(b"\n")),
+        None => Err(std::io::Error::other("WSL child stdin was not piped")),
+    };
+    if let Err(source) = write_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(source);
+    }
+    child.wait_with_output()
 }
 
 #[cfg(windows)]
