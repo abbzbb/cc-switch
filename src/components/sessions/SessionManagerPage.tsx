@@ -429,7 +429,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
   );
 
   const handleResume = async () => {
-    if (!selectedSession?.resumeCommand) return;
+    if (!selectedSession?.resumeCommand || !selectedSession.sourcePath) return;
 
     if (!isMac()) {
       await handleCopy(
@@ -441,8 +441,9 @@ export function SessionManagerPage({ appId }: { appId: string }) {
 
     try {
       await sessionsApi.launchTerminal({
-        command: selectedSession.resumeCommand,
-        cwd: selectedSession.projectDir ?? undefined,
+        providerId: selectedSession.providerId,
+        sessionId: selectedSession.sessionId,
+        sourcePath: selectedSession.sourcePath,
       });
       toast.success(t("sessionManager.terminalLaunched"));
     } catch (error) {

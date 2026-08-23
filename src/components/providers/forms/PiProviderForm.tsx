@@ -65,7 +65,10 @@ import {
 import { useDarkMode } from "@/hooks/useDarkMode";
 import { providerSchema, type ProviderFormData } from "@/lib/schemas/provider";
 import type { ProviderCategory } from "@/types";
-import { translatePiProviderMutationError } from "@/utils/errorUtils";
+import {
+  extractErrorMessage,
+  translatePiProviderMutationError,
+} from "@/utils/errorUtils";
 
 const PI_API_FORMATS = [
   { value: "openai-completions", label: "OpenAI Chat Completions" },
@@ -132,7 +135,7 @@ function validatePiField<T>(
     return operation();
   } catch (error) {
     throw new PiFormValidationError(
-      error instanceof Error ? error.message : String(error),
+      extractErrorMessage(error),
       fieldSelector,
       revealAdvanced,
     );
@@ -1252,7 +1255,7 @@ export function PiProviderForm({
       };
       await onSubmit(values);
     } catch (error) {
-      const rawMessage = error instanceof Error ? error.message : String(error);
+      const rawMessage = extractErrorMessage(error);
       const message =
         error instanceof PiFormValidationError
           ? rawMessage

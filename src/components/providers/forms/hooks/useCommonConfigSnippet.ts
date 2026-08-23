@@ -6,6 +6,7 @@ import {
   validateJsonConfig,
 } from "@/utils/providerConfigUtils";
 import { configApi } from "@/lib/api";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 const LEGACY_STORAGE_KEY = "cc-switch:common-config-snippet";
 const DEFAULT_COMMON_CONFIG_SNIPPET = `{
@@ -241,7 +242,9 @@ export function useCommonConfigSnippet({
           .catch((error: unknown) => {
             console.error("保存通用配置失败:", error);
             setCommonConfigError(
-              t("claudeConfig.saveFailed", { error: String(error) }),
+              t("claudeConfig.saveFailed", {
+                error: extractErrorMessage(error),
+              }),
             );
           });
 
@@ -269,7 +272,9 @@ export function useCommonConfigSnippet({
           .catch((error: unknown) => {
             console.error("保存通用配置失败:", error);
             setCommonConfigError(
-              t("claudeConfig.saveFailed", { error: String(error) }),
+              t("claudeConfig.saveFailed", {
+                error: extractErrorMessage(error),
+              }),
             );
           });
       }
@@ -351,7 +356,9 @@ export function useCommonConfigSnippet({
     } catch (error) {
       console.error("提取通用配置失败:", error);
       setCommonConfigError(
-        t("claudeConfig.extractFailed", { error: String(error) }),
+        t("claudeConfig.extractFailed", {
+          error: extractErrorMessage(error),
+        }),
       );
     } finally {
       setIsExtracting(false);

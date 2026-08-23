@@ -8,6 +8,7 @@
 //! - Skills
 //!
 
+mod inbox;
 mod mcp;
 mod parser;
 mod prompt;
@@ -21,6 +22,9 @@ mod tests;
 use serde::{Deserialize, Serialize};
 
 // Re-export public API
+pub use inbox::{
+    ack as ack_inbox_item, enqueue_error, enqueue_import, mark_listener_ready, DeepLinkInboxItem,
+};
 pub use mcp::import_mcp_from_deeplink;
 pub use parser::parse_deeplink_url;
 pub use prompt::import_prompt_from_deeplink;
@@ -109,10 +113,6 @@ pub struct DeepLinkImportRequest {
     /// Config format (json/toml)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config_format: Option<String>,
-    /// Remote config URL
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub config_url: Option<String>,
-
     // ============ Usage script fields (v3.9+) ============
     /// Whether to enable usage query. Defaults to **disabled** — carrying a script
     /// is not itself a decision to run it; the link must say `usageEnabled=true`.

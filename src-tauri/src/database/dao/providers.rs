@@ -183,6 +183,17 @@ impl Database {
             .transaction()
             .map_err(|e| AppError::Database(e.to_string()))?;
 
+        Self::save_provider_in_transaction(&tx, app_type, provider)?;
+
+        tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    pub(crate) fn save_provider_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        app_type: &str,
+        provider: &Provider,
+    ) -> Result<(), AppError> {
         let mut meta_clone = provider.meta.clone().unwrap_or_default();
         let endpoints = std::mem::take(&mut meta_clone.custom_endpoints);
 
@@ -273,7 +284,6 @@ impl Database {
             }
         }
 
-        tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
         Ok(())
     }
 
@@ -403,6 +413,58 @@ impl Database {
             params![id, app_type],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
+
+        tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Restore the database portion of an interrupted provider import.
+    ///
+    /// The imported row and the outgoing current row are restored in the same
+    /// transaction as the current marker, so callers never expose a partially
+    /// compensated provider state.
+    pub(crate) fn restore_provider_import_state(
+        &self,
+        app_type: &str,
+        imported_id: &str,
+        previous_imported: Option<&Provider>,
+        previous_current: Option<&Provider>,
+        previous_current_id: Option<&str>,
+    ) -> Result<(), AppError> {
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn
+            .transaction()
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        match previous_imported {
+            Some(provider) => Self::save_provider_in_transaction(&tx, app_type, provider)?,
+            None => {
+                tx.execute(
+                    "DELETE FROM providers WHERE id = ?1 AND app_type = ?2",
+                    params![imported_id, app_type],
+                )
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            }
+        }
+
+        if let Some(provider) = previous_current {
+            if provider.id != imported_id {
+                Self::save_provider_in_transaction(&tx, app_type, provider)?;
+            }
+        }
+
+        tx.execute(
+            "UPDATE providers SET is_current = 0 WHERE app_type = ?1",
+            params![app_type],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        if let Some(current_id) = previous_current_id {
+            tx.execute(
+                "UPDATE providers SET is_current = 1 WHERE id = ?1 AND app_type = ?2",
+                params![current_id, app_type],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
 
         tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
         Ok(())

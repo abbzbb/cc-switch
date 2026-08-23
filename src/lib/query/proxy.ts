@@ -8,6 +8,7 @@ import type {
   ProxyTakeoverStatus,
 } from "@/types/proxy";
 import { getAppLabel } from "@/config/appConfig";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 export const proxyKeys = {
   status: ["proxyStatus"] as const,
@@ -65,6 +66,9 @@ export function useSetProxyTakeoverForApp() {
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: proxyKeys.takeoverStatus });
       queryClient.invalidateQueries({ queryKey: proxyKeys.status });
+      queryClient.invalidateQueries({
+        queryKey: proxyKeys.appConfig(variables.appType),
+      });
       const appLabel = getAppLabel(variables.appType);
       toast.success(
         variables.enabled
@@ -109,9 +113,11 @@ export function useUpdateGlobalProxyConfig() {
       queryClient.invalidateQueries({ queryKey: proxyKeys.globalConfig });
       queryClient.invalidateQueries({ queryKey: proxyKeys.status });
     },
-    onError: (error: Error) => {
+    onError: (error: unknown) => {
       toast.error(
-        t("proxy.settings.toast.saveFailed", { error: error.message }),
+        t("proxy.settings.toast.saveFailed", {
+          error: extractErrorMessage(error),
+        }),
       );
     },
   });
@@ -149,9 +155,11 @@ export function useUpdateAppProxyConfig() {
       queryClient.invalidateQueries({ queryKey: ["circuitBreakerConfig"] });
       queryClient.invalidateQueries({ queryKey: proxyKeys.status });
     },
-    onError: (error: Error) => {
+    onError: (error: unknown) => {
       toast.error(
-        t("proxy.settings.toast.saveFailed", { error: error.message }),
+        t("proxy.settings.toast.saveFailed", {
+          error: extractErrorMessage(error),
+        }),
       );
     },
   });

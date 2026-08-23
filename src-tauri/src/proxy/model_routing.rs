@@ -2903,6 +2903,7 @@ base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
+    #[serial]
     fn mixed_catalog_does_not_double_prefix_or_cross_copy() {
         let mut openai = official("default");
         openai.name = "OpenAI".to_string();

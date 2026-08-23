@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { TFunction } from "i18next";
 import { toast } from "sonner";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 export interface FetchedModel {
   id: string;
@@ -92,7 +93,7 @@ export function showFetchModelsError(
   }
 
   // 解析后端错误字符串
-  const msg = String(err);
+  const msg = extractErrorMessage(err);
 
   if (msg.includes("HTTP 401") || msg.includes("HTTP 403")) {
     toast.error(t("providerForm.fetchModelsAuthFailed"));

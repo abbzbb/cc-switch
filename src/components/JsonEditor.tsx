@@ -10,6 +10,7 @@ import { useTranslation } from "react-i18next";
 import { Wand2 } from "lucide-react";
 import { toast } from "sonner";
 import { formatJSON } from "@/utils/formatters";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 interface JsonEditorProps {
   id?: string;
@@ -335,8 +336,7 @@ const JsonEditor: React.FC<JsonEditorProps> = ({
         closeButton: true,
       });
     } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
+      const errorMessage = extractErrorMessage(error) || t("common.unknown");
       toast.error(
         t("common.formatError", {
           defaultValue: "格式化失败：{{error}}",

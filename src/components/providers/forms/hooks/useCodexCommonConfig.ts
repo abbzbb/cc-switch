@@ -4,6 +4,7 @@ import { parse as parseToml } from "smol-toml";
 import { hasTomlCommonConfigSnippet } from "@/utils/providerConfigUtils";
 import { configApi } from "@/lib/api";
 import { normalizeTomlText } from "@/utils/textNormalization";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 /**
  * 合并/剥离通用配置片段（走后端 toml_edit，保注释、保键序）。
@@ -22,7 +23,7 @@ const applyTomlSnippet = async (
     );
     return { updatedConfig };
   } catch (e) {
-    return { updatedConfig: configToml, error: String(e) };
+    return { updatedConfig: configToml, error: extractErrorMessage(e) };
   }
 };
 
@@ -112,7 +113,7 @@ export function useCodexCommonConfig({
     } catch (error) {
       return {
         hasContent: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: extractErrorMessage(error),
       };
     }
   }, []);
@@ -405,7 +406,9 @@ export function useCodexCommonConfig({
           .catch((error: unknown) => {
             console.error("保存 Codex 通用配置失败:", error);
             setCommonConfigError(
-              t("codexConfig.saveFailed", { error: String(error) }),
+              t("codexConfig.saveFailed", {
+                error: extractErrorMessage(error),
+              }),
             );
           });
         return true;
@@ -465,7 +468,9 @@ export function useCodexCommonConfig({
         .catch((error: unknown) => {
           console.error("保存 Codex 通用配置失败:", error);
           setCommonConfigError(
-            t("codexConfig.saveFailed", { error: String(error) }),
+            t("codexConfig.saveFailed", {
+              error: extractErrorMessage(error),
+            }),
           );
         });
 
@@ -524,7 +529,9 @@ export function useCodexCommonConfig({
     } catch (error) {
       console.error("提取 Codex 通用配置失败:", error);
       setCommonConfigError(
-        t("codexConfig.extractFailed", { error: String(error) }),
+        t("codexConfig.extractFailed", {
+          error: extractErrorMessage(error),
+        }),
       );
     } finally {
       setIsExtracting(false);

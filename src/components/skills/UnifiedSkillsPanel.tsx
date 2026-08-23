@@ -35,6 +35,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { settingsApi, skillsApi } from "@/lib/api";
 import { toast } from "sonner";
 import { SKILLS_APP_IDS } from "@/config/appConfig";
+import { extractErrorMessage } from "@/utils/errorUtils";
 import { AppCountBar } from "@/components/common/AppCountBar";
 import { AppToggleGroup } from "@/components/common/AppToggleGroup";
 import { ListItemRow } from "@/components/common/ListItemRow";
@@ -271,7 +272,9 @@ const UnifiedSkillsPanel = React.forwardRef<
     try {
       await toggleAppMutation.mutateAsync({ id, app, enabled });
     } catch (error) {
-      toast.error(t("common.error"), { description: String(error) });
+      toast.error(t("common.error"), {
+        description: extractErrorMessage(error),
+      });
     } finally {
       endWrite();
     }
@@ -297,12 +300,12 @@ const UnifiedSkillsPanel = React.forwardRef<
       if (result.failed.length > 0) {
         toast.error(
           t("common.bulkToggleFailed", { count: result.failed.length }),
-          { description: String(result.failed[0].error) },
+          { description: extractErrorMessage(result.failed[0].error) },
         );
       }
     } catch (error) {
       toast.error(t("common.bulkToggleFailed", { count: ids.length }), {
-        description: String(error),
+        description: extractErrorMessage(error),
       });
     } finally {
       endWrite();
@@ -352,7 +355,9 @@ const UnifiedSkillsPanel = React.forwardRef<
             );
           }
         } catch (error) {
-          toast.error(t("common.error"), { description: String(error) });
+          toast.error(t("common.error"), {
+            description: extractErrorMessage(error),
+          });
         } finally {
           endWrite();
         }
@@ -370,7 +375,9 @@ const UnifiedSkillsPanel = React.forwardRef<
       }
       setImportDialogOpen(true);
     } catch (error) {
-      toast.error(t("common.error"), { description: String(error) });
+      toast.error(t("common.error"), {
+        description: extractErrorMessage(error),
+      });
     } finally {
       endWrite();
     }
@@ -385,7 +392,9 @@ const UnifiedSkillsPanel = React.forwardRef<
         closeButton: true,
       });
     } catch (error) {
-      toast.error(t("common.error"), { description: String(error) });
+      toast.error(t("common.error"), {
+        description: extractErrorMessage(error),
+      });
     } finally {
       endWrite();
     }
@@ -422,7 +431,9 @@ const UnifiedSkillsPanel = React.forwardRef<
         );
       }
     } catch (error) {
-      toast.error(t("skills.installFailed"), { description: String(error) });
+      toast.error(t("skills.installFailed"), {
+        description: extractErrorMessage(error),
+      });
     } finally {
       endWrite();
     }
@@ -448,7 +459,9 @@ const UnifiedSkillsPanel = React.forwardRef<
         });
       }
     } catch (error) {
-      toast.error(t("common.error"), { description: String(error) });
+      toast.error(t("common.error"), {
+        description: extractErrorMessage(error),
+      });
     } finally {
       checkUpdatesLockRef.current = false;
     }
@@ -462,7 +475,9 @@ const UnifiedSkillsPanel = React.forwardRef<
         closeButton: true,
       });
     } catch (error) {
-      toast.error(t("skills.updateFailed"), { description: String(error) });
+      toast.error(t("skills.updateFailed"), {
+        description: extractErrorMessage(error),
+      });
     } finally {
       endWrite();
     }
@@ -481,7 +496,7 @@ const UnifiedSkillsPanel = React.forwardRef<
           successCount++;
         } catch (error) {
           toast.error(t("skills.updateFailed"), {
-            description: `${update.name}: ${String(error)}`,
+            description: `${update.name}: ${extractErrorMessage(error)}`,
           });
         }
       }
@@ -503,7 +518,9 @@ const UnifiedSkillsPanel = React.forwardRef<
       await refetchSkillBackups({ throwOnError: true });
     } catch (error) {
       setRestoreDialogOpen(false);
-      toast.error(t("common.error"), { description: String(error) });
+      toast.error(t("common.error"), {
+        description: extractErrorMessage(error),
+      });
     } finally {
       endWrite();
     }
@@ -525,7 +542,7 @@ const UnifiedSkillsPanel = React.forwardRef<
       );
     } catch (error) {
       toast.error(t("skills.restoreFromBackup.failed"), {
-        description: String(error),
+        description: extractErrorMessage(error),
       });
     } finally {
       endWrite();

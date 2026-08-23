@@ -89,8 +89,7 @@ export function BackupListSection({
     try {
       const result = await restore(confirmFilename);
       setConfirmFilename(null);
-      const safetyId =
-        typeof result === "string" ? result : result.filename;
+      const safetyId = typeof result === "string" ? result : result.filename;
       const warning = typeof result === "object" ? result.warning : undefined;
       toast.success(
         t("settings.backupManager.restoreSuccess", {

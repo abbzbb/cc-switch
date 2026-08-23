@@ -6,6 +6,20 @@ use crate::error::AppError;
 use crate::store::AppState;
 use tauri::State;
 
+#[tauri::command]
+pub fn deeplink_listener_ready() -> Vec<crate::deeplink::DeepLinkInboxItem> {
+    // The listener is already installed before this command runs. Returning the
+    // atomic snapshot covers everything queued before readiness; later items are
+    // emitted because `listener_ready` is now true. Emitting this snapshot too
+    // would deliver every startup item twice.
+    crate::deeplink::mark_listener_ready()
+}
+
+#[tauri::command]
+pub fn ack_deeplink(id: String) -> bool {
+    crate::deeplink::ack_inbox_item(&id)
+}
+
 /// Parse a deep link URL and return the parsed request for frontend confirmation
 #[tauri::command]
 pub fn parse_deeplink(url: String) -> Result<DeepLinkImportRequest, AppError> {

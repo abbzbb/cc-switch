@@ -56,7 +56,9 @@ pub async fn import_config_from_file(
 ) -> Result<Value, AppError> {
     let app_state_for_sync = state.inner().clone();
     let db = app_state_for_sync.db.clone();
-    run_with_database_restore_lock(move || {
+    let proxy_service = app_state_for_sync.proxy_service.clone();
+    run_with_database_restore_lock(move || async move {
+        let _proxy_transition_guard = proxy_service.lock_transition().await;
         tauri::async_runtime::spawn_blocking(move || {
             let path_buf = PathBuf::from(&filePath);
             let backup_id = {
@@ -72,6 +74,7 @@ pub async fn import_config_from_file(
             }
             Ok::<_, AppError>(success_payload_with_warning(backup_id, warning))
         })
+        .await
     })
     .await
     .map_err(|e| AppError::Message(format!("导入配置失败: {e}")))?
@@ -171,7 +174,9 @@ pub async fn restore_db_backup(
 ) -> Result<Value, AppError> {
     let app_state_for_sync = state.inner().clone();
     let db = app_state_for_sync.db.clone();
-    run_with_database_restore_lock(move || {
+    let proxy_service = app_state_for_sync.proxy_service.clone();
+    run_with_database_restore_lock(move || async move {
+        let _proxy_transition_guard = proxy_service.lock_transition().await;
         tauri::async_runtime::spawn_blocking(move || {
             let restored = {
                 let _skill_state_guard = skill_state_write_guard();
@@ -191,6 +196,7 @@ pub async fn restore_db_backup(
                 warning,
             ))
         })
+        .await
     })
     .await
     .map_err(|e| AppError::Message(format!("Restore failed: {e}")))?

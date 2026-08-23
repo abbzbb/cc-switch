@@ -64,6 +64,7 @@ pub fn is_public_health_path(path: &str) -> bool {
     matches!(path, "/health" | "/healthz")
 }
 
+#[cfg(test)]
 pub fn is_status_path(path: &str) -> bool {
     path == "/status"
 }

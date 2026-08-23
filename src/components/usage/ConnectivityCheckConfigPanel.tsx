@@ -11,6 +11,7 @@ import {
   saveStreamCheckConfig,
   type StreamCheckConfig,
 } from "@/lib/api/connectivity-check";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 export function ConnectivityCheckConfigPanel() {
   const { t } = useTranslation();
@@ -39,7 +40,7 @@ export function ConnectivityCheckConfigPanel() {
         degradedThresholdMs: String(data.degradedThresholdMs),
       });
     } catch (e) {
-      setError(String(e));
+      setError(extractErrorMessage(e));
     } finally {
       setIsLoading(false);
     }
@@ -63,7 +64,9 @@ export function ConnectivityCheckConfigPanel() {
         closeButton: true,
       });
     } catch (e) {
-      toast.error(t("streamCheck.configSaveFailed") + ": " + String(e));
+      toast.error(
+        t("streamCheck.configSaveFailed") + ": " + extractErrorMessage(e),
+      );
     } finally {
       setIsSaving(false);
     }

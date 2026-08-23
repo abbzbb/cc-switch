@@ -8,11 +8,31 @@ use crate::error::AppError;
 use std::collections::HashMap;
 use url::Url;
 
+const MAX_DEEPLINK_URL_BYTES: usize = 1024 * 1024;
+const MAX_QUERY_PARAMETERS: usize = 64;
+const MAX_REGULAR_FIELD_BYTES: usize = 16 * 1024;
+const MAX_TEXT_FIELD_BYTES: usize = 64 * 1024;
+const MAX_ENCODED_PAYLOAD_BYTES: usize = 768 * 1024;
+
+fn field_limit(name: &str) -> usize {
+    match name {
+        "config" | "content" | "usageScript" => MAX_ENCODED_PAYLOAD_BYTES,
+        "notes" | "description" => MAX_TEXT_FIELD_BYTES,
+        _ => MAX_REGULAR_FIELD_BYTES,
+    }
+}
+
 /// Parse a ccswitch:// URL into a DeepLinkImportRequest
 ///
 /// Expected format:
 /// ccswitch://v1/import?resource={type}&...
 pub fn parse_deeplink_url(url_str: &str) -> Result<DeepLinkImportRequest, AppError> {
+    if url_str.len() > MAX_DEEPLINK_URL_BYTES {
+        return Err(AppError::InvalidInput(format!(
+            "Deep link URL exceeds the {MAX_DEEPLINK_URL_BYTES}-byte limit"
+        )));
+    }
+
     // Parse URL
     let url = Url::parse(url_str)
         .map_err(|e| AppError::InvalidInput(format!("Invalid deep link URL: {e}")))?;
@@ -47,7 +67,26 @@ pub fn parse_deeplink_url(url_str: &str) -> Result<DeepLinkImportRequest, AppErr
     }
 
     // Parse query parameters
-    let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
+    let query_pairs = url.query_pairs().into_owned().collect::<Vec<_>>();
+    if query_pairs.len() > MAX_QUERY_PARAMETERS {
+        return Err(AppError::InvalidInput(format!(
+            "Deep link has too many query parameters (maximum {MAX_QUERY_PARAMETERS})"
+        )));
+    }
+    for (name, value) in &query_pairs {
+        if name.len() > MAX_REGULAR_FIELD_BYTES {
+            return Err(AppError::InvalidInput(format!(
+                "Deep link field name exceeds the {MAX_REGULAR_FIELD_BYTES}-byte limit"
+            )));
+        }
+        let limit = field_limit(name);
+        if value.len() > limit {
+            return Err(AppError::InvalidInput(format!(
+                "Deep link field '{name}' exceeds the {limit}-byte limit"
+            )));
+        }
+    }
+    let params: HashMap<String, String> = query_pairs.into_iter().collect();
 
     // Extract and validate resource type
     let resource = params
@@ -126,7 +165,11 @@ fn parse_provider_deeplink(
         .filter(|v| !v.is_empty());
     let config = params.get("config").cloned();
     let config_format = params.get("configFormat").cloned();
-    let config_url = params.get("configUrl").cloned();
+    if params.contains_key("configUrl") {
+        return Err(AppError::InvalidInput(
+            "Remote config URL is not supported. Use inline config instead.".to_string(),
+        ));
+    }
     let enabled = params.get("enabled").and_then(|v| v.parse::<bool>().ok());
 
     // Extract usage script fields (v3.9+)
@@ -165,7 +208,6 @@ fn parse_provider_deeplink(
         branch: None,
         config,
         config_format,
-        config_url,
         usage_enabled,
         usage_script,
         usage_api_key,
@@ -235,7 +277,6 @@ fn parse_prompt_deeplink(
         branch: None,
         config: None,
         config_format: None,
-        config_url: None,
         usage_enabled: None,
         usage_script: None,
         usage_api_key: None,
@@ -307,7 +348,6 @@ fn parse_mcp_deeplink(
         repo: None,
         directory: None,
         branch: None,
-        config_url: None,
         usage_enabled: None,
         usage_script: None,
         usage_api_key: None,
@@ -362,7 +402,6 @@ fn parse_skill_deeplink(
         apps: None,
         config: None,
         config_format: None,
-        config_url: None,
         usage_enabled: None,
         usage_script: None,
         usage_api_key: None,

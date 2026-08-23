@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 export async function copyText(text: string): Promise<void> {
   try {
@@ -13,7 +14,7 @@ export async function copyText(text: string): Promise<void> {
         ? webError
         : nativeError instanceof Error
           ? nativeError
-          : new Error(String(webError || nativeError));
+          : new Error(extractErrorMessage(webError || nativeError));
     }
   }
 }

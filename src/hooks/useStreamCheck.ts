@@ -6,6 +6,7 @@ import {
   type StreamCheckResult,
 } from "@/lib/api/connectivity-check";
 import type { AppId } from "@/lib/api";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 /**
  * 供应商连通性检查。
@@ -66,11 +67,12 @@ export function useStreamCheck(appId: AppId) {
 
         return result;
       } catch (e) {
+        const error = extractErrorMessage(e);
         toast.error(
           t("streamCheck.error", {
             providerName: providerName,
-            error: String(e),
-            defaultValue: `${providerName} 检查出错: ${String(e)}`,
+            error,
+            defaultValue: `${providerName} 检查出错: ${error}`,
           }),
         );
         return null;

@@ -13,6 +13,8 @@ import { emitTauriEvent } from "../msw/tauriMocks";
 const deeplinkMocks = vi.hoisted(() => ({
   importFromDeeplink: vi.fn(),
   mergeDeeplinkConfig: vi.fn(async (request: unknown) => request),
+  listenerReady: vi.fn<() => Promise<unknown[]>>(async () => []),
+  ack: vi.fn(async () => true),
 }));
 
 vi.mock("@/lib/api/deeplink", async (importOriginal) => {
@@ -23,6 +25,8 @@ vi.mock("@/lib/api/deeplink", async (importOriginal) => {
       ...actual.deeplinkApi,
       importFromDeeplink: deeplinkMocks.importFromDeeplink,
       mergeDeeplinkConfig: deeplinkMocks.mergeDeeplinkConfig,
+      listenerReady: deeplinkMocks.listenerReady,
+      ack: deeplinkMocks.ack,
     },
   };
 });
@@ -78,6 +82,145 @@ describe("DeepLinkImportDialog", () => {
     deeplinkMocks.mergeDeeplinkConfig.mockImplementation(
       async (request: unknown) => request,
     );
+    deeplinkMocks.listenerReady.mockReset();
+    deeplinkMocks.listenerReady.mockResolvedValue([]);
+    deeplinkMocks.ack.mockReset();
+    deeplinkMocks.ack.mockResolvedValue(true);
+  });
+
+  it("loads startup inbox items in order without replacing the active dialog", async () => {
+    deeplinkMocks.listenerReady.mockResolvedValue([
+      {
+        id: "100",
+        type: "import",
+        payload: {
+          version: "v1",
+          resource: "provider",
+          app: "claude",
+          name: "First Provider",
+          endpoint: "https://first.example.com",
+        },
+      },
+      {
+        id: "101",
+        type: "import",
+        payload: {
+          version: "v1",
+          resource: "provider",
+          app: "claude",
+          name: "Second Provider",
+          endpoint: "https://second.example.com",
+        },
+      },
+    ]);
+
+    render(<DeepLinkImportDialog />, { wrapper: Wrapper });
+
+    expect(await screen.findByText("First Provider")).toBeInTheDocument();
+    expect(screen.queryByText("Second Provider")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+
+    await waitFor(() => expect(deeplinkMocks.ack).toHaveBeenCalledWith("100"));
+    expect(await screen.findByText("Second Provider")).toBeInTheDocument();
+  });
+
+  it("does not advance when cancelling cannot acknowledge the active item", async () => {
+    deeplinkMocks.listenerReady.mockResolvedValue([
+      {
+        id: "200",
+        type: "import",
+        payload: {
+          version: "v1",
+          resource: "provider",
+          app: "claude",
+          name: "Retry Cancel Provider",
+        },
+      },
+      {
+        id: "201",
+        type: "import",
+        payload: {
+          version: "v1",
+          resource: "provider",
+          app: "claude",
+          name: "Blocked Provider",
+        },
+      },
+    ]);
+    deeplinkMocks.ack.mockRejectedValueOnce(new Error("transport failed"));
+
+    render(<DeepLinkImportDialog />, { wrapper: Wrapper });
+    expect(
+      await screen.findByText("Retry Cancel Provider"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+    await waitFor(() => expect(deeplinkMocks.ack).toHaveBeenCalledWith("200"));
+    expect(screen.getByText("Retry Cancel Provider")).toBeInTheDocument();
+    expect(screen.queryByText("Blocked Provider")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+    expect(await screen.findByText("Blocked Provider")).toBeInTheDocument();
+  });
+
+  it("retries only acknowledgement after an import already succeeded", async () => {
+    deeplinkMocks.importFromDeeplink.mockResolvedValue({
+      type: "provider",
+      id: "imported-provider",
+    });
+    deeplinkMocks.ack.mockRejectedValueOnce(new Error("transport failed"));
+
+    render(<DeepLinkImportDialog />, { wrapper: Wrapper });
+    act(() => {
+      emitTauriEvent("deeplink-inbox", {
+        id: "300",
+        type: "import",
+        payload: {
+          version: "v1",
+          resource: "provider",
+          app: "claude",
+          name: "Imported Once",
+        },
+      });
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "deeplink.import" }),
+    );
+    const retry = await screen.findByRole("button", { name: "common.retry" });
+    expect(deeplinkMocks.importFromDeeplink).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(retry);
+    await waitFor(() => expect(deeplinkMocks.ack).toHaveBeenCalledTimes(2));
+    expect(deeplinkMocks.importFromDeeplink).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(screen.queryByText("Imported Once")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("queues an arriving event behind the active dialog", async () => {
+    render(<DeepLinkImportDialog />, { wrapper: Wrapper });
+
+    act(() => {
+      emitTauriEvent("deeplink-import", {
+        version: "v1",
+        resource: "provider",
+        app: "claude",
+        name: "Active Provider",
+        endpoint: "https://active.example.com",
+      });
+      emitTauriEvent("deeplink-import", {
+        version: "v1",
+        resource: "provider",
+        app: "claude",
+        name: "Queued Provider",
+        endpoint: "https://queued.example.com",
+      });
+    });
+
+    expect(await screen.findByText("Active Provider")).toBeInTheDocument();
+    expect(screen.queryByText("Queued Provider")).not.toBeInTheDocument();
   });
 
   it("renders masked usage access token and user id for provider imports", async () => {
@@ -247,6 +390,9 @@ describe("DeepLinkImportDialog", () => {
         failed: [],
       });
     });
+    await waitFor(() =>
+      expect(deeplinkMocks.ack).toHaveBeenCalledWith(expect.any(String)),
+    );
   });
 
   it("validates required provider fields before importing", async () => {

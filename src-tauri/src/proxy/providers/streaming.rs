@@ -295,6 +295,7 @@ fn synthesize_stream_stop_reason(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finalize_anthropic_sse(
     has_sent_message_start: bool,
     has_sent_message_stop: bool,

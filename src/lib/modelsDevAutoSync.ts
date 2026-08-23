@@ -6,6 +6,7 @@ import {
   toModelPricing,
 } from "@/lib/modelsDevPricing";
 import type { ModelsDevSyncState } from "@/types/usage";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 export interface ModelsDevSyncResult {
   skipped: boolean;
@@ -20,8 +21,7 @@ export const MODELS_DEV_SYNC_CONFIG_QUERY_KEY = [
 ] as const;
 export const MODELS_DEV_STARTUP_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
-const errorMessage = (error: unknown) =>
-  error instanceof Error ? error.message : String(error);
+const errorMessage = (error: unknown) => extractErrorMessage(error);
 
 export async function syncModelsDevPricing(
   state?: ModelsDevSyncState,

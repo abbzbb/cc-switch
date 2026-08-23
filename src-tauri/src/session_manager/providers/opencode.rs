@@ -174,7 +174,13 @@ fn scan_sessions_sqlite() -> Vec<SessionMeta> {
             created_at: Some(created),
             last_active_at: Some(updated),
             source_path: Some(format!("sqlite:{db_display}:{session_id}")),
-            resume_command: Some(format!("opencode -s {session_id}")),
+            resume_command: crate::session_manager::terminal::build_resume_command(
+                PROVIDER_ID,
+                &session_id,
+                Some(&format!("sqlite:{db_display}:{session_id}")),
+            )
+            .ok()
+            .flatten(),
         });
     }
     sessions
@@ -477,6 +483,13 @@ fn parse_session(storage: &Path, path: &Path) -> Option<SessionMeta> {
     } else {
         get_first_user_summary(storage, &session_id)
     };
+    let resume_command = crate::session_manager::terminal::build_resume_command(
+        PROVIDER_ID,
+        &session_id,
+        Some(&source_path),
+    )
+    .ok()
+    .flatten();
 
     Some(SessionMeta {
         provider_id: PROVIDER_ID.to_string(),
@@ -487,7 +500,7 @@ fn parse_session(storage: &Path, path: &Path) -> Option<SessionMeta> {
         created_at,
         last_active_at: updated_at.or(created_at),
         source_path: Some(source_path),
-        resume_command: Some(format!("opencode -s {session_id}")),
+        resume_command,
     })
 }
 
@@ -841,7 +854,7 @@ mod tests {
         );
         assert_eq!(
             sessions[1].resume_command.as_deref(),
-            Some("opencode -s ses_1")
+            Some("opencode -s 'ses_1'")
         );
     }
 

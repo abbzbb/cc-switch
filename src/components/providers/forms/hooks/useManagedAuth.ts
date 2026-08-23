@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { authApi, settingsApi } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
+import { extractErrorMessage } from "@/utils/errorUtils";
 import type {
   ManagedAuthProvider,
   ManagedAuthStatus,
@@ -154,7 +155,7 @@ export function useManagedAuth(
             setDeviceCode(null);
           }
         } catch (e) {
-          const errorMessage = e instanceof Error ? e.message : String(e);
+          const errorMessage = extractErrorMessage(e);
           if (
             !errorMessage.includes("pending") &&
             !errorMessage.includes("slow_down")
@@ -181,7 +182,7 @@ export function useManagedAuth(
     onError: (e) => {
       ownsLoginRef.current = false;
       setPollingState("error");
-      setError(e instanceof Error ? e.message : String(e));
+      setError(extractErrorMessage(e));
     },
   });
 
@@ -201,7 +202,7 @@ export function useManagedAuth(
     },
     onError: async (e) => {
       console.error("[ManagedAuth] Failed to logout:", e);
-      setError(e instanceof Error ? e.message : String(e));
+      setError(extractErrorMessage(e));
       await refetchStatus();
     },
   });
@@ -223,7 +224,7 @@ export function useManagedAuth(
     },
     onError: (e) => {
       console.error("[ManagedAuth] Failed to remove account:", e);
-      setError(e instanceof Error ? e.message : String(e));
+      setError(extractErrorMessage(e));
     },
   });
 
@@ -236,7 +237,7 @@ export function useManagedAuth(
     },
     onError: (e) => {
       console.error("[ManagedAuth] Failed to set default account:", e);
-      setError(e instanceof Error ? e.message : String(e));
+      setError(extractErrorMessage(e));
     },
   });
 

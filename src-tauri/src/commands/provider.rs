@@ -899,6 +899,18 @@ pub fn upsert_universal_provider(
 }
 
 #[tauri::command]
+pub fn upsert_and_sync_universal_provider(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    provider: UniversalProvider,
+) -> Result<bool, AppError> {
+    let id = provider.id.clone();
+    let result = ProviderService::upsert_universal_and_sync(state.inner(), provider)?;
+    emit_universal_provider_synced(&app, "upsert_and_sync", &id);
+    Ok(result)
+}
+
+#[tauri::command]
 pub fn delete_universal_provider(
     app: AppHandle,
     state: State<'_, AppState>,

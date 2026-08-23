@@ -247,7 +247,9 @@ describe("Codex Chat provider presets", () => {
     // Zen 网关的合法 effort 档位是逐模型的（models.dev reasoning_options，
     // 2026-08）：统一并集映射会把 Codex 默认的 medium 发给只声明 high|max 的
     // glm-5.2（默认路径），此测试锁住逐模型表，防回退。
-    const preset = codexProviderPresets.find((item) => item.name === "OpenCode Go");
+    const preset = codexProviderPresets.find(
+      (item) => item.name === "OpenCode Go",
+    );
 
     expect(preset, "OpenCode Go preset").toBeDefined();
     expect(preset?.codexChatReasoning?.effortValueMode).toBe("zen");

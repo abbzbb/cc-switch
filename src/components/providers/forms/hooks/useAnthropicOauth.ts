@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import { authApi } from "@/lib/api";
 import { useManagedAuth } from "./useManagedAuth";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 export function useAnthropicOauth(options?: { pollStatus?: boolean }) {
   const managed = useManagedAuth("anthropic_oauth", options);
@@ -23,7 +24,7 @@ export function useAnthropicOauth(options?: { pollStatus?: boolean }) {
       await queryClient.invalidateQueries({ queryKey });
     },
     onError: (error) => {
-      toast.error(error instanceof Error ? error.message : String(error));
+      toast.error(extractErrorMessage(error));
     },
   });
 

@@ -53,6 +53,14 @@ describe("error utilities", () => {
     );
   });
 
+  it("extracts IO and nested Tauri payload objects", () => {
+    expect(
+      extractErrorMessage({
+        payload: { message: "IO 错误: /tmp/config.json: permission denied" },
+      }),
+    ).toBe("IO 错误: /tmp/config.json: permission denied");
+  });
+
   it("maps a simultaneous models.json write to a concise error", () => {
     const t = vi.fn((key: string) => key);
 

@@ -67,6 +67,7 @@ const DailyMemoryPanel: React.FC<DailyMemoryPanelProps> = ({
   const [searching, setSearching] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchRequestRef = useRef(0);
 
   // Dark mode
   const [isDarkMode, setIsDarkMode] = useState(false);
@@ -92,6 +93,7 @@ const DailyMemoryPanel: React.FC<DailyMemoryPanelProps> = ({
   // Debounced search execution
   const executeSearch = useCallback(
     async (query: string) => {
+      const requestId = ++searchRequestRef.current;
       if (!query.trim()) {
         setSearchResults([]);
         setSearching(false);
@@ -100,12 +102,18 @@ const DailyMemoryPanel: React.FC<DailyMemoryPanelProps> = ({
       setSearching(true);
       try {
         const results = await workspaceApi.searchDailyMemoryFiles(query.trim());
-        setSearchResults(results);
+        if (requestId === searchRequestRef.current) {
+          setSearchResults(results);
+        }
       } catch (err) {
-        console.error("Failed to search daily memory files:", err);
-        toast.error(t("workspace.dailyMemory.searchFailed"));
+        if (requestId === searchRequestRef.current) {
+          console.error("Failed to search daily memory files:", err);
+          toast.error(t("workspace.dailyMemory.searchFailed"));
+        }
       } finally {
-        setSearching(false);
+        if (requestId === searchRequestRef.current) {
+          setSearching(false);
+        }
       }
     },
     [t],
@@ -114,6 +122,7 @@ const DailyMemoryPanel: React.FC<DailyMemoryPanelProps> = ({
   // Handle search input change with debounce
   const handleSearchChange = useCallback(
     (value: string) => {
+      searchRequestRef.current += 1;
       setSearchTerm(value);
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
@@ -136,6 +145,7 @@ const DailyMemoryPanel: React.FC<DailyMemoryPanelProps> = ({
 
   // Close search bar and clear state
   const closeSearch = useCallback(() => {
+    searchRequestRef.current += 1;
     setIsSearchOpen(false);
     setSearchTerm("");
     setSearchResults([]);
@@ -171,6 +181,7 @@ const DailyMemoryPanel: React.FC<DailyMemoryPanelProps> = ({
   // Clean up debounce timer on unmount
   useEffect(() => {
     return () => {
+      searchRequestRef.current += 1;
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
       }
@@ -290,6 +301,7 @@ const DailyMemoryPanel: React.FC<DailyMemoryPanelProps> = ({
 
   // Close panel entirely — clear search state
   const handleClose = useCallback(() => {
+    searchRequestRef.current += 1;
     setEditingFile(null);
     setContent("");
     setIsSearchOpen(false);

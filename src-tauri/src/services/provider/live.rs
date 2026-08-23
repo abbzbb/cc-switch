@@ -1553,7 +1553,8 @@ pub(crate) fn sync_current_provider_for_app_to_live(
     Ok(())
 }
 
-fn sync_current_provider_for_app_respecting_takeover(
+/// The caller must hold this application's provider switch lock.
+fn sync_current_provider_for_app_respecting_takeover_locked(
     state: &AppState,
     app_type: &AppType,
 ) -> Result<(), AppError> {
@@ -1583,9 +1584,11 @@ fn sync_current_provider_for_app_respecting_takeover(
             write_live_with_common_config_for_state(state, app_type, provider)?;
         } else {
             futures::executor::block_on(
-                state
-                    .proxy_service
-                    .update_live_backup_from_provider(app_type.as_str(), provider),
+                state.proxy_service.update_live_backup_from_provider_inner(
+                    app_type.as_str(),
+                    provider,
+                    None,
+                ),
             )
             .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
         }
@@ -1610,6 +1613,8 @@ pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
         if matches!(app_type, AppType::Pi) {
             continue;
         }
+        let _switch_guard =
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app(app_type.as_str()));
         let result = if app_type.is_additive_mode() {
             // Additive mode: sync ALL providers
             sync_all_providers_to_live(state, &app_type)
@@ -1617,7 +1622,7 @@ pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
             // Switch mode: sync only current provider. During proxy takeover,
             // update the restore backup instead of rewriting the taken-over
             // live file.
-            sync_current_provider_for_app_respecting_takeover(state, &app_type)
+            sync_current_provider_for_app_respecting_takeover_locked(state, &app_type)
         };
 
         if let Err(error) = result {
@@ -2056,6 +2061,11 @@ pub(crate) fn remove_opencode_provider_from_live(provider_id: &str) -> Result<()
 /// into the CC Switch database. Each provider found will be added to the
 /// database with is_current set to false.
 pub fn import_opencode_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+    let _guard = futures::executor::block_on(
+        state
+            .proxy_service
+            .lock_switch_for_app(AppType::OpenCode.as_str()),
+    );
     use crate::opencode_config;
 
     let providers = opencode_config::get_typed_providers()?;
@@ -2131,6 +2141,11 @@ pub fn import_opencode_providers_from_live(state: &AppState) -> Result<usize, Ap
 /// into the CC Switch database. Each provider found will be added to the
 /// database with is_current set to false.
 pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+    let _guard = futures::executor::block_on(
+        state
+            .proxy_service
+            .lock_switch_for_app(AppType::OpenClaw.as_str()),
+    );
     use crate::openclaw_config;
 
     let providers = openclaw_config::get_typed_providers()?;
@@ -2219,6 +2234,11 @@ pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, Ap
 /// into the CC Switch database. Each provider found will be added to the
 /// database with is_current set to false.
 pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+    let _guard = futures::executor::block_on(
+        state
+            .proxy_service
+            .lock_switch_for_app(AppType::Hermes.as_str()),
+    );
     use crate::hermes_config;
 
     let providers = hermes_config::get_providers()?;

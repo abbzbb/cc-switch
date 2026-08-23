@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { settingsApi, type LogConfig } from "@/lib/api/settings";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 const LOG_LEVELS = ["error", "warn", "info", "debug", "trace"] as const;
 
@@ -37,7 +38,7 @@ export function LogConfigPanel() {
       await settingsApi.setLogConfig(newConfig);
     } catch (e) {
       console.error("Failed to save log config:", e);
-      toast.error(String(e));
+      toast.error(extractErrorMessage(e));
       setConfig(config);
     }
   };

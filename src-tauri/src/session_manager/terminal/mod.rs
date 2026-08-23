@@ -1,5 +1,27 @@
 use std::process::Command;
 
+pub fn build_resume_command(
+    provider_id: &str,
+    session_id: &str,
+    source_path: Option<&str>,
+) -> Result<Option<String>, String> {
+    let session_id = shell_escape(session_id);
+    let command = match provider_id {
+        "codex" => Some(format!("codex resume {session_id}")),
+        "claude" => Some(format!("claude --resume {session_id}")),
+        "gemini" => Some(format!("gemini --resume {session_id}")),
+        "grokbuild" => Some(format!("grok --resume {session_id}")),
+        "opencode" => Some(format!("opencode -s {session_id}")),
+        "pi" => {
+            let source_path = source_path.ok_or("Pi session is missing its source path")?;
+            Some(format!("pi --session {}", shell_escape(source_path)))
+        }
+        "openclaw" | "hermes" => None,
+        _ => return Err(format!("Unsupported session provider: {provider_id}")),
+    };
+    Ok(command)
+}
+
 pub fn launch_terminal(
     target: &str,
     command: &str,
@@ -350,6 +372,30 @@ mod tests {
         assert_eq!(
             build_shell_command("claude --resume abc-123", None),
             "claude --resume abc-123"
+        );
+    }
+
+    #[test]
+    fn resume_command_shell_escapes_untrusted_session_ids() {
+        for session_id in [
+            "abc; touch /tmp/injected",
+            "$(touch /tmp/injected)",
+            "quoted'id",
+            "line1\nline2",
+        ] {
+            assert_eq!(
+                build_resume_command("codex", session_id, None).unwrap(),
+                Some(format!("codex resume {}", shell_escape(session_id)))
+            );
+        }
+    }
+
+    #[test]
+    fn pi_resume_command_shell_escapes_untrusted_source_path() {
+        let source_path = "/tmp/a'; touch /tmp/injected; echo 'b.jsonl";
+        assert_eq!(
+            build_resume_command("pi", "ignored", Some(source_path)).unwrap(),
+            Some(format!("pi --session {}", shell_escape(source_path)))
         );
     }
 

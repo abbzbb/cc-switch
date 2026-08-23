@@ -647,7 +647,7 @@ export function ProviderList({
       ) : (
         renderProviderList()
       )}
-    </div>
+    </div>,
   );
 }
 

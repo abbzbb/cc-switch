@@ -84,6 +84,7 @@ fn import_authorizer(context: rusqlite::hooks::AuthContext<'_>) -> rusqlite::hoo
 
 /// Tables whose data rows are skipped when exporting for WebDAV sync.
 const SYNC_SKIP_TABLES: &[&str] = &[
+    "proxy_config",
     "proxy_request_logs",
     "stream_check_logs",
     "provider_health",
@@ -93,9 +94,15 @@ const SYNC_SKIP_TABLES: &[&str] = &[
     "session_usage_dedup",
 ];
 
+/// Runtime ownership is device-local even for a manual database restore. The
+/// listener and Live files belong to this process/machine, so importing another
+/// snapshot must not replace the rows that describe their current state.
+const DEVICE_LOCAL_RUNTIME_TABLES: &[&str] = &["proxy_config", "proxy_live_backup"];
+
 /// Tables whose local data is preserved from the live database during WebDAV import.
 /// Excludes ephemeral tables like provider_health that can safely rebuild at runtime.
 const SYNC_PRESERVE_TABLES: &[&str] = &[
+    "proxy_config",
     "proxy_request_logs",
     "stream_check_logs",
     "proxy_live_backup",
@@ -153,7 +160,7 @@ impl Database {
 
     /// 从 SQL 字符串导入，返回生成的备份 ID（若无备份则为空字符串）
     pub fn import_sql_string(&self, sql_raw: &str) -> Result<String, AppError> {
-        self.import_sql_string_inner(sql_raw, &[])
+        self.import_sql_string_inner(sql_raw, DEVICE_LOCAL_RUNTIME_TABLES)
     }
 
     /// Import SQL generated for sync, then restore local-only tables from the
@@ -1074,6 +1081,7 @@ impl Database {
                 &[backup_path.as_path()],
             )?;
             before_replace(safety_backup.as_deref())?;
+            Self::restore_tables(&main_conn, &staging_conn, DEVICE_LOCAL_RUNTIME_TABLES)?;
             let backup = Backup::new(&staging_conn, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
             Self::complete_backup(&backup, "恢复主数据库")?;
@@ -2172,13 +2180,65 @@ mod tests {
 
     #[test]
     #[serial]
+    fn manual_sql_import_preserves_device_local_proxy_runtime() -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let remote_db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(remote_db.conn);
+            conn.execute(
+                "UPDATE proxy_config SET listen_port = 22222, enabled = 0
+                 WHERE app_type = 'claude'",
+                [],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO proxy_live_backup
+                 (app_type, original_config, backed_up_at)
+                 VALUES ('claude', 'remote-live', 1)",
+                [],
+            )?;
+        }
+        let remote_sql = remote_db.export_sql_string()?;
+
+        let local_db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(local_db.conn);
+            conn.execute(
+                "UPDATE proxy_config SET listen_port = 33333, enabled = 1
+                 WHERE app_type = 'claude'",
+                [],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO proxy_live_backup
+                 (app_type, original_config, backed_up_at)
+                 VALUES ('claude', 'local-live', 2)",
+                [],
+            )?;
+        }
+
+        local_db.import_sql_string(&remote_sql)?;
+        let conn = crate::database::lock_conn!(local_db.conn);
+        let runtime: (i64, i64, String) = conn.query_row(
+            "SELECT p.listen_port, p.enabled, b.original_config
+             FROM proxy_config p
+             JOIN proxy_live_backup b ON b.app_type = p.app_type
+             WHERE p.app_type = 'claude'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(runtime, (33333, 1, "local-live".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
     fn sync_import_preserves_local_only_tables() -> Result<(), AppError> {
         let _test_home = TestHomeGuard::new();
         let remote_db = Database::memory()?;
         {
             let conn = crate::database::lock_conn!(remote_db.conn);
             conn.execute_batch(
-                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                "UPDATE proxy_config SET listen_port = 22222, enabled = 0;
+                 INSERT INTO providers (id, app_type, name, settings_config, meta)
                  VALUES ('remote-provider', 'claude', 'Remote Provider', '{}', '{}');
                  INSERT INTO proxy_request_logs (
                      request_id, provider_id, app_type, model,
@@ -2207,8 +2267,9 @@ mod tests {
         let remote_sql = remote_db.export_sql_string_for_sync()?;
         let exported = Connection::open_in_memory()?;
         exported.execute_batch(&remote_sql)?;
-        let skipped_counts: (i64, i64, i64, i64, i64, i64) = exported.query_row(
+        let skipped_counts: (i64, i64, i64, i64, i64, i64, i64) = exported.query_row(
             "SELECT
+                (SELECT COUNT(*) FROM proxy_config),
                 (SELECT COUNT(*) FROM proxy_request_logs),
                 (SELECT COUNT(*) FROM stream_check_logs),
                 (SELECT COUNT(*) FROM provider_health),
@@ -2224,16 +2285,18 @@ mod tests {
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )?;
-        assert_eq!(skipped_counts, (0, 0, 0, 0, 0, 0));
+        assert_eq!(skipped_counts, (0, 0, 0, 0, 0, 0, 0));
 
         let local_db = Database::memory()?;
         {
             let conn = crate::database::lock_conn!(local_db.conn);
             conn.execute_batch(
-                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                "UPDATE proxy_config SET listen_port = 33333, enabled = 1;
+                 INSERT INTO providers (id, app_type, name, settings_config, meta)
                  VALUES ('local-provider', 'claude', 'Local Provider', '{}', '{}');
                  INSERT INTO proxy_request_logs (
                      request_id, provider_id, app_type, model,
@@ -2268,6 +2331,16 @@ mod tests {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(providers, vec!["remote-provider"]);
+        let local_proxy: (i64, i64) = conn.query_row(
+            "SELECT listen_port, enabled FROM proxy_config WHERE app_type = 'claude'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(
+            local_proxy,
+            (33333, 1),
+            "sync import must preserve device-local proxy runtime state"
+        );
 
         let preserved_counts: (i64, i64, i64, i64, i64) = conn.query_row(
             "SELECT
@@ -2790,6 +2863,62 @@ mod tests {
             safety_provider, "live-before-restore",
             "safety backup must exactly represent the live state being replaced"
         );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn binary_restore_preserves_device_local_proxy_runtime() -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let db = Database::init()?;
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute(
+                "UPDATE proxy_config SET listen_port = 22222, enabled = 0
+                 WHERE app_type = 'claude'",
+                [],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO proxy_live_backup
+                 (app_type, original_config, backed_up_at)
+                 VALUES ('claude', 'remote-live', 1)",
+                [],
+            )?;
+        }
+        let source_path = db
+            .backup_database_file()?
+            .expect("file-backed database should create a backup");
+        let source_filename = source_path
+            .file_name()
+            .expect("backup filename")
+            .to_string_lossy()
+            .into_owned();
+
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute(
+                "UPDATE proxy_config SET listen_port = 33333, enabled = 1
+                 WHERE app_type = 'claude'",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE proxy_live_backup SET original_config = 'local-live', backed_up_at = 2
+                 WHERE app_type = 'claude'",
+                [],
+            )?;
+        }
+
+        db.restore_from_backup(&source_filename)?;
+        let conn = crate::database::lock_conn!(db.conn);
+        let runtime: (i64, i64, String) = conn.query_row(
+            "SELECT p.listen_port, p.enabled, b.original_config
+             FROM proxy_config p
+             JOIN proxy_live_backup b ON b.app_type = p.app_type
+             WHERE p.app_type = 'claude'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(runtime, (33333, 1, "local-live".to_string()));
         Ok(())
     }
 

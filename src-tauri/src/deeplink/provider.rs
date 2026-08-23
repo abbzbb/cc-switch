@@ -7,10 +7,44 @@ use super::DeepLinkImportRequest;
 use crate::error::AppError;
 use crate::provider::{ClaudeDesktopMode, Provider, ProviderMeta, UsageScript};
 use crate::services::ProviderService;
+use crate::settings::CustomEndpoint;
 use crate::store::AppState;
 use crate::AppType;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::str::FromStr;
+
+fn stable_deeplink_provider_id(
+    app_type: &AppType,
+    provider: &Provider,
+    endpoints: &[String],
+) -> Result<String, AppError> {
+    let sanitized_name = provider
+        .name
+        .chars()
+        .filter(|character| character.is_alphanumeric() || matches!(*character, '-' | '_'))
+        .take(64)
+        .collect::<String>()
+        .to_lowercase();
+    let identity = serde_json::to_vec(&(
+        app_type.as_str(),
+        &provider.name,
+        &provider.website_url,
+        endpoints,
+    ))
+    .map_err(|error| AppError::Config(format!("序列化深链接供应商指纹失败: {error}")))?;
+    let digest = Sha256::digest(identity);
+    let fingerprint = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let id_name = if sanitized_name.is_empty() {
+        "provider"
+    } else {
+        &sanitized_name
+    };
+    Ok(format!("deeplink-{id_name}-{fingerprint}"))
+}
 
 /// Import a provider from a deep link request
 ///
@@ -86,10 +120,15 @@ pub fn import_provider_from_deeplink(
         ));
     }
 
-    let name = merged_request
+    if merged_request
         .name
-        .clone()
-        .ok_or_else(|| AppError::InvalidInput("Missing 'name' field for provider".to_string()))?;
+        .as_ref()
+        .is_none_or(|name| name.trim().is_empty())
+    {
+        return Err(AppError::InvalidInput(
+            "Missing 'name' field for provider".to_string(),
+        ));
+    }
 
     // Parse app type
     let app_type = AppType::from_str(&app_str)
@@ -98,41 +137,31 @@ pub fn import_provider_from_deeplink(
     // Build provider configuration based on app type
     let mut provider = build_provider_from_request(&app_type, &merged_request)?;
 
-    // Generate a unique ID for the provider using timestamp + sanitized name
-    let timestamp = chrono::Utc::now().timestamp_millis();
-    let sanitized_name = name
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-        .collect::<String>()
-        .to_lowercase();
-    provider.id = format!("{sanitized_name}-{timestamp}");
+    // Derive a stable, secret-safe ID from the normalized provider payload. An
+    // exact retry reuses the same row instead of creating timestamp duplicates.
+    provider.id = stable_deeplink_provider_id(&app_type, &provider, &all_endpoints)?;
 
-    let provider_id = provider.id.clone();
-
-    // Use ProviderService to add the provider
-    ProviderService::add(state, app_type.clone(), provider, true)?;
-
-    // Add extra endpoints as custom endpoints (skip first one as it's the primary)
-    for ep in all_endpoints.iter().skip(1) {
-        let normalized = ep.trim().trim_end_matches('/').to_string();
+    let added_at = chrono::Utc::now().timestamp_millis();
+    let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+    for endpoint in all_endpoints.iter().skip(1) {
+        let normalized = endpoint.trim().trim_end_matches('/').to_string();
         if !normalized.is_empty() {
-            if let Err(e) = ProviderService::add_custom_endpoint(
-                state,
-                app_type.clone(),
-                &provider_id,
-                normalized.clone(),
-            ) {
-                log::warn!(
-                    "Failed to add custom endpoint '{}': {e}",
-                    crate::url_for_log(&normalized)
-                );
-            }
+            meta.custom_endpoints
+                .entry(normalized.clone())
+                .or_insert(CustomEndpoint {
+                    url: normalized,
+                    added_at,
+                    last_used: None,
+                });
         }
     }
 
-    // If enabled=true, set as current provider
-    if merged_request.enabled.unwrap_or(false) {
-        ProviderService::switch(state, app_type.clone(), &provider_id)?;
+    let provider_id = provider.id.clone();
+    let enable_after_import = merged_request.enabled.unwrap_or(false);
+
+    ProviderService::import_provider(state, app_type.clone(), provider, enable_after_import)?;
+
+    if enable_after_import && !app_type.is_additive_mode() {
         log::info!("Provider '{provider_id}' set as current for {app_type:?}");
     }
 
@@ -384,9 +413,8 @@ fn build_claude_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
 fn extract_claude_config_env(
     request: &DeepLinkImportRequest,
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
-    // Only the inline base64 config carries an env block. Remote config_url
-    // is not implemented yet (see parse_and_merge_config), so nothing else to
-    // try here.
+    // Only the inline base64 config carries an env block. URL query fields
+    // cannot silently broaden this security boundary.
     let config_b64 = request.config.as_ref()?;
 
     // Honor the declared format; default to JSON like parse_and_merge_config does.
@@ -614,14 +642,14 @@ fn build_hermes_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
 // Config Merge Logic
 // =============================================================================
 
-/// Parse and merge configuration from Base64 encoded config or remote URL
+/// Parse and merge configuration from a Base64 encoded inline config
 ///
-/// Priority: URL params > inline config > remote config
+/// Priority: URL params > inline config
 pub fn parse_and_merge_config(
     request: &DeepLinkImportRequest,
 ) -> Result<DeepLinkImportRequest, AppError> {
     // If no config provided, return original request
-    if request.config.is_none() && request.config_url.is_none() {
+    if request.config.is_none() {
         return Ok(request.clone());
     }
 
@@ -631,11 +659,6 @@ pub fn parse_and_merge_config(
         let decoded = decode_base64_param("config", config_b64)?;
         String::from_utf8(decoded)
             .map_err(|e| AppError::InvalidInput(format!("Invalid UTF-8 in config: {e}")))?
-    } else if let Some(_config_url) = &request.config_url {
-        // Fetch remote config (TODO: implement remote fetching in next phase)
-        return Err(AppError::InvalidInput(
-            "Remote config URL is not yet supported. Use inline config instead.".to_string(),
-        ));
     } else {
         return Ok(request.clone());
     };
@@ -989,6 +1012,30 @@ mod tests {
             model: Some("anthropic/claude-opus-4-8".to_string()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn provider_id_is_stable_for_exact_retries_and_does_not_expose_credentials() {
+        let request = DeepLinkImportRequest {
+            resource: "provider".to_string(),
+            app: Some("claude".to_string()),
+            name: Some("Retry Relay".to_string()),
+            endpoint: Some("https://api.example.com/v1".to_string()),
+            api_key: Some("sk-secret-must-not-appear".to_string()),
+            ..Default::default()
+        };
+        let provider = build_provider_from_request(&AppType::Claude, &request)
+            .expect("build provider identity");
+        let endpoints = vec!["https://api.example.com/v1".to_string()];
+
+        let first = stable_deeplink_provider_id(&AppType::Claude, &provider, &endpoints)
+            .expect("derive first id");
+        let second = stable_deeplink_provider_id(&AppType::Claude, &provider, &endpoints)
+            .expect("derive retry id");
+
+        assert_eq!(first, second);
+        assert!(first.starts_with("deeplink-retryrelay-"));
+        assert!(!first.contains("secret"));
     }
 
     /// deeplink 同时声明 `api_key` 与 `env_key` 时，导入结果只保留用户可见的

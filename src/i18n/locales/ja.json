@@ -2747,7 +2747,6 @@
     "configEmbedded": "埋め込み設定",
     "configRemote": "リモート設定",
     "configDetails": "設定の詳細",
-    "configUrl": "設定ファイル URL",
     "configMergeError": "設定ファイルのマージに失敗しました",
     "primaryEndpoint": "メイン",
     "mcp": {

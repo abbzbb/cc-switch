@@ -17,6 +17,7 @@ import {
   type UpstreamProxyStatus,
   type DetectedProxy,
 } from "@/lib/api/globalProxy";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 /**
  * 获取全局代理 URL
@@ -44,12 +45,7 @@ export function useSetGlobalProxyUrl() {
       queryClient.invalidateQueries({ queryKey: ["upstreamProxyStatus"] });
     },
     onError: (error: unknown) => {
-      const message =
-        error instanceof Error
-          ? error.message
-          : typeof error === "string"
-            ? error
-            : "Unknown error";
+      const message = extractErrorMessage(error) || "Unknown error";
       toast.error(t("settings.globalProxy.saveFailed", { error: message }));
     },
   });
@@ -74,8 +70,8 @@ export function useTestProxy() {
         );
       }
     },
-    onError: (error: Error) => {
-      toast.error(error.message);
+    onError: (error: unknown) => {
+      toast.error(extractErrorMessage(error));
     },
   });
 }
@@ -98,9 +94,11 @@ export function useScanProxies() {
 
   return useMutation({
     mutationFn: scanLocalProxies,
-    onError: (error: Error) => {
+    onError: (error: unknown) => {
       toast.error(
-        t("settings.globalProxy.scanFailed", { error: error.message }),
+        t("settings.globalProxy.scanFailed", {
+          error: extractErrorMessage(error),
+        }),
       );
     },
   });

@@ -23,6 +23,7 @@ import { AppCountBar } from "@/components/common/AppCountBar";
 import { AppToggleGroup } from "@/components/common/AppToggleGroup";
 import { ListItemRow } from "@/components/common/ListItemRow";
 import { ManagementListSearch } from "@/components/common/ManagementListSearch";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 function getMcpSearchText(id: string, server: McpServer): string {
   const spec = server.server ?? {};
@@ -167,7 +168,9 @@ const UnifiedMcpPanel = React.forwardRef<
     try {
       await toggleAppMutation.mutateAsync({ serverId, app, enabled });
     } catch (error) {
-      toast.error(t("common.error"), { description: String(error) });
+      toast.error(t("common.error"), {
+        description: extractErrorMessage(error),
+      });
     } finally {
       endWrite();
     }
@@ -201,7 +204,7 @@ const UnifiedMcpPanel = React.forwardRef<
       }
     } catch (error) {
       toast.error(t("common.bulkToggleFailed", { count: serverIds.length }), {
-        description: String(error),
+        description: extractErrorMessage(error),
         closeButton: true,
       });
     } finally {
@@ -235,7 +238,9 @@ const UnifiedMcpPanel = React.forwardRef<
         });
       }
     } catch (error) {
-      toast.error(t("common.error"), { description: String(error) });
+      toast.error(t("common.error"), {
+        description: extractErrorMessage(error),
+      });
     } finally {
       endWrite();
     }
@@ -259,7 +264,9 @@ const UnifiedMcpPanel = React.forwardRef<
           setConfirmDialog(null);
           toast.success(t("common.success"), { closeButton: true });
         } catch (error) {
-          toast.error(t("common.error"), { description: String(error) });
+          toast.error(t("common.error"), {
+            description: extractErrorMessage(error),
+          });
         } finally {
           endWrite();
         }

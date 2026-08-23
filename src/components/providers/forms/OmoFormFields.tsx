@@ -38,6 +38,7 @@ import {
   ChevronsUpDown,
   X,
 } from "lucide-react";
+import { extractErrorMessage } from "@/utils/errorUtils";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { useReadOmoLocalFile, useReadOmoSlimLocalFile } from "@/lib/query/omo";
@@ -878,7 +879,7 @@ export function OmoFormFields({
     } catch (err) {
       toast.error(
         t("omo.importLocalFailed", {
-          error: String(err),
+          error: extractErrorMessage(err),
           defaultValue: "Failed to read local file: {{error}}",
         }),
       );

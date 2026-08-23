@@ -8,6 +8,7 @@ import {
   type RectifierConfig,
   type OptimizerConfig,
 } from "@/lib/api/settings";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 export function RectifierConfigPanel() {
   const { t } = useTranslation();
@@ -44,7 +45,7 @@ export function RectifierConfigPanel() {
       await settingsApi.setRectifierConfig(newConfig);
     } catch (e) {
       console.error("Failed to save rectifier config:", e);
-      toast.error(String(e));
+      toast.error(extractErrorMessage(e));
       setConfig(config);
     }
   };
@@ -56,7 +57,7 @@ export function RectifierConfigPanel() {
       await settingsApi.setOptimizerConfig(newConfig);
     } catch (e) {
       console.error("Failed to save optimizer config:", e);
-      toast.error(String(e));
+      toast.error(extractErrorMessage(e));
       setOptimizerConfig(optimizerConfig);
     }
   };

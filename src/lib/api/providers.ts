@@ -232,6 +232,10 @@ export const universalProvidersApi = {
     return await invoke("upsert_universal_provider", { provider });
   },
 
+  async upsertAndSync(provider: UniversalProvider): Promise<boolean> {
+    return await invoke("upsert_and_sync_universal_provider", { provider });
+  },
+
   /**
    * 删除统一供应商
    */

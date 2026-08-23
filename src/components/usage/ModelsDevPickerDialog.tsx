@@ -14,6 +14,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { extractErrorMessage } from "@/utils/errorUtils";
 import {
   Select,
   SelectContent,
@@ -142,7 +143,7 @@ export function ModelsDevPickerDialog({
       );
       onImported();
     } catch (error) {
-      toast.error(String(error));
+      toast.error(extractErrorMessage(error));
     }
   };
 
@@ -198,7 +199,7 @@ export function ModelsDevPickerDialog({
               <AlertDescription className="flex items-center justify-between gap-3">
                 <span>
                   {t("usage.modelsDevLoadError", "加载 models.dev 数据失败")}:{" "}
-                  {error instanceof Error ? error.message : String(error)}
+                  {extractErrorMessage(error)}
                 </span>
                 <Button
                   variant="outline"

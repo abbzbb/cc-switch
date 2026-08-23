@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { useUpdateModelPricing } from "@/lib/query/usage";
 import { isNonNegativeDecimalString, type ModelPricing } from "@/types/usage";
 import { ModelsDevPickerDialog } from "./ModelsDevPickerDialog";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 interface PricingEditModalProps {
   open: boolean;
@@ -81,7 +82,7 @@ export function PricingEditModal({
 
       onClose();
     } catch (error) {
-      toast.error(String(error));
+      toast.error(extractErrorMessage(error));
     }
   };
 

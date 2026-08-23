@@ -552,6 +552,7 @@ pub(crate) fn require_if_match_etag(fresh_etag: Option<&str>) -> Result<&str, Ap
 
 /// Run snapshot PUTs in order (artifacts then manifest). Stop on the first error
 /// so a 412 cannot proceed to remaining objects.
+#[cfg(test)]
 pub(crate) fn put_in_order<T, F>(
     names: impl IntoIterator<Item = T>,
     mut put: F,

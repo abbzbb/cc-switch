@@ -406,6 +406,25 @@ fn atomic_write_with_unix_mode(
         Err(AppError::io(&candidate, source))
     })()?;
 
+    #[cfg(windows)]
+    if unix_mode.is_some() {
+        // Windows creates a new file with inherited ACLs. Restrict the empty
+        // temporary file before writing the first credential byte so shared or
+        // WSL-backed parent directories never expose a readable secret window.
+        if let Err(source) = restrict_path_private(&tmp) {
+            drop(file);
+            let _ = fs::remove_file(&tmp);
+            return Err(AppError::io(&tmp, source));
+        }
+        if path.exists() {
+            if let Err(source) = restrict_path_private(path) {
+                drop(file);
+                let _ = fs::remove_file(&tmp);
+                return Err(AppError::io(path, source));
+            }
+        }
+    }
+
     if let Err(source) = file.write_all(data).and_then(|_| file.flush()) {
         drop(file);
         let _ = fs::remove_file(&tmp);
@@ -522,11 +541,6 @@ fn atomic_write_with_unix_mode(
             });
         }
     }
-    if unix_mode.is_some() {
-        if let Err(source) = restrict_path_private(path) {
-            return Err(AppError::io(path, source));
-        }
-    }
     Ok(())
 }
 
@@ -607,10 +621,73 @@ fn restrict_path_private_windows(path: &Path) -> std::io::Result<()> {
         )
     };
     if ok == 0 {
-        Err(std::io::Error::last_os_error())
+        let acl_error = std::io::Error::last_os_error();
+        if restrict_wsl_path_private(path).is_ok() {
+            Ok(())
+        } else {
+            Err(acl_error)
+        }
     } else {
         Ok(())
     }
+}
+
+#[cfg(windows)]
+fn restrict_wsl_path_private(path: &Path) -> std::io::Result<()> {
+    let (distro, linux_path) = wsl_private_path_target(path)?;
+
+    let status = std::process::Command::new("wsl.exe")
+        .arg("-d")
+        .arg(&distro)
+        .args(["--", "chmod", "600", "--"])
+        .arg(&linux_path)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "WSL chmod failed for {linux_path} with status {status}"
+        )))
+    }
+}
+
+#[cfg(windows)]
+fn wsl_private_path_target(path: &Path) -> std::io::Result<(std::ffi::OsString, String)> {
+    use std::path::Prefix;
+
+    let mut components = path.components();
+    let prefix = match components.next() {
+        Some(Component::Prefix(prefix)) => prefix,
+        _ => return Err(std::io::Error::other("not a WSL UNC path")),
+    };
+    let (server, distro) = match prefix.kind() {
+        Prefix::UNC(server, distro) | Prefix::VerbatimUNC(server, distro) => {
+            (server, distro.to_os_string())
+        }
+        _ => return Err(std::io::Error::other("not a WSL UNC path")),
+    };
+    if !server.eq_ignore_ascii_case("wsl$") && !server.eq_ignore_ascii_case("wsl.localhost") {
+        return Err(std::io::Error::other("not a WSL UNC path"));
+    }
+
+    let mut linux_path = String::new();
+    for component in components {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(part) => {
+                linux_path.push('/');
+                linux_path.push_str(&part.to_string_lossy());
+            }
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err(std::io::Error::other("invalid WSL UNC path"));
+            }
+        }
+    }
+    if linux_path.is_empty() {
+        return Err(std::io::Error::other("invalid WSL UNC path"));
+    }
+
+    Ok((distro, linux_path))
 }
 
 #[cfg(test)]
@@ -704,6 +781,24 @@ mod tests {
             .tempdir_in(&root)
             .unwrap();
         assert_atomic_write_replaces_existing_file(dir.path());
+
+        let private_path = dir.path().join("private.json");
+        std::fs::write(&private_path, b"old private contents").unwrap();
+        atomic_write_private(&private_path, b"new private contents").unwrap();
+        assert_eq!(
+            std::fs::read(&private_path).unwrap(),
+            b"new private contents"
+        );
+        let (distro, linux_path) = wsl_private_path_target(&private_path).unwrap();
+        let output = std::process::Command::new("wsl.exe")
+            .arg("-d")
+            .arg(distro)
+            .args(["--", "stat", "-c", "%a", "--"])
+            .arg(linux_path)
+            .output()
+            .expect("read WSL private mode");
+        assert!(output.status.success(), "WSL stat failed: {output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "600");
     }
 
     #[test]
@@ -894,6 +989,14 @@ mod tests {
         std::fs::write(&path, b"secret").unwrap();
         restrict_path_private(&path).expect("windows DACL restriction");
         assert_eq!(std::fs::read(&path).unwrap(), b"secret");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn restrict_wsl_path_private_rejects_native_windows_paths() {
+        let error = restrict_wsl_path_private(Path::new(r"C:\Users\Alice\secret.json"))
+            .expect_err("native paths must not route through WSL chmod");
+        assert!(error.to_string().contains("not a WSL UNC path"));
     }
 
     #[cfg(windows)]

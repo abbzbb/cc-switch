@@ -10,6 +10,7 @@ use crate::store::AppState;
 use crate::usage_script;
 
 /// Execute usage script and format result (private helper method)
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_and_format_usage_result(
     script_code: &str,
     api_key: &str,

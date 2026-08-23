@@ -55,11 +55,10 @@ export function UniversalProviderPanel() {
   const handleSave = useCallback(
     async (provider: UniversalProvider) => {
       try {
-        await universalProvidersApi.upsert(provider);
-
-        // 新建模式下自动同步到各应用
-        if (!editingProvider) {
-          await universalProvidersApi.sync(provider.id);
+        if (editingProvider) {
+          await universalProvidersApi.upsert(provider);
+        } else {
+          await universalProvidersApi.upsertAndSync(provider);
         }
 
         toast.success(
@@ -89,8 +88,7 @@ export function UniversalProviderPanel() {
   const handleSaveAndSync = useCallback(
     async (provider: UniversalProvider) => {
       try {
-        await universalProvidersApi.upsert(provider);
-        await universalProvidersApi.sync(provider.id);
+        await universalProvidersApi.upsertAndSync(provider);
         toast.success(
           t("universalProvider.savedAndSynced", {
             defaultValue: "已保存并同步到所有应用",
@@ -176,8 +174,7 @@ export function UniversalProviderPanel() {
         createdAt: Date.now(),
       };
       try {
-        await universalProvidersApi.upsert(duplicated);
-        await universalProvidersApi.sync(duplicated.id);
+        await universalProvidersApi.upsertAndSync(duplicated);
         toast.success(
           t("universalProvider.duplicatedAndSynced", {
             defaultValue: "统一供应商已复制并同步",

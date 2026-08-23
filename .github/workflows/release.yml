@@ -3,11 +3,11 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to build (e.g. v3.20.0)'
+        description: "Release tag to build (e.g. v3.20.0)"
         required: true
         type: string
 
@@ -19,7 +19,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  quality-gate:
+    uses: ./.github/workflows/ci.yml
+    with:
+      force_all: true
+      checkout_ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.sha }}
+    permissions:
+      contents: read
+
   release:
+    needs: quality-gate
     runs-on: ${{ matrix.os }}
     environment: release
     env:
@@ -60,10 +69,12 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version-file: ".node-version"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95"
 
       - name: Add Windows ARM64 target
         if: runner.os == 'Windows' && matrix.arch == 'arm64'
@@ -204,7 +215,7 @@ jobs:
             echo "请检查 GitHub 仓库 Settings > Secrets and variables > Actions" >&2
             exit 1
           fi
-          
+
           RAW="${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
           # 目标：提供正确的私钥“文件路径”给 Tauri CLI，避免内容解码歧义
           KEY_PATH="$RUNNER_TEMP/tauri_signing.key"

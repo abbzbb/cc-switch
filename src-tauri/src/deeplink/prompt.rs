@@ -9,7 +9,43 @@ use crate::prompt::Prompt;
 use crate::services::PromptService;
 use crate::store::AppState;
 use crate::AppType;
+use sha2::{Digest, Sha256};
 use std::str::FromStr;
+
+fn stable_deeplink_prompt_id(
+    app_type: &AppType,
+    name: &str,
+    content: &str,
+    description: Option<&str>,
+) -> String {
+    let sanitized_name = name
+        .chars()
+        .filter(|character| character.is_alphanumeric() || matches!(*character, '-' | '_'))
+        .take(64)
+        .collect::<String>()
+        .to_lowercase();
+    let mut hasher = Sha256::new();
+    for part in [
+        app_type.as_str(),
+        name,
+        content,
+        description.unwrap_or_default(),
+    ] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let fingerprint = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let id_name = if sanitized_name.is_empty() {
+        "prompt"
+    } else {
+        &sanitized_name
+    };
+    format!("deeplink-{id_name}-{fingerprint}")
+}
 
 /// Import a prompt from deep link request
 pub fn import_prompt_from_deeplink(
@@ -48,14 +84,14 @@ pub fn import_prompt_from_deeplink(
     let content = String::from_utf8(content)
         .map_err(|e| AppError::InvalidInput(format!("Invalid UTF-8 in content: {e}")))?;
 
-    // Generate ID
     let timestamp = chrono::Utc::now().timestamp_millis();
-    let sanitized_name = name
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-        .collect::<String>()
-        .to_lowercase();
-    let id = format!("{sanitized_name}-{timestamp}");
+    let id = stable_deeplink_prompt_id(&app_type, &name, &content, request.description.as_deref());
+    let created_at = state
+        .db
+        .get_prompts(app_type.as_str())?
+        .get(&id)
+        .and_then(|prompt| prompt.created_at)
+        .unwrap_or(timestamp);
 
     // Check if we should enable this prompt
     let should_enable = request.enabled.unwrap_or(false);
@@ -67,7 +103,7 @@ pub fn import_prompt_from_deeplink(
         content,
         description: request.description,
         enabled: false, // Always start as disabled, will be enabled later if needed
-        created_at: Some(timestamp),
+        created_at: Some(created_at),
         updated_at: Some(timestamp),
     };
 

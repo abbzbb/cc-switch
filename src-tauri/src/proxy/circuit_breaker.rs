@@ -380,11 +380,8 @@ impl CircuitBreaker {
         }
     }
 
-    /// 仅释放 HalfOpen permit，不影响健康统计。
-    ///
-    /// 正常路径由 `AllowResult` Drop 释放名额。仅在调用方已经丢掉
-    /// `AllowResult`、又必须手动腾出名额时使用；与仍存活的 permit 叠用
-    /// 会双减、偷走后续探测。
+    /// Legacy test/debug helper. Production permits are released by RAII.
+    #[allow(dead_code)]
     pub fn release_half_open_permit(&self) {
         release_half_open_counter(&self.half_open_requests);
     }

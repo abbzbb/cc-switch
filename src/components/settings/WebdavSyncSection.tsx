@@ -41,6 +41,7 @@ import type {
   WebDavSyncSettings,
 } from "@/types";
 import { invalidateAfterImport } from "@/lib/query";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 const invalidateSettingsQueries = (queryClient: QueryClient) =>
   queryClient.invalidateQueries({ queryKey: ["settings"] });
@@ -486,7 +487,7 @@ export function WebdavSyncSection({
     } catch (error) {
       toast.error(
         t("settings.webdavSync.testFailed", {
-          error: (error as Error)?.message ?? String(error),
+          error: extractErrorMessage(error),
         }),
       );
     } finally {
@@ -523,7 +524,7 @@ export function WebdavSyncSection({
       pendingPasswordPreservationRef.current = null;
       toast.error(
         t("settings.webdavSync.saveFailed", {
-          error: (error as Error)?.message ?? String(error),
+          error: extractErrorMessage(error),
         }),
       );
       setActionState("idle");
@@ -538,7 +539,7 @@ export function WebdavSyncSection({
     } catch (error) {
       toast.warning(
         t("settings.webdavSync.saveAndTestFailed", {
-          error: (error as Error)?.message ?? String(error),
+          error: extractErrorMessage(error),
         }),
       );
     } finally {
@@ -585,7 +586,7 @@ export function WebdavSyncSection({
     } catch (error) {
       toast.error(
         t("settings.webdavSync.uploadFailed", {
-          error: (error as Error)?.message ?? String(error),
+          error: extractErrorMessage(error),
         }),
       );
     } finally {
@@ -622,7 +623,7 @@ export function WebdavSyncSection({
     } catch (error) {
       toast.error(
         t("settings.webdavSync.downloadFailed", {
-          error: (error as Error)?.message ?? String(error),
+          error: extractErrorMessage(error),
         }),
       );
     } finally {
@@ -648,7 +649,7 @@ export function WebdavSyncSection({
     } catch (error) {
       toast.error(
         t("settings.webdavSync.downloadFailed", {
-          error: (error as Error)?.message ?? String(error),
+          error: extractErrorMessage(error),
         }),
       );
     } finally {
@@ -714,7 +715,7 @@ export function WebdavSyncSection({
     } catch (error) {
       toast.error(
         t("settings.s3Sync.testFailed", {
-          error: (error as Error)?.message ?? String(error),
+          error: extractErrorMessage(error),
         }),
       );
     } finally {
@@ -744,7 +745,7 @@ export function WebdavSyncSection({
     } catch (error) {
       toast.error(
         t("settings.s3Sync.saveFailed", {
-          error: (error as Error)?.message ?? String(error),
+          error: extractErrorMessage(error),
         }),
       );
       setS3ActionState("idle");
@@ -759,7 +760,7 @@ export function WebdavSyncSection({
     } catch (error) {
       toast.warning(
         t("settings.s3Sync.saveAndTestFailed", {
-          error: (error as Error)?.message ?? String(error),
+          error: extractErrorMessage(error),
         }),
       );
     } finally {
@@ -804,7 +805,7 @@ export function WebdavSyncSection({
     } catch (error) {
       toast.error(
         t("settings.s3Sync.uploadFailed", {
-          error: (error as Error)?.message ?? String(error),
+          error: extractErrorMessage(error),
         }),
       );
     } finally {
@@ -837,7 +838,7 @@ export function WebdavSyncSection({
     } catch (error) {
       toast.error(
         t("settings.s3Sync.downloadFailed", {
-          error: (error as Error)?.message ?? String(error),
+          error: extractErrorMessage(error),
         }),
       );
     } finally {
@@ -862,7 +863,7 @@ export function WebdavSyncSection({
     } catch (error) {
       toast.error(
         t("settings.s3Sync.downloadFailed", {
-          error: (error as Error)?.message ?? String(error),
+          error: extractErrorMessage(error),
         }),
       );
     } finally {
@@ -921,7 +922,7 @@ export function WebdavSyncSection({
     } catch (error) {
       toast.error(
         t("settings.s3Sync.mutualExclusionFailed", {
-          error: (error as Error)?.message ?? String(error),
+          error: extractErrorMessage(error),
         }),
       );
     }

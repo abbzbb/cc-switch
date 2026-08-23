@@ -189,7 +189,13 @@ fn parse_summary(path: &Path) -> Option<SessionMeta> {
         created_at,
         last_active_at,
         source_path: Some(path.to_string_lossy().to_string()),
-        resume_command: Some(format!("grok --resume {session_id}")),
+        resume_command: crate::session_manager::terminal::build_resume_command(
+            "grokbuild",
+            &session_id,
+            Some(&path.to_string_lossy()),
+        )
+        .ok()
+        .flatten(),
     })
 }
 
@@ -223,7 +229,7 @@ mod tests {
         assert_eq!(sessions[0].provider_id, "grokbuild");
         assert_eq!(sessions[0].session_id, session_id);
         assert_eq!(sessions[0].title.as_deref(), Some("Grok session"));
-        let expected_resume = format!("grok --resume {session_id}");
+        let expected_resume = format!("grok --resume '{}'", session_id);
         assert_eq!(
             sessions[0].resume_command.as_deref(),
             Some(expected_resume.as_str())

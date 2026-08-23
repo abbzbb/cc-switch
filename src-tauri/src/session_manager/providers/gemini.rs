@@ -169,7 +169,13 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
         created_at,
         last_active_at: last_active_at.or(created_at),
         source_path: Some(source_path),
-        resume_command: Some(format!("gemini --resume {session_id}")),
+        resume_command: crate::session_manager::terminal::build_resume_command(
+            PROVIDER_ID,
+            &session_id,
+            Some(&path.to_string_lossy()),
+        )
+        .ok()
+        .flatten(),
     })
 }
 

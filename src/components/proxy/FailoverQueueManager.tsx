@@ -21,6 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { extractErrorMessage } from "@/utils/errorUtils";
 import type { FailoverQueueItem } from "@/types/proxy";
 import type { ProxyAppId } from "@/config/appConfig";
 import {
@@ -82,7 +83,9 @@ export function FailoverQueueManager({
       );
     } catch (error) {
       toast.error(
-        t("proxy.failoverQueue.addFailed", "添加失败") + ": " + String(error),
+        t("proxy.failoverQueue.addFailed", "添加失败") +
+          ": " +
+          extractErrorMessage(error),
       );
     }
   };
@@ -99,7 +102,7 @@ export function FailoverQueueManager({
       toast.error(
         t("proxy.failoverQueue.removeFailed", "移除失败") +
           ": " +
-          String(error),
+          extractErrorMessage(error),
       );
     }
   };

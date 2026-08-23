@@ -26,50 +26,14 @@ pub async fn get_session_messages(
     .map_err(AppError::from)
 }
 
-/// 在用户选定的终端里恢复一个会话。
-///
-/// # 安全边界：`command` 是刻意不加校验的
-///
-/// 本命令接受 renderer 传来的任意字符串并最终交给 shell。多份外部审计把这一点
-/// 报成"IPC 任意命令执行"，这里明确记录为**已知并接受的风险**，而不是待修缺陷。
-///
-/// 依据是本应用把 renderer 当作可信边界。支撑这一判断的是以下事实，全部逐条
-/// 核实过（2026-07）：
-///
-/// 1. 全库仅一处 `dangerouslySetInnerHTML`（`ProviderIcon.tsx`），其入参是图标
-///    **名字**，经 `hasIcon()` 把关后从手工维护的构建期注册表取 SVG——用户与
-///    深链接都只能给名字，给不了标记内容
-/// 2. 前端无 `eval` / `new Function`
-/// 3. `tauri.conf.json` 的 `frontendDist` 指向打包产物，webview 不加载任何远程
-///    源；界面里也没有 `<iframe>` / `<webview>`
-/// 4. CSP 为 `script-src 'self'`——既不允许内联脚本，也不允许外部脚本
-///
-/// 因此"攻击者能调用本 IPC"这一前提，成立时已意味着他能以当前用户身份执行代码；
-/// 那种情况下绕道本命令并不会让他多拿到任何东西。
-///
-/// # 什么会推翻这个结论
-///
-/// 上面四条任意一条不再成立，本命令就必须改成**只接收 session / provider 标识、
-/// 由后端从会话记录重建命令**。具体触发条件：
-///
-/// - 渲染任何来自网络或配置文件的富文本 / HTML / SVG 内容
-/// - 引入 `<iframe>`、`<webview>`，或让 webview 导航到远程 origin
-/// - 放宽 CSP 的 `script-src`（例如为了加载第三方脚本或统计 SDK）
-/// - 引入任何在 renderer 内执行外部代码的机制
-///
-/// 相比之下 `cwd` 的处理**不属于**这条豁免：它是磁盘上扫来的项目路径，正常使用
-/// 就可能含 `$(...)`，与 renderer 是否可信无关，因此在
-/// `session_manager::terminal::shell_escape` 里做了完整的单引号转义。
+/// Resume a known session. The renderer supplies identifiers only; the backend
+/// verifies them against a fresh scan and constructs the shell command itself.
 #[tauri::command]
 pub async fn launch_session_terminal(
-    command: String,
-    cwd: Option<String>,
-    custom_config: Option<String>,
+    providerId: String,
+    sessionId: String,
+    sourcePath: String,
 ) -> Result<bool, AppError> {
-    let command = command.clone();
-    let cwd = cwd.clone();
-    let custom_config = custom_config.clone();
-
     // Read preferred terminal from global settings
     let preferred = crate::settings::get_preferred_terminal();
     // Map global setting terminal names to session terminal names
@@ -81,11 +45,26 @@ pub async fn launch_session_terminal(
     };
 
     tauri::async_runtime::spawn_blocking(move || {
+        let session = session_manager::scan_sessions()
+            .into_iter()
+            .find(|session| {
+                session.provider_id == providerId
+                    && session.session_id == sessionId
+                    && session.source_path.as_deref() == Some(sourcePath.as_str())
+            })
+            .ok_or_else(|| "Session no longer exists or its source has changed".to_string())?;
+        let command = session_manager::terminal::build_resume_command(
+            &session.provider_id,
+            &session.session_id,
+            session.source_path.as_deref(),
+        )?
+        .ok_or_else(|| "This provider does not support terminal resume".to_string())?;
+
         session_manager::terminal::launch_terminal(
             &target,
             &command,
-            cwd.as_deref(),
-            custom_config.as_deref(),
+            session.project_dir.as_deref(),
+            None,
         )
     })
     .await

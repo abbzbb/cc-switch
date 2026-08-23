@@ -2748,7 +2748,6 @@
     "configEmbedded": "內嵌設定",
     "configRemote": "遠端設定",
     "configDetails": "設定詳情",
-    "configUrl": "設定檔 URL",
     "configMergeError": "合併設定檔失敗",
     "primaryEndpoint": "主",
     "mcp": {

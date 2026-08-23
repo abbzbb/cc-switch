@@ -28,20 +28,11 @@ pub async fn start_proxy_server(
 /// 停止代理服务器（仅停止服务，不恢复/清理 Live 接管状态）
 #[tauri::command]
 pub async fn stop_proxy_server(state: tauri::State<'_, AppState>) -> Result<(), AppError> {
-    let takeover = state.proxy_service.get_takeover_status().await?;
-    if takeover.claude
-        || takeover.codex
-        || takeover.gemini
-        || takeover.grokbuild
-        || takeover.opencode
-        || takeover.openclaw
-    {
-        return Err(AppError::from(
-            "仍有应用处于代理接管状态，请先在设置中关闭对应应用接管后再停止本地路由。".to_string(),
-        ));
-    }
-
-    state.proxy_service.stop().await.map_err(AppError::from)
+    state
+        .proxy_service
+        .stop_if_no_takeover()
+        .await
+        .map_err(AppError::from)
 }
 
 /// 停止代理服务器（恢复 Live 配置）
@@ -134,8 +125,22 @@ pub async fn update_global_proxy_config(
     state: tauri::State<'_, AppState>,
     config: GlobalProxyConfig,
 ) -> Result<(), AppError> {
-    let db = &state.db;
-    db.update_global_proxy_config(config).await
+    let mut runtime_config = state
+        .proxy_service
+        .get_config()
+        .await
+        .map_err(AppError::from)?;
+    runtime_config.listen_address = config.listen_address;
+    runtime_config.listen_port = config.listen_port;
+    runtime_config.enable_logging = config.enable_logging;
+
+    // `proxy_enabled` is read-only here. Starting/stopping the server and
+    // takeover transitions have dedicated commands with the required guards.
+    state
+        .proxy_service
+        .update_config(&runtime_config)
+        .await
+        .map_err(AppError::from)
 }
 
 /// 获取指定应用的代理配置
@@ -164,7 +169,7 @@ pub async fn update_proxy_config_for_app(
     require_proxy_app(&app_type)?;
     let circuit_config = CircuitBreakerConfig::from(&config);
 
-    db.update_proxy_config_for_app(config).await?;
+    db.update_proxy_tuning_for_app(config).await?;
 
     state
         .proxy_service

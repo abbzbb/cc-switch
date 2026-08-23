@@ -33,6 +33,7 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import { usageKeys, useModelStats, useProviderStats } from "@/lib/query/usage";
 import { useUsageEventBridge } from "@/hooks/useUsageEventBridge";
+import { extractErrorMessage } from "@/utils/errorUtils";
 import {
   Accordion,
   AccordionContent,
@@ -167,7 +168,7 @@ export function UsageDashboard({
     } catch (error) {
       toast.error(
         t("usage.rebuildCodex.failed", {
-          error: String(error),
+          error: extractErrorMessage(error),
         }),
       );
     } finally {

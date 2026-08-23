@@ -30,14 +30,7 @@ impl FailoverSwitchManager {
         }
     }
 
-    /// 尝试执行故障转移切换
-    ///
-    /// 如果相同的切换已在进行中，则跳过；否则执行切换逻辑。
-    ///
-    /// # Returns
-    /// - `Ok(true)` - 切换成功执行
-    /// - `Ok(false)` - 切换已在进行中，跳过
-    /// - `Err(e)` - 切换过程中发生错误
+    #[allow(dead_code)]
     pub async fn try_switch(
         &self,
         app_handle: Option<&tauri::AppHandle>,

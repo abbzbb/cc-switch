@@ -32,6 +32,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { settingsApi } from "@/lib/api/settings";
 import { usageApi } from "@/lib/api/usage";
+import { extractErrorMessage } from "@/utils/errorUtils";
 import {
   MODELS_DEV_SYNC_CONFIG_QUERY_KEY,
   syncModelsDevPricing,
@@ -250,7 +251,7 @@ function AutoSyncDialog({ state, onClose, onSaved }: AutoSyncDialogProps) {
             <Alert variant="destructive">
               <AlertDescription className="flex items-center justify-between gap-3">
                 <span>
-                  {t("usage.modelsDevLoadError")}: {String(error)}
+                  {t("usage.modelsDevLoadError")}: {extractErrorMessage(error)}
                 </span>
                 <Button variant="outline" size="sm" onClick={() => refetch()}>
                   {t("usage.modelsDevRetry")}
@@ -523,7 +524,7 @@ export function ModelsDevAutoSyncPanel() {
         <AlertDescription className="flex items-center justify-between gap-3">
           <span>
             {t("usage.modelsDevAutoSync.configLoadFailed", {
-              error: String(error),
+              error: extractErrorMessage(error),
             })}
           </span>
           <Button variant="outline" size="sm" onClick={() => refetch()}>

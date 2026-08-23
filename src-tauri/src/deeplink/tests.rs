@@ -3,7 +3,7 @@
 use super::mcp::parse_mcp_apps;
 use super::parser::parse_deeplink_url;
 use super::prompt::import_prompt_from_deeplink;
-use super::provider::parse_and_merge_config;
+use super::provider::{import_provider_from_deeplink, parse_and_merge_config};
 use super::utils::{infer_homepage_from_endpoint, validate_url};
 use super::DeepLinkImportRequest;
 use crate::AppType;
@@ -136,6 +136,21 @@ fn test_parse_invalid_scheme() {
 }
 
 #[test]
+fn test_parse_provider_rejects_unsupported_remote_config_url() {
+    let result = parse_deeplink_url(
+        "ccswitch://v1/import?resource=provider&app=claude&name=Remote&configUrl=https%3A%2F%2Fexample.com%2Fconfig.json",
+    );
+
+    let error = result.expect_err("configUrl must not be advertised as a supported contract");
+    assert!(
+        error
+            .to_string()
+            .contains("Remote config URL is not supported"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn test_parse_unsupported_version() {
     let url = "ccswitch://v2/import?resource=provider&app=claude&name=Test";
 
@@ -158,6 +173,36 @@ fn test_parse_missing_required_field() {
         .unwrap_err()
         .to_string()
         .contains("Missing 'name' parameter"));
+}
+
+#[test]
+fn parser_rejects_oversized_urls_fields_and_parameter_sets() {
+    let oversized_url = format!(
+        "ccswitch://v1/import?resource=prompt&app=codex&name=n&content={}",
+        "a".repeat(1024 * 1024)
+    );
+    assert!(parse_deeplink_url(&oversized_url)
+        .unwrap_err()
+        .to_string()
+        .contains("URL exceeds"));
+
+    let oversized_name = format!(
+        "ccswitch://v1/import?resource=provider&app=claude&name={}",
+        "n".repeat(16 * 1024 + 1)
+    );
+    assert!(parse_deeplink_url(&oversized_name)
+        .unwrap_err()
+        .to_string()
+        .contains("field 'name' exceeds"));
+
+    let mut too_many = "ccswitch://v1/import?resource=provider&app=claude&name=test".to_string();
+    for index in 0..62 {
+        too_many.push_str(&format!("&extra{index}=value"));
+    }
+    assert!(parse_deeplink_url(&too_many)
+        .unwrap_err()
+        .to_string()
+        .contains("too many query parameters"));
 }
 
 // =============================================================================
@@ -200,6 +245,224 @@ fn test_infer_homepage() {
 // Provider Tests
 // =============================================================================
 
+fn claude_provider_request(name: &str, api_key: &str, enabled: bool) -> DeepLinkImportRequest {
+    DeepLinkImportRequest {
+        version: "v1".to_string(),
+        resource: "provider".to_string(),
+        app: Some("claude".to_string()),
+        name: Some(name.to_string()),
+        homepage: Some("https://example.com".to_string()),
+        endpoint: Some("https://api.example.com/v1".to_string()),
+        api_key: Some(api_key.to_string()),
+        enabled: Some(enabled),
+        ..Default::default()
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn disabled_first_exclusive_provider_is_db_only() {
+    let _test_home = TestHomeGuard::new();
+    crate::settings::reload_settings().expect("reload isolated settings");
+    let db = Arc::new(Database::memory().expect("create memory db"));
+    let state = AppState::new(db);
+
+    let id = import_provider_from_deeplink(
+        &state,
+        claude_provider_request("DB Only", "sk-disabled", false),
+    )
+    .expect("import disabled provider");
+
+    assert!(state
+        .db
+        .get_provider_by_id(&id, AppType::Claude.as_str())
+        .expect("read provider")
+        .is_some());
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Claude.as_str())
+            .expect("read db current"),
+        None
+    );
+    assert_eq!(
+        crate::settings::get_current_provider(&AppType::Claude),
+        None
+    );
+    assert!(!crate::config::get_claude_settings_path().exists());
+}
+
+#[test]
+#[serial_test::serial]
+fn disabled_replay_of_current_stable_provider_rewrites_live_with_new_credentials() {
+    let _test_home = TestHomeGuard::new();
+    crate::settings::reload_settings().expect("reload isolated settings");
+    let db = Arc::new(Database::memory().expect("create memory db"));
+    let state = AppState::new(db);
+
+    let first_id = import_provider_from_deeplink(
+        &state,
+        claude_provider_request("Stable Current", "sk-old", true),
+    )
+    .expect("import initial current provider");
+    let mut replay = claude_provider_request("Stable Current", "sk-new", false);
+    replay.enabled = None;
+    let replay_id = import_provider_from_deeplink(&state, replay).expect("replay current provider");
+
+    assert_eq!(first_id, replay_id);
+    let stored = state
+        .db
+        .get_provider_by_id(&replay_id, AppType::Claude.as_str())
+        .expect("read provider")
+        .expect("provider exists");
+    assert_eq!(
+        stored.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"],
+        "sk-new"
+    );
+    let live: serde_json::Value =
+        crate::config::read_json_file(&crate::config::get_claude_settings_path())
+            .expect("read live settings");
+    assert_eq!(live["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-new");
+}
+
+#[test]
+#[serial_test::serial]
+fn disabled_replay_of_additive_stable_providers_preserves_live_ownership() {
+    let _test_home = TestHomeGuard::new();
+    crate::settings::reload_settings().expect("reload isolated settings");
+    let db = Arc::new(Database::memory().expect("create memory db"));
+    let state = AppState::new(db);
+
+    for (app_name, app_type, key_path) in [
+        ("opencode", AppType::OpenCode, "/options/apiKey"),
+        ("openclaw", AppType::OpenClaw, "/apiKey"),
+        ("hermes", AppType::Hermes, "/api_key"),
+    ] {
+        let request = |api_key: &str, enabled: Option<bool>| DeepLinkImportRequest {
+            version: "v1".to_string(),
+            resource: "provider".to_string(),
+            app: Some(app_name.to_string()),
+            name: Some(format!("Stable {app_name}")),
+            homepage: Some("https://example.com".to_string()),
+            endpoint: Some("https://api.example.com/v1".to_string()),
+            api_key: Some(api_key.to_string()),
+            enabled,
+            ..Default::default()
+        };
+
+        let first_id = import_provider_from_deeplink(&state, request("sk-old", Some(true)))
+            .expect("import initial additive provider");
+        let replay_id = import_provider_from_deeplink(&state, request("sk-new", None))
+            .expect("replay additive provider");
+        assert_eq!(first_id, replay_id);
+
+        let stored = state
+            .db
+            .get_provider_by_id(&replay_id, app_type.as_str())
+            .expect("read additive provider")
+            .expect("additive provider exists");
+        assert_eq!(
+            stored
+                .settings_config
+                .pointer(key_path)
+                .and_then(serde_json::Value::as_str),
+            Some("sk-new")
+        );
+
+        let live = match app_type {
+            AppType::OpenCode => crate::opencode_config::get_providers()
+                .expect("read OpenCode Live")
+                .get(&replay_id)
+                .cloned(),
+            AppType::OpenClaw => {
+                crate::openclaw_config::get_provider(&replay_id).expect("read OpenClaw Live")
+            }
+            AppType::Hermes => {
+                crate::hermes_config::get_provider(&replay_id).expect("read Hermes Live")
+            }
+            _ => unreachable!(),
+        }
+        .expect("provider remains Live-managed");
+        assert_eq!(
+            live.pointer(key_path).and_then(serde_json::Value::as_str),
+            Some("sk-new")
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn failed_enable_restores_provider_current_and_live() {
+    let _test_home = TestHomeGuard::new();
+    crate::settings::reload_settings().expect("reload isolated settings");
+    let db = Arc::new(Database::memory().expect("create memory db"));
+    let state = AppState::new(db);
+
+    let old_id = import_provider_from_deeplink(
+        &state,
+        claude_provider_request("Old Current", "sk-old-current", true),
+    )
+    .expect("seed old current");
+    let target_id = import_provider_from_deeplink(
+        &state,
+        claude_provider_request("Rollback Target", "sk-target-old", false),
+    )
+    .expect("seed disabled target");
+    let original_live =
+        std::fs::read(crate::config::get_claude_settings_path()).expect("read original live bytes");
+
+    {
+        let conn = state.db.conn.lock().expect("lock database");
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER reject_deeplink_current_update
+             BEFORE UPDATE OF is_current ON providers
+             WHEN NEW.app_type = 'claude'
+               AND NEW.id = '{}'
+               AND NEW.is_current = 1
+             BEGIN
+               SELECT RAISE(ABORT, 'forced deep-link current failure');
+             END;",
+            target_id.replace('\'', "''")
+        ))
+        .expect("install current failure trigger");
+    }
+
+    let error = import_provider_from_deeplink(
+        &state,
+        claude_provider_request("Rollback Target", "sk-target-new", true),
+    )
+    .expect_err("enable must fail at current commit");
+    assert!(error
+        .to_string()
+        .contains("forced deep-link current failure"));
+
+    let restored_target = state
+        .db
+        .get_provider_by_id(&target_id, AppType::Claude.as_str())
+        .expect("read restored target")
+        .expect("target remains");
+    assert_eq!(
+        restored_target.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"],
+        "sk-target-old"
+    );
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Claude.as_str())
+            .expect("read db current")
+            .as_deref(),
+        Some(old_id.as_str())
+    );
+    assert_eq!(
+        crate::settings::get_current_provider(&AppType::Claude).as_deref(),
+        Some(old_id.as_str())
+    );
+    assert_eq!(
+        std::fs::read(crate::config::get_claude_settings_path()).expect("read restored live bytes"),
+        original_live
+    );
+}
+
 #[test]
 fn test_build_gemini_provider_with_model() {
     use super::provider::build_provider_from_request;
@@ -220,7 +483,6 @@ fn test_build_gemini_provider_with_model() {
         opus_model: None,
         config: None,
         config_format: None,
-        config_url: None,
         apps: None,
         repo: None,
         directory: None,
@@ -273,7 +535,6 @@ fn test_build_gemini_provider_without_model() {
         opus_model: None,
         config: None,
         config_format: None,
-        config_url: None,
         apps: None,
         repo: None,
         directory: None,
@@ -319,7 +580,6 @@ fn test_deeplink_usage_script_does_not_copy_provider_credentials() {
         opus_model: None,
         config: None,
         config_format: None,
-        config_url: None,
         apps: None,
         repo: None,
         directory: None,
@@ -366,7 +626,6 @@ fn usage_script_request(code: &str, usage_enabled: Option<bool>) -> DeepLinkImpo
         opus_model: None,
         config: None,
         config_format: None,
-        config_url: None,
         apps: None,
         repo: None,
         directory: None,
@@ -449,7 +708,6 @@ fn test_deeplink_usage_script_omits_explicit_credentials_that_match_provider() {
         opus_model: None,
         config: None,
         config_format: None,
-        config_url: None,
         apps: None,
         repo: None,
         directory: None,
@@ -497,7 +755,6 @@ fn test_deeplink_usage_script_preserves_distinct_usage_credentials() {
         opus_model: None,
         config: None,
         config_format: None,
-        config_url: None,
         apps: None,
         repo: None,
         directory: None,
@@ -550,7 +807,6 @@ fn test_parse_and_merge_config_claude() {
         opus_model: None,
         config: Some(config_b64),
         config_format: Some("json".to_string()),
-        config_url: None,
         apps: None,
         repo: None,
         directory: None,
@@ -653,7 +909,7 @@ context_window = 500000
 }
 
 #[test]
-fn test_parse_and_merge_config_url_override() {
+fn test_parse_and_merge_inline_config_url_param_override() {
     let config_json = r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"sk-old","ANTHROPIC_BASE_URL":"https://api.anthropic.com/v1"}}"#;
     let config_b64 = BASE64_STANDARD.encode(config_json.as_bytes());
 
@@ -673,7 +929,6 @@ fn test_parse_and_merge_config_url_override() {
         opus_model: None,
         config: Some(config_b64),
         config_format: Some("json".to_string()),
-        config_url: None,
         apps: None,
         repo: None,
         directory: None,
@@ -736,7 +991,6 @@ fn test_build_claude_provider_preserves_custom_env_fields() {
         opus_model: None,
         config: Some(config_b64),
         config_format: Some("json".to_string()),
-        config_url: None,
         apps: None,
         repo: None,
         directory: None,
@@ -793,7 +1047,6 @@ fn test_build_claude_provider_without_config_unchanged() {
         opus_model: None,
         config: None,
         config_format: None,
-        config_url: None,
         apps: None,
         repo: None,
         directory: None,
@@ -839,12 +1092,22 @@ fn test_import_prompt_allows_space_in_base64_content() {
     let state = AppState::new(db.clone());
 
     let prompt_id = import_prompt_from_deeplink(&state, request.clone()).expect("import prompt");
+    let created_at = state
+        .db
+        .get_prompts("codex")
+        .expect("get initial prompts")
+        .get(&prompt_id)
+        .and_then(|prompt| prompt.created_at);
+    let replay_id = import_prompt_from_deeplink(&state, request.clone()).expect("replay prompt");
 
     let prompts = state.db.get_prompts("codex").expect("get prompts");
     let prompt = prompts.get(&prompt_id).expect("prompt saved");
 
     assert_eq!(prompt.content, ">>>");
     assert_eq!(prompt.name, request.name.unwrap());
+    assert_eq!(replay_id, prompt_id);
+    assert_eq!(prompts.len(), 1, "replay must upsert the same prompt row");
+    assert_eq!(prompt.created_at, created_at);
 }
 
 // =============================================================================

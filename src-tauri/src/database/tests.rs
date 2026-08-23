@@ -958,3 +958,58 @@ fn sqlite_related_files_are_restricted_to_0600() {
         assert_eq!(mode, 0o600, "{} should be 0600", path.display());
     }
 }
+
+#[tokio::test]
+async fn proxy_tuning_update_preserves_takeover_state() {
+    let db = Database::memory().expect("memory db");
+    let mut config = db
+        .get_proxy_config_for_app("codex")
+        .await
+        .expect("read proxy config");
+    config.enabled = true;
+    db.update_proxy_config_for_app(config.clone())
+        .await
+        .expect("enable takeover state");
+
+    config.enabled = false; // stale form snapshot must be ignored
+    config.max_retries = 9;
+    db.update_proxy_tuning_for_app(config)
+        .await
+        .expect("update tuning");
+
+    let stored = db
+        .get_proxy_config_for_app("codex")
+        .await
+        .expect("read updated config");
+    assert!(
+        stored.enabled,
+        "tuning writes must not change takeover state"
+    );
+    assert_eq!(stored.max_retries, 9);
+}
+
+#[tokio::test]
+async fn failover_flag_update_preserves_takeover_and_tuning_state() {
+    let db = Database::memory().expect("memory database");
+    let mut config = db
+        .get_proxy_config_for_app("codex")
+        .await
+        .expect("read Codex proxy config");
+    config.enabled = true;
+    config.max_retries = 17;
+    db.update_proxy_config_for_app(config)
+        .await
+        .expect("seed proxy state");
+
+    db.set_auto_failover_enabled_for_app("codex", true)
+        .await
+        .expect("enable failover only");
+
+    let stored = db
+        .get_proxy_config_for_app("codex")
+        .await
+        .expect("read updated proxy state");
+    assert!(stored.enabled);
+    assert!(stored.auto_failover_enabled);
+    assert_eq!(stored.max_retries, 17);
+}

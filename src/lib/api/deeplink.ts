@@ -45,8 +45,6 @@ export interface DeepLinkImportRequest {
   // Config file fields
   config?: string;
   configFormat?: string;
-  configUrl?: string;
-
   // Usage script fields (v3.9+)
   usageEnabled?: boolean;
   usageScript?: string;
@@ -56,6 +54,15 @@ export interface DeepLinkImportRequest {
   usageUserId?: string;
   usageAutoInterval?: number;
 }
+
+export interface DeeplinkErrorPayload {
+  url: string;
+  error: string;
+}
+
+export type DeepLinkInboxItem =
+  | { id: string; type: "import"; payload: DeepLinkImportRequest }
+  | { id: string; type: "error"; payload: DeeplinkErrorPayload };
 
 export interface McpImportResult {
   importedCount: number;
@@ -78,6 +85,14 @@ export type ImportResult =
   | { type: "skill"; key: string };
 
 export const deeplinkApi = {
+  listenerReady: async (): Promise<DeepLinkInboxItem[]> => {
+    return invoke("deeplink_listener_ready");
+  },
+
+  ack: async (id: string): Promise<boolean> => {
+    return invoke("ack_deeplink", { id });
+  },
+
   /**
    * Parse a deep link URL
    * @param url The ccswitch:// URL to parse

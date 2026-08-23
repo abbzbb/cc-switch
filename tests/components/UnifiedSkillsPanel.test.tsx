@@ -461,7 +461,7 @@ describe("UnifiedSkillsPanel", () => {
 
     await waitFor(() => {
       expect(toastErrorMock).toHaveBeenCalledWith("common.bulkToggleFailed", {
-        description: "Error: permission denied",
+        description: "permission denied",
       });
     });
   });
@@ -606,7 +606,7 @@ describe("UnifiedSkillsPanel", () => {
       throwOnError: true,
     });
     expect(toastErrorMock).toHaveBeenCalledWith("common.error", {
-      description: "Error: refresh failed",
+      description: "refresh failed",
     });
     expect(
       screen.queryByText("skills.restoreFromBackup.title"),

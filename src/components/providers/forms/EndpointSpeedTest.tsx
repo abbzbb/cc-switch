@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FullScreenPanel } from "@/components/common/FullScreenPanel";
 import type { CustomEndpoint, EndpointCandidate } from "@/types";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 // 端点测速超时配置（秒）
 const ENDPOINT_TIMEOUT_SECS: Record<AppId, number> = {
@@ -376,7 +377,7 @@ const EndpointSpeedTest: React.FC<EndpointSpeedTestProps> = ({
       const message =
         error instanceof Error
           ? error.message
-          : `${t("endpointTest.testFailed", { error: String(error) })}`;
+          : `${t("endpointTest.testFailed", { error: extractErrorMessage(error) })}`;
       setLastError(message);
     } finally {
       setIsTesting(false);
@@ -430,7 +431,7 @@ const EndpointSpeedTest: React.FC<EndpointSpeedTestProps> = ({
         setInitialCustomUrls(currentCustomUrls);
       } catch (error) {
         const message =
-          error instanceof Error ? error.message : t("endpointTest.saveFailed");
+          extractErrorMessage(error) || t("endpointTest.saveFailed");
         setLastError(message);
         setIsSaving(false);
         return;

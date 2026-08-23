@@ -13,6 +13,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 const RELEASES_URL = "https://github.com/farion1231/cc-switch/releases";
 
@@ -110,7 +111,7 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
     } catch (e) {
       unlistenRef.current?.();
       unlistenRef.current = null;
-      setErrorMsg(e instanceof Error ? e.message : String(e));
+      setErrorMsg(extractErrorMessage(e));
       setPhase("error");
     }
   }, []);

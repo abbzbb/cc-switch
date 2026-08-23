@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { settingsApi } from "@/lib/api";
 import { syncCurrentProvidersLiveSafe } from "@/utils/postChangeSync";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 export type ImportStatus =
   | "idle"
@@ -129,8 +130,7 @@ export function useImportExport(
     } catch (error) {
       console.error("[useImportExport] Failed to import config", error);
       setStatus("error");
-      const message =
-        error instanceof Error ? error.message : String(error ?? "");
+      const message = extractErrorMessage(error);
       setErrorMessage(message);
       toast.error(
         t("settings.importFailedError", {
@@ -179,7 +179,7 @@ export function useImportExport(
       toast.error(
         t("settings.exportFailedError", {
           defaultValue: "导出配置失败: {{message}}",
-          message: error instanceof Error ? error.message : String(error ?? ""),
+          message: extractErrorMessage(error),
         }),
       );
     }

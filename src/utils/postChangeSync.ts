@@ -1,4 +1,5 @@
 import { settingsApi } from "@/lib/api";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 /**
  * 统一的“后置同步”工具：将当前使用的供应商写回对应应用的 live 配置。
@@ -12,7 +13,8 @@ export async function syncCurrentProvidersLiveSafe(): Promise<{
     await settingsApi.syncCurrentProvidersLive();
     return { ok: true };
   } catch (err) {
-    const error = err instanceof Error ? err : new Error(String(err ?? ""));
+    const error =
+      err instanceof Error ? err : new Error(extractErrorMessage(err));
     return { ok: false, error };
   }
 }

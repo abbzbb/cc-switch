@@ -1,5 +1,9 @@
-import { useState, useMemo } from "react";
-import { DeepLinkImportRequest, deeplinkApi } from "@/lib/api/deeplink";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  DeepLinkImportRequest,
+  type DeepLinkInboxItem,
+  deeplinkApi,
+} from "@/lib/api/deeplink";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { parseDeepLinkConfigPreview } from "@/utils/deepLinkConfigPreview";
 import {
@@ -26,21 +30,25 @@ import {
   riskI18nKey,
 } from "@/utils/deeplinkRisk";
 import { decodeBase64Utf8 } from "@/lib/utils/base64";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
-interface DeeplinkError {
-  url: string;
-  error: string;
+function compareInboxItems(a: DeepLinkInboxItem, b: DeepLinkInboxItem): number {
+  return Number(BigInt(a.id) - BigInt(b.id));
 }
 
 export function DeepLinkImportDialog() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const [inbox, setInbox] = useState<DeepLinkInboxItem[]>([]);
   const [request, setRequest] = useState<DeepLinkImportRequest | null>(null);
   const [isImporting, setIsImporting] = useState(false);
+  const [isAcknowledging, setIsAcknowledging] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
+  const [completedItemId, setCompletedItemId] = useState<string | null>(null);
   const [mcpFailures, setMcpFailures] = useState<
     Array<{ id: string; error: string }>
   >([]);
+  const processingItemRef = useRef<string | null>(null);
 
   // 容错判断：MCP 导入结果可能缺少 type 字段
   const isMcpImportResult = (
@@ -60,34 +68,109 @@ export function DeepLinkImportDialog() {
     );
   };
 
-  useTauriEvent<DeepLinkImportRequest>("deeplink-import", async (payload) => {
-    // If config is present, merge it to get the complete configuration
-    if (payload.config || payload.configUrl) {
+  const enqueueInboxItems = useCallback((items: DeepLinkInboxItem[]) => {
+    setInbox((current) => {
+      const knownIds = new Set(current.map((item) => item.id));
+      const additions = items.filter((item) => !knownIds.has(item.id));
+      return additions.length > 0
+        ? [...current, ...additions].sort(compareInboxItems)
+        : current;
+    });
+  }, []);
+
+  const acknowledgeAndAdvance = useCallback(
+    async (id: string, closeDialog = false): Promise<boolean> => {
+      setIsAcknowledging(true);
       try {
-        const mergedRequest = await deeplinkApi.mergeDeeplinkConfig(payload);
-        setRequest(mergedRequest);
+        // A resolved false is also success for this client: it means a prior
+        // request reached the backend but its response was lost, so the item is
+        // already absent. The operation is intentionally idempotent by ID.
+        await deeplinkApi.ack(id);
+        if (closeDialog) {
+          setIsOpen(false);
+          setRequest(null);
+          setMcpFailures([]);
+        }
+        setCompletedItemId((current) => (current === id ? null : current));
+        processingItemRef.current = null;
+        setInbox((current) => current.filter((item) => item.id !== id));
+        return true;
       } catch (error) {
-        console.error("Failed to merge config:", error);
-        toast.error(t("deeplink.configMergeError"), {
-          description: error instanceof Error ? error.message : String(error),
-        });
-        // Fall back to original request
-        setRequest(payload);
+        console.error(
+          `Failed to acknowledge deep link inbox item ${id}:`,
+          error,
+        );
+        toast.error(
+          t("deeplink.ackError", {
+            defaultValue: "无法完成深链接操作，请重试",
+          }),
+          { description: extractErrorMessage(error) },
+        );
+        return false;
+      } finally {
+        setIsAcknowledging(false);
       }
-    } else {
-      setRequest(payload);
+    },
+    [t],
+  );
+
+  const discardErrorItemLocally = useCallback((id: string) => {
+    // Parse errors have no import side effect to duplicate. If the local IPC
+    // acknowledgement fails, let later inbox handshakes redeliver the error but
+    // do not permanently block valid links queued behind it in this mounted UI.
+    processingItemRef.current = null;
+    setInbox((current) => current.filter((item) => item.id !== id));
+  }, []);
+
+  useTauriEvent<DeepLinkInboxItem>(
+    "deeplink-inbox",
+    (item) => enqueueInboxItems([item]),
+    async () => {
+      const pending = await deeplinkApi.listenerReady();
+      enqueueInboxItems(pending);
+    },
+  );
+
+  const activeItem = inbox[0];
+  useEffect(() => {
+    if (!activeItem || processingItemRef.current === activeItem.id) return;
+    processingItemRef.current = activeItem.id;
+
+    if (activeItem.type === "error") {
+      console.error("Deep link error:", activeItem.payload);
+      toast.error(t("deeplink.parseError"), {
+        description: activeItem.payload.error,
+      });
+      void acknowledgeAndAdvance(activeItem.id).then((acknowledged) => {
+        if (!acknowledged) discardErrorItemLocally(activeItem.id);
+      });
+      return;
     }
 
-    setMcpFailures([]);
-    setIsOpen(true);
-  });
+    let disposed = false;
+    void (async () => {
+      let nextRequest = activeItem.payload;
+      if (nextRequest.config) {
+        try {
+          nextRequest = await deeplinkApi.mergeDeeplinkConfig(nextRequest);
+        } catch (error) {
+          console.error("Failed to merge config:", error);
+          toast.error(t("deeplink.configMergeError"), {
+            description: extractErrorMessage(error),
+          });
+        }
+      }
+      if (!disposed) {
+        setRequest(nextRequest);
+        setMcpFailures([]);
+        setIsOpen(true);
+      }
+    })();
 
-  useTauriEvent<DeeplinkError>("deeplink-error", (payload) => {
-    console.error("Deep link error:", payload);
-    toast.error(t("deeplink.parseError"), {
-      description: payload.error,
-    });
-  });
+    return () => {
+      disposed = true;
+    };
+  }, [activeItem, acknowledgeAndAdvance, discardErrorItemLocally, t]);
 
   const validateRequest = (current: DeepLinkImportRequest): string | null => {
     const resource = current.resource || "provider";
@@ -120,7 +203,8 @@ export function DeepLinkImportDialog() {
   };
 
   const handleImport = async () => {
-    if (!request) return;
+    if (!request || activeItem?.type !== "import") return;
+    const inboxItemId = activeItem.id;
 
     const validationError = validateRequest(request);
     if (validationError) {
@@ -232,21 +316,30 @@ export function DeepLinkImportDialog() {
       }
 
       if (!keepDialogOpen) {
-        setIsOpen(false);
+        setCompletedItemId(inboxItemId);
+        await acknowledgeAndAdvance(inboxItemId, true);
       }
     } catch (error) {
       console.error("Failed to import from deep link:", error);
       toast.error(t("deeplink.importError"), {
-        description: error instanceof Error ? error.message : String(error),
+        description: extractErrorMessage(error),
       });
     } finally {
       setIsImporting(false);
     }
   };
 
-  const handleCancel = () => {
-    setMcpFailures([]);
-    setIsOpen(false);
+  const handleCancel = async () => {
+    const inboxItemId = activeItem?.type === "import" ? activeItem.id : null;
+    if (inboxItemId) {
+      await acknowledgeAndAdvance(inboxItemId, true);
+    }
+  };
+
+  const handleRetryAcknowledge = async () => {
+    if (completedItemId) {
+      await acknowledgeAndAdvance(completedItemId, true);
+    }
   };
 
   // Mask API key for display (show first 4 chars + ***)
@@ -256,12 +349,8 @@ export function DeepLinkImportDialog() {
       : "****";
 
   // Check if config file is present
-  const hasConfigFile = !!(request?.config || request?.configUrl);
-  const configSource = request?.config
-    ? "base64"
-    : request?.configUrl
-      ? "url"
-      : null;
+  const hasConfigFile = !!request?.config;
+  const configSource = request?.config ? "base64" : null;
 
   const parsedConfig = useMemo(
     () => (request ? parseDeepLinkConfigPreview(request) : null),
@@ -324,12 +413,17 @@ export function DeepLinkImportDialog() {
     <Dialog
       open={isOpen && !!request}
       onOpenChange={(nextOpen) => {
-        if (!nextOpen && (isImporting || mcpFailures.length > 0)) {
+        if (
+          !nextOpen &&
+          (isImporting ||
+            isAcknowledging ||
+            completedItemId !== null ||
+            mcpFailures.length > 0)
+        ) {
           return;
         }
-        setIsOpen(nextOpen);
         if (!nextOpen) {
-          setMcpFailures([]);
+          handleCancel();
         }
       }}
     >
@@ -620,18 +714,6 @@ export function DeepLinkImportDialog() {
                             )}
                         </div>
                       )}
-
-                      {/* Config URL (if remote) */}
-                      {request.configUrl && (
-                        <div className="grid grid-cols-3 items-center gap-4">
-                          <div className="font-medium text-sm text-muted-foreground">
-                            {t("deeplink.configUrl")}
-                          </div>
-                          <div className="col-span-2 text-sm font-mono text-muted-foreground break-all">
-                            {request.configUrl}
-                          </div>
-                        </div>
-                      )}
                     </div>
                   )}
 
@@ -822,18 +904,32 @@ export function DeepLinkImportDialog() {
             <DialogFooter>
               <Button
                 variant="outline"
-                onClick={handleCancel}
-                disabled={isImporting}
+                onClick={() => void handleCancel()}
+                disabled={
+                  isImporting || isAcknowledging || completedItemId !== null
+                }
               >
                 {t("common.cancel")}
               </Button>
               <Button
-                onClick={handleImport}
+                onClick={
+                  completedItemId
+                    ? () => void handleRetryAcknowledge()
+                    : handleImport
+                }
                 disabled={
-                  isImporting || Boolean(request && validateRequest(request))
+                  isImporting ||
+                  isAcknowledging ||
+                  Boolean(
+                    !completedItemId && request && validateRequest(request),
+                  )
                 }
               >
-                {isImporting ? t("deeplink.importing") : t("deeplink.import")}
+                {isImporting || isAcknowledging
+                  ? t("deeplink.importing")
+                  : completedItemId
+                    ? t("common.retry")
+                    : t("deeplink.import")}
               </Button>
             </DialogFooter>
           </>

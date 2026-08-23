@@ -405,6 +405,9 @@ pub struct ProxyService {
     /// Serializes `start()` so two apps enabling takeover cannot both bind
     /// `listen_port=0` and then Drop the first listener.
     start_lock: Arc<Mutex<()>>,
+    /// Serializes multi-layer lifecycle transitions (takeover/stop/restore).
+    /// Lock order: transition_lock -> start_lock -> switch_lock -> server.
+    transition_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -455,6 +458,7 @@ impl ProxyService {
             app_handle: Arc::new(RwLock::new(None)),
             switch_locks: SwitchLockManager::new(),
             start_lock: Arc::new(Mutex::new(())),
+            transition_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -504,6 +508,7 @@ impl ProxyService {
         );
     }
 
+    #[cfg(test)]
     fn apply_claude_takeover_fields_with_policy(
         config: &mut Value,
         proxy_url: &str,
@@ -967,6 +972,10 @@ impl ProxyService {
         self.switch_locks.lock_for_app(app_type).await
     }
 
+    pub(crate) async fn lock_transition(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.transition_lock.clone().lock_owned().await
+    }
+
     /// 启动代理服务器
     pub async fn start(&self) -> Result<ProxyServerInfo, String> {
         let _start_guard = self.start_lock.lock().await;
@@ -1157,25 +1166,25 @@ impl ProxyService {
             .get_proxy_config_for_app("claude")
             .await
             .map(|c| c.enabled)
-            .unwrap_or(false);
+            .map_err(|error| format!("读取 claude 接管状态失败: {error}"))?;
         let codex_enabled = self
             .db
             .get_proxy_config_for_app("codex")
             .await
             .map(|c| c.enabled)
-            .unwrap_or(false);
+            .map_err(|error| format!("读取 codex 接管状态失败: {error}"))?;
         let gemini_enabled = self
             .db
             .get_proxy_config_for_app("gemini")
             .await
             .map(|c| c.enabled)
-            .unwrap_or(false);
+            .map_err(|error| format!("读取 gemini 接管状态失败: {error}"))?;
         let grokbuild_enabled = self
             .db
             .get_proxy_config_for_app("grokbuild")
             .await
             .map(|c| c.enabled)
-            .unwrap_or(false);
+            .map_err(|error| format!("读取 grokbuild 接管状态失败: {error}"))?;
         // OpenCode and OpenClaw don't support proxy features, always return false
         let opencode_enabled = false;
         let openclaw_enabled = false;
@@ -1195,10 +1204,19 @@ impl ProxyService {
     /// - 开启：自动启动代理服务，仅接管当前 app 的 Live 配置
     /// - 关闭：仅恢复当前 app 的 Live 配置；若无其它接管，则自动停止代理服务
     ///
-    /// Lock order: `start_lock` → `switch_lock` → `server`. `start()`/`stop()`
-    /// take `start_lock`, so they must not run while this method holds
-    /// `switch_lock`.
+    /// Lock order: `transition_lock` → `start_lock` → `switch_lock` → `server`.
+    /// `start()`/`stop()` take `start_lock`, so they must not run while this
+    /// method holds `switch_lock`.
     pub async fn set_takeover_for_app(&self, app_type: &str, enabled: bool) -> Result<(), String> {
+        let _transition_guard = self.transition_lock.lock().await;
+        self.set_takeover_for_app_inner(app_type, enabled).await
+    }
+
+    async fn set_takeover_for_app_inner(
+        &self,
+        app_type: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
         let app = AppType::from_str(app_type).map_err(|e| format!("无效的应用类型: {e}"))?;
         if !app.supports_local_proxy() {
             return Err(format!("{} 不支持本地路由", app.as_str()));
@@ -1402,6 +1420,7 @@ impl ProxyService {
             .await
             .map_err(|e| format!("获取 {app_type_str} 配置失败: {e}"))?;
         updated_config.enabled = false;
+        updated_config.auto_failover_enabled = false;
         self.db
             .update_proxy_config_for_app(updated_config)
             .await
@@ -1788,6 +1807,24 @@ impl ProxyService {
         self.stop_unlocked().await
     }
 
+    pub async fn stop_if_no_takeover(&self) -> Result<(), String> {
+        let _transition_guard = self.transition_lock.lock().await;
+        let takeover = self.get_takeover_status().await?;
+        if takeover.claude
+            || takeover.codex
+            || takeover.gemini
+            || takeover.grokbuild
+            || takeover.opencode
+            || takeover.openclaw
+        {
+            return Err(
+                "仍有应用处于代理接管状态，请先在设置中关闭对应应用接管后再停止本地路由。"
+                    .to_string(),
+            );
+        }
+        self.stop().await
+    }
+
     /// Assumes `start_lock` is already held. Not reentrant.
     async fn stop_unlocked(&self) -> Result<(), String> {
         if let Some(server) = self.server.write().await.take() {
@@ -1821,6 +1858,7 @@ impl ProxyService {
     ///
     /// 会清除 settings 表中的代理状态，下次启动不会自动恢复。
     pub async fn stop_with_restore(&self) -> Result<(), String> {
+        let _transition_guard = self.transition_lock.lock().await;
         // 1. 停止代理服务器（即使未运行也继续执行恢复逻辑）
         if let Err(e) = self.stop().await {
             log::warn!("停止代理服务器失败（将继续恢复 Live 配置）: {e}");
@@ -1868,6 +1906,7 @@ impl ProxyService {
     ///
     /// 用于程序正常退出时，保留代理状态以便下次启动时自动恢复
     pub async fn stop_with_restore_keep_state(&self) -> Result<(), String> {
+        let _transition_guard = self.transition_lock.lock().await;
         // 1. 停止代理服务器（即使未运行也继续执行恢复逻辑）
         if let Err(e) = self.stop().await {
             log::warn!("停止代理服务器失败（将继续恢复 Live 配置）: {e}");
@@ -2196,74 +2235,6 @@ impl ProxyService {
         Ok(())
     }
 
-    /// 接管指定应用的 Live 配置（尽力而为：配置不存在/读取失败则跳过）
-    async fn takeover_live_config_best_effort(&self, app_type: &AppType) -> Result<(), String> {
-        let (proxy_url, _) = self.build_proxy_urls().await?;
-        let proxy_grok_base_url = format!("{}/grokbuild/v1", proxy_url.trim_end_matches('/'));
-
-        match app_type {
-            AppType::Claude => {
-                if let Ok(mut live_config) = self.read_claude_live() {
-                    let claude_provider = self
-                        .get_current_provider_for_app(&AppType::Claude)
-                        .ok()
-                        .flatten();
-                    if let Some(provider) = claude_provider.as_ref() {
-                        let provider = self.claude_provider_with_effective_settings(provider)?;
-                        Self::apply_claude_takeover_fields_for_provider(
-                            &mut live_config,
-                            &proxy_url,
-                            &provider,
-                        );
-                    } else {
-                        Self::apply_claude_takeover_fields_with_policy(
-                            &mut live_config,
-                            &proxy_url,
-                            ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken,
-                        );
-                    }
-                    self.attach_inbound_to_claude_config(&mut live_config);
-                    let _ = self.write_claude_live(&live_config);
-                }
-            }
-            AppType::Codex if self.read_codex_live().is_ok() => {
-                let codex_provider = self.require_current_provider_for_app(&AppType::Codex)?;
-                self.sync_codex_live_from_provider_while_proxy_active(&codex_provider)
-                    .await?;
-            }
-            AppType::Gemini => {
-                if let Ok(mut live_config) = self.read_gemini_live() {
-                    if let Some(env) = live_config.get_mut("env").and_then(|v| v.as_object_mut()) {
-                        env.insert("GOOGLE_GEMINI_BASE_URL".to_string(), json!(&proxy_url));
-                        env.insert("GEMINI_API_KEY".to_string(), json!(PROXY_TOKEN_PLACEHOLDER));
-                    } else {
-                        live_config["env"] = json!({
-                            "GOOGLE_GEMINI_BASE_URL": &proxy_url,
-                            "GEMINI_API_KEY": PROXY_TOKEN_PLACEHOLDER
-                        });
-                    }
-
-                    let _ = self.write_gemini_live(&live_config);
-                }
-            }
-            AppType::GrokBuild => {
-                if let Ok(mut live_config) = self.read_grok_live() {
-                    if Self::grok_live_config_supports_takeover(&live_config) {
-                        Self::apply_grok_takeover_fields(&mut live_config, &proxy_grok_base_url)?;
-                        let _ = self.write_grok_live(&live_config);
-                    } else {
-                        log::info!(
-                            "Grok Build Live 处于官方登录态（无自定义模型表），跳过代理接管"
-                        );
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        Ok(())
-    }
-
     /// Re-project an app's takeover Live config after a proxy restart.
     ///
     /// The per-app switch lock is shared with provider switch/update and Auth
@@ -2276,20 +2247,16 @@ impl ProxyService {
     ) -> Result<bool, String> {
         let app_type_str = app_type.as_str();
         let _guard = self.switch_locks.lock_for_app(app_type_str).await;
-        let current_config = match self.db.get_proxy_config_for_app(app_type_str).await {
-            Ok(config) => config,
-            Err(error) => {
-                log::warn!(
-                    "读取 {app_type_str} 接管状态失败，跳过代理重启后的 Live 重投影: {error}"
-                );
-                return Ok(false);
-            }
-        };
+        let current_config = self
+            .db
+            .get_proxy_config_for_app(app_type_str)
+            .await
+            .map_err(|error| format!("读取 {app_type_str} 接管状态失败: {error}"))?;
         if !current_config.enabled {
             return Ok(false);
         }
 
-        self.takeover_live_config_best_effort(app_type).await?;
+        self.takeover_live_config_strict(app_type).await?;
         Ok(true)
     }
 
@@ -3546,6 +3513,126 @@ impl ProxyService {
         Ok(())
     }
 
+    /// Update the failover switch as one proxy-state transition.
+    ///
+    /// The takeover precondition, optional queue bootstrap, P1 hot switch, and
+    /// flag commit share `transition_lock`; a concurrent takeover disable cannot
+    /// restore Live and stop the listener between those steps.
+    pub async fn set_auto_failover_enabled(
+        &self,
+        app_type: &str,
+        enabled: bool,
+    ) -> Result<Option<String>, String> {
+        let _transition_guard = self.transition_lock.lock().await;
+        let app =
+            AppType::from_str(app_type).map_err(|error| format!("无效的应用类型: {error}"))?;
+        if !app.supports_local_proxy() {
+            return Err(format!("{} 不支持故障转移", app.as_str()));
+        }
+
+        let config = self
+            .db
+            .get_proxy_config_for_app(app_type)
+            .await
+            .map_err(|error| format!("读取 {app_type} 代理配置失败: {error}"))?;
+        if enabled && !config.enabled {
+            return Err("需要先启用该应用的代理接管，再开启故障转移".to_string());
+        }
+        if !enabled {
+            self.db
+                .set_auto_failover_enabled_for_app(app_type, false)
+                .await
+                .map_err(|error| format!("关闭 {app_type} 故障转移失败: {error}"))?;
+            return Ok(None);
+        }
+
+        let providers = self
+            .db
+            .get_all_providers(app_type)
+            .map_err(|error| format!("读取 {app_type} 供应商失败: {error}"))?;
+        let previous_current = crate::settings::get_effective_current_provider(&self.db, &app)
+            .map_err(|error| format!("读取 {app_type} 当前供应商失败: {error}"))?;
+        let eligible = |provider: &Provider| {
+            crate::proxy::provider_router::provider_supports_failover(app_type, provider)
+        };
+        let mut queue = self
+            .db
+            .get_failover_queue(app_type)
+            .map_err(|error| format!("读取 {app_type} 故障转移队列失败: {error}"))?
+            .into_iter()
+            .filter(|item| providers.get(&item.provider_id).is_some_and(&eligible))
+            .collect::<Vec<_>>();
+
+        let mut auto_added_provider = None;
+        if queue.is_empty() {
+            let current_id = previous_current.clone().ok_or_else(|| {
+                "故障转移队列为空，且未设置当前供应商，无法开启故障转移".to_string()
+            })?;
+            let current = providers
+                .get(&current_id)
+                .ok_or_else(|| format!("供应商不存在: {current_id}"))?;
+            if !eligible(current) {
+                return Err("Codex Official 账号卡不支持自动故障转移".to_string());
+            }
+            self.db
+                .add_to_failover_queue(app_type, &current_id)
+                .map_err(|error| format!("初始化 {app_type} 故障转移队列失败: {error}"))?;
+            auto_added_provider = Some(current_id);
+            queue = self
+                .db
+                .get_failover_queue(app_type)
+                .map_err(|error| format!("重读 {app_type} 故障转移队列失败: {error}"))?
+                .into_iter()
+                .filter(|item| providers.get(&item.provider_id).is_some_and(&eligible))
+                .collect();
+        }
+
+        let p1_provider_id = queue
+            .first()
+            .map(|item| item.provider_id.clone())
+            .ok_or_else(|| "故障转移队列为空，无法开启故障转移".to_string())?;
+        if let Err(error) = self.switch_proxy_target(app_type, &p1_provider_id).await {
+            if let Some(provider_id) = auto_added_provider.as_deref() {
+                let _ = self.db.remove_from_failover_queue(app_type, provider_id);
+            }
+            return Err(error);
+        }
+
+        if let Err(error) = self
+            .db
+            .set_auto_failover_enabled_for_app(app_type, true)
+            .await
+        {
+            let mut rollback_errors = Vec::new();
+            if let Some(previous_id) = previous_current.as_deref() {
+                if previous_id != p1_provider_id {
+                    if let Err(rollback_error) =
+                        self.switch_proxy_target(app_type, previous_id).await
+                    {
+                        rollback_errors.push(format!("恢复原供应商失败: {rollback_error}"));
+                    }
+                }
+            }
+            if let Some(provider_id) = auto_added_provider.as_deref() {
+                if let Err(rollback_error) =
+                    self.db.remove_from_failover_queue(app_type, provider_id)
+                {
+                    rollback_errors.push(format!("清理自动队列项失败: {rollback_error}"));
+                }
+            }
+            let rollback = if rollback_errors.is_empty() {
+                String::new()
+            } else {
+                format!("; 补偿未完全成功: {}", rollback_errors.join("; "))
+            };
+            return Err(format!(
+                "保存 {app_type} 故障转移开关失败: {error}{rollback}"
+            ));
+        }
+
+        Ok(Some(p1_provider_id))
+    }
+
     // ==================== Live 配置读写辅助方法 ====================
 
     /// 接管 Codex 时，本地客户端必须继续以 Responses wire API 访问代理。
@@ -4137,6 +4224,12 @@ impl ProxyService {
 
     /// 更新代理配置
     pub async fn update_config(&self, config: &ProxyConfig) -> Result<(), String> {
+        // One transaction owns the persisted snapshot, listener lifecycle, and
+        // Live reprojection. Taking the lock after the DB write allowed two
+        // concurrent updates to restart from stale `previous` snapshots.
+        let _transition_guard = self.transition_lock.lock().await;
+        let _start_guard = self.start_lock.lock().await;
+
         // 记录旧配置用于判定是否需要重启
         let previous = self
             .db
@@ -4157,9 +4250,8 @@ impl ProxyService {
         let require_restart = new_config.listen_address != previous.listen_address
             || new_config.listen_port != previous.listen_port;
 
-        // Serialize with start()/stop(). Do not call `self.start()` here:
-        // start_lock is not reentrant, and this path already holds it.
-        let _start_guard = self.start_lock.lock().await;
+        // Do not call `self.start()` here: start_lock is not reentrant, and
+        // this path already owns the full listener/config transaction.
         if self.server.read().await.is_none() {
             return Ok(());
         }
@@ -4190,16 +4282,27 @@ impl ProxyService {
             let info = match new_server.start().await {
                 Ok(info) => info,
                 Err(e) => {
+                    let config_rollback = self.db.update_proxy_config(previous.clone()).await.err();
                     let fallback = spawn_server(previous.clone());
                     match fallback.start().await {
                         Ok(_) => {
                             *self.server.write().await = Some(fallback);
-                            return Err(format!("重启代理服务器失败，已回退旧监听: {e}"));
+                            return Err(match config_rollback {
+                                Some(rollback_err) => format!(
+                                    "重启代理服务器失败，已回退旧监听，但数据库配置回滚失败: {e}; {rollback_err}"
+                                ),
+                                None => format!("重启代理服务器失败，已回退旧监听和配置: {e}"),
+                            });
                         }
                         Err(fallback_err) => {
-                            return Err(format!(
-                                "重启代理服务器失败且无法回退旧监听: {e}; {fallback_err}"
-                            ));
+                            return Err(match config_rollback {
+                                Some(rollback_err) => format!(
+                                    "重启代理服务器失败且无法回退旧监听或数据库配置: {e}; {fallback_err}; {rollback_err}"
+                                ),
+                                None => format!(
+                                    "重启代理服务器失败且无法回退旧监听，数据库配置已恢复: {e}; {fallback_err}"
+                                ),
+                            });
                         }
                     }
                 }
@@ -4209,11 +4312,17 @@ impl ProxyService {
                 .await
             {
                 let _ = new_server.stop().await;
+                let config_rollback = self.db.update_proxy_config(previous.clone()).await.err();
                 let fallback = spawn_server(previous.clone());
                 if fallback.start().await.is_ok() {
                     *self.server.write().await = Some(fallback);
                 }
-                return Err(e);
+                return Err(match config_rollback {
+                    Some(rollback_err) => {
+                        format!("{e}; 回退旧监听后恢复数据库配置失败: {rollback_err}")
+                    }
+                    None => e,
+                });
             }
 
             *self.server.write().await = Some(new_server);
@@ -4221,15 +4330,70 @@ impl ProxyService {
 
             // Reproject Live under start_lock → switch_lock (never reverse).
             let mut updated_any = false;
+            let mut reprojection_error = None;
             for app_type in [
                 AppType::Claude,
                 AppType::Codex,
                 AppType::Gemini,
                 AppType::GrokBuild,
             ] {
-                updated_any |= self
+                match self
                     .reproject_takeover_live_config_if_enabled(&app_type)
-                    .await?;
+                    .await
+                {
+                    Ok(updated) => updated_any |= updated,
+                    Err(error) => {
+                        reprojection_error =
+                            Some(format!("{} Live 重投影失败: {error}", app_type.as_str()));
+                        break;
+                    }
+                }
+            }
+
+            if let Some(reprojection_error) = reprojection_error {
+                let mut rollback_errors = Vec::new();
+                if let Some(active) = self.server.write().await.take() {
+                    if let Err(error) = active.stop().await {
+                        rollback_errors.push(format!("停止新 listener 失败: {error}"));
+                    }
+                }
+
+                if let Err(error) = self.db.update_proxy_config(previous.clone()).await {
+                    rollback_errors.push(format!("恢复旧数据库配置失败: {error}"));
+                } else {
+                    let fallback = spawn_server(previous.clone());
+                    match fallback.start().await {
+                        Ok(_) => {
+                            *self.server.write().await = Some(fallback);
+                            for app_type in [
+                                AppType::Claude,
+                                AppType::Codex,
+                                AppType::Gemini,
+                                AppType::GrokBuild,
+                            ] {
+                                if let Err(error) = self
+                                    .reproject_takeover_live_config_if_enabled(&app_type)
+                                    .await
+                                {
+                                    rollback_errors.push(format!(
+                                        "恢复 {} 旧 Live 投影失败: {error}",
+                                        app_type.as_str()
+                                    ));
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            rollback_errors.push(format!("恢复旧 listener 失败: {error}"));
+                        }
+                    }
+                }
+
+                let rollback_detail = if rollback_errors.is_empty() {
+                    "已恢复旧数据库、listener 与 Live 投影".to_string()
+                } else {
+                    format!("补偿未完全成功: {}", rollback_errors.join("; "))
+                };
+                return Err(format!("{reprojection_error}; {rollback_detail}"));
             }
 
             if updated_any {
@@ -4382,6 +4546,34 @@ mod tests {
         db.update_proxy_config(proxy_config)
             .await
             .expect("set test proxy config to an ephemeral port");
+    }
+
+    fn seed_claude_takeover_fixture(db: &Arc<Database>, service: &ProxyService) {
+        let provider = Provider::with_id(
+            "claude-test".to_string(),
+            "Claude Test".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_API_KEY": "provider-key",
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save Claude provider");
+        db.set_current_provider("claude", &provider.id)
+            .expect("set DB current Claude provider");
+        crate::settings::set_current_provider(&AppType::Claude, Some(&provider.id))
+            .expect("set local current Claude provider");
+        service
+            .write_claude_live(&json!({
+                "env": {
+                    "ANTHROPIC_API_KEY": "live-key",
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com"
+                }
+            }))
+            .expect("seed Claude Live config");
     }
 
     #[tokio::test]
@@ -4989,6 +5181,231 @@ mod tests {
             .stop_with_restore()
             .await
             .expect("stop proxy and restore live config");
+    }
+
+    #[tokio::test]
+    async fn update_config_failed_restart_restores_database_and_old_listener() {
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+        let initial = service.start().await.expect("start proxy server");
+        let previous = service.get_config().await.expect("read previous config");
+        assert_eq!(previous.listen_port, initial.port);
+
+        let mut invalid = previous.clone();
+        invalid.listen_address = "not-an-ip-address".to_string();
+        let error = service
+            .update_config(&invalid)
+            .await
+            .expect_err("invalid replacement listener must fail");
+        assert!(error.contains("已回退旧监听"), "unexpected error: {error}");
+
+        let stored = service.get_config().await.expect("read rolled-back config");
+        assert_eq!(stored.listen_address, previous.listen_address);
+        assert_eq!(stored.listen_port, previous.listen_port);
+        let status = service.get_status().await.expect("read proxy status");
+        assert!(status.running);
+        assert_eq!(status.port, initial.port);
+
+        service.stop().await.expect("stop proxy server");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn update_config_reprojection_failure_restores_old_db_listener_and_prior_live() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+        seed_claude_takeover_fixture(&db, &service);
+        service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect("enable Claude takeover");
+
+        let previous = service.get_config().await.expect("read previous config");
+        let previous_status = service.get_status().await.expect("read previous status");
+        assert_eq!(previous.listen_port, previous_status.port);
+        let previous_base_url = format!("http://127.0.0.1:{}", previous_status.port);
+        assert_eq!(
+            service
+                .read_claude_live()
+                .expect("read initial Claude Live")
+                .pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str),
+            Some(previous_base_url.as_str())
+        );
+
+        // Force a deterministic second-app reprojection failure after Claude has
+        // already been rewritten to the replacement port.
+        let mut codex_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read Codex proxy config");
+        codex_config.enabled = true;
+        db.update_proxy_config_for_app(codex_config)
+            .await
+            .expect("mark Codex takeover enabled");
+
+        let port_reservation =
+            std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve replacement port");
+        let replacement_port = port_reservation
+            .local_addr()
+            .expect("read replacement port")
+            .port();
+        assert_ne!(replacement_port, previous_status.port);
+        drop(port_reservation);
+
+        let mut replacement = previous.clone();
+        replacement.listen_port = replacement_port;
+        let error = service
+            .update_config(&replacement)
+            .await
+            .expect_err("Codex reprojection must fail without a current provider");
+        assert!(
+            error.contains("codex Live 重投影失败"),
+            "unexpected error: {error}"
+        );
+
+        let stored = service.get_config().await.expect("read compensated config");
+        assert_eq!(stored.listen_address, previous.listen_address);
+        assert_eq!(stored.listen_port, previous.listen_port);
+        let status = service.get_status().await.expect("read compensated status");
+        assert!(status.running);
+        assert_eq!(status.port, previous_status.port);
+        assert!(
+            std::net::TcpListener::bind(("127.0.0.1", replacement_port)).is_ok(),
+            "replacement listener must be stopped during compensation"
+        );
+        assert_eq!(
+            service
+                .read_claude_live()
+                .expect("read compensated Claude Live")
+                .pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str),
+            Some(previous_base_url.as_str()),
+            "an app rewritten before the failure must be projected back to the old listener"
+        );
+
+        service
+            .stop_with_restore()
+            .await
+            .expect("stop proxy and restore Live config");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn takeover_enable_serializes_before_guarded_stop() {
+        use tokio::time::{sleep, timeout, Duration};
+
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+        seed_claude_takeover_fixture(&db, &service);
+
+        // Hold start_lock so the public enable operation owns transition_lock
+        // while stopped at a deterministic point before starting the listener.
+        let start_guard = service.start_lock.lock().await;
+        let service_for_enable = service.clone();
+        let enable_task = tokio::spawn(async move {
+            service_for_enable
+                .set_takeover_for_app("claude", true)
+                .await
+        });
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if service.transition_lock.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("enable operation should acquire transition lock");
+
+        let service_for_stop = service.clone();
+        let stop_task = tokio::spawn(async move { service_for_stop.stop_if_no_takeover().await });
+        sleep(Duration::from_millis(50)).await;
+        assert!(
+            !stop_task.is_finished(),
+            "guarded stop must wait for the in-flight takeover transition"
+        );
+
+        drop(start_guard);
+        timeout(Duration::from_secs(5), enable_task)
+            .await
+            .expect("enable operation should finish")
+            .expect("join enable task")
+            .expect("enable Claude takeover");
+        let stop_error = timeout(Duration::from_secs(5), stop_task)
+            .await
+            .expect("guarded stop should finish")
+            .expect("join stop task")
+            .expect_err("guarded stop must reject an active takeover");
+        assert!(stop_error.contains("仍有应用处于代理接管状态"));
+
+        assert!(service.is_running().await);
+        assert!(
+            db.get_proxy_config_for_app("claude")
+                .await
+                .expect("read Claude proxy config")
+                .enabled
+        );
+        assert!(service
+            .live_takeover_matches_current_proxy(&AppType::Claude)
+            .await
+            .expect("check Claude Live takeover"));
+
+        service
+            .set_takeover_for_app("claude", false)
+            .await
+            .expect("disable Claude takeover");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn auto_failover_transition_commits_under_takeover_and_disables_with_it() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+        seed_claude_takeover_fixture(&db, &service);
+        service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect("enable Claude takeover");
+
+        let p1 = service
+            .set_auto_failover_enabled("claude", true)
+            .await
+            .expect("enable failover")
+            .expect("enabled failover returns P1");
+        assert_eq!(p1, "claude-test");
+        let enabled = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("read enabled config");
+        assert!(enabled.enabled);
+        assert!(enabled.auto_failover_enabled);
+
+        service
+            .set_takeover_for_app("claude", false)
+            .await
+            .expect("disable Claude takeover");
+        let disabled = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("read disabled config");
+        assert!(!disabled.enabled);
+        assert!(!disabled.auto_failover_enabled);
+        assert!(!service.is_running().await);
     }
 
     #[tokio::test]

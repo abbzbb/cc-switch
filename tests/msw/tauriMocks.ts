@@ -25,7 +25,14 @@ vi.mock("@tauri-apps/api/core", () => ({
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(text || `Invoke failed for ${command}`);
+      if (!text) throw new Error(`Invoke failed for ${command}`);
+      let payload: unknown = text;
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        // Legacy string errors remain strings, matching Tauri invoke.
+      }
+      throw payload;
     }
 
     const text = await response.text();
@@ -39,6 +46,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 const listeners = new Map<string, Set<(event: { payload: unknown }) => void>>();
+let syntheticDeeplinkId = 0;
 
 const ensureListenerSet = (event: string) => {
   if (!listeners.has(event)) {
@@ -48,8 +56,20 @@ const ensureListenerSet = (event: string) => {
 };
 
 export const emitTauriEvent = (event: string, payload: unknown) => {
-  const handlers = listeners.get(event);
-  handlers?.forEach((handler) => handler({ payload }));
+  const normalizedEvent =
+    event === "deeplink-import" || event === "deeplink-error"
+      ? "deeplink-inbox"
+      : event;
+  const normalizedPayload =
+    event === "deeplink-import" || event === "deeplink-error"
+      ? {
+          id: String(++syntheticDeeplinkId),
+          type: event === "deeplink-import" ? "import" : "error",
+          payload,
+        }
+      : payload;
+  const handlers = listeners.get(normalizedEvent);
+  handlers?.forEach((handler) => handler({ payload: normalizedPayload }));
 };
 
 vi.mock("@tauri-apps/api/event", () => ({

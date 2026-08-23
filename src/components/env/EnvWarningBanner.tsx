@@ -6,6 +6,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import type { EnvConflict } from "@/types/env";
 import { deleteEnvVars } from "@/lib/api/env";
 import { toast } from "sonner";
+import { extractErrorMessage } from "@/utils/errorUtils";
 import {
   Dialog,
   DialogContent,
@@ -88,7 +89,7 @@ export function EnvWarningBanner({
     } catch (error) {
       console.error("删除环境变量失败:", error);
       toast.error(t("env.delete.error"), {
-        description: String(error),
+        description: extractErrorMessage(error),
       });
     } finally {
       setIsDeleting(false);

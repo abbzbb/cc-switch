@@ -1,4 +1,6 @@
-import i18n from "@/i18n";
+// Import the i18next singleton without importing `@/i18n`, whose module body
+// initializes React integration. Error formatting must remain side-effect free.
+import i18n from "i18next";
 
 const readPreferredLanguage = (): string => {
   if (typeof window === "undefined") {

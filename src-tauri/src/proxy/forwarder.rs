@@ -1983,9 +1983,7 @@ impl RequestForwarder {
             || codex_responses_to_chat
             || codex_responses_to_anthropic
             || request_is_streaming
-            || (matches!(app_type, AppType::Codex | AppType::GrokBuild)
-                && !codex_responses_to_chat
-                && !codex_responses_to_anthropic);
+            || matches!(app_type, AppType::Codex | AppType::GrokBuild);
 
         // Codex OAuth 需要注入的 ChatGPT-Account-Id（在动态 token 获取期间填充）
         let mut codex_oauth_account_id: Option<String> = None;

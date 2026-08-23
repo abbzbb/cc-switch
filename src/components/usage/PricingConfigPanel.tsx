@@ -33,6 +33,7 @@ import { Plus, Pencil, Trash2, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { proxyApi } from "@/lib/api/proxy";
 import { ModelsDevAutoSyncPanel } from "./ModelsDevAutoSyncPanel";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 const PRICING_APPS = ["claude", "codex", "gemini", "grokbuild"] as const;
 type PricingApp = (typeof PRICING_APPS)[number];
@@ -115,12 +116,7 @@ export function PricingConfigPanel() {
         setAppConfigs(newState);
         setOriginalConfigs(newState);
       } catch (error) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : typeof error === "string"
-              ? error
-              : "Unknown error";
+        const message = extractErrorMessage(error) || "Unknown error";
         toast.error(
           t("settings.globalProxy.pricingLoadFailed", { error: message }),
         );
@@ -168,12 +164,7 @@ export function PricingConfigPanel() {
       toast.success(t("settings.globalProxy.pricingSaved"));
       setOriginalConfigs({ ...appConfigs });
     } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : typeof error === "string"
-            ? error
-            : "Unknown error";
+      const message = extractErrorMessage(error) || "Unknown error";
       toast.error(
         t("settings.globalProxy.pricingSaveFailed", { error: message }),
       );
@@ -212,7 +203,7 @@ export function PricingConfigPanel() {
     return (
       <Alert variant="destructive">
         <AlertDescription>
-          {t("usage.loadPricingError")}: {String(error)}
+          {t("usage.loadPricingError")}: {extractErrorMessage(error)}
         </AlertDescription>
       </Alert>
     );

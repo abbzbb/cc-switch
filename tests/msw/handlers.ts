@@ -70,6 +70,8 @@ export const handlers = [
   ),
 
   http.post(`${TAURI_ENDPOINT}/update_tray_menu`, () => success(true)),
+  http.post(`${TAURI_ENDPOINT}/deeplink_listener_ready`, () => success([])),
+  http.post(`${TAURI_ENDPOINT}/ack_deeplink`, () => success(true)),
 
   http.post(`${TAURI_ENDPOINT}/get_opencode_live_provider_ids`, () =>
     success(getLiveProviderIds("opencode")),
@@ -89,8 +91,10 @@ export const handlers = [
     const { id, app } = await withJson<{ id: string; app: AppId }>(request);
     const providers = listProviders(app);
     if (!providers[id]) {
-      // Tauri invoke rejects with a string (not HTTP 404 + boolean).
-      return new HttpResponse(`供应商不存在: ${id}`, { status: 500 });
+      return HttpResponse.json(
+        { message: `供应商不存在: ${id}` },
+        { status: 500 },
+      );
     }
     setCurrentProviderId(app, id);
     return success({ warnings: [] });

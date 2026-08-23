@@ -261,8 +261,8 @@ const McpFormModal: React.FC<McpFormModalProps> = ({
         }
 
         setConfigError("");
-      } catch (err: any) {
-        const errorMessage = err?.message || String(err);
+      } catch (err: unknown) {
+        const errorMessage = extractErrorMessage(err);
         setConfigError(t("mcp.error.jsonInvalid") + ": " + errorMessage);
       }
     }

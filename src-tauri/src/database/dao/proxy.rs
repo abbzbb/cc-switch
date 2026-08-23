@@ -313,6 +313,68 @@ impl Database {
         Ok(())
     }
 
+    /// Update retry/timeout/circuit-breaker tuning without mutating takeover state.
+    ///
+    /// `enabled` is a state-machine field owned by `ProxyService::set_takeover_for_app`.
+    /// Configuration forms must not be able to overwrite it with a stale snapshot.
+    pub async fn update_proxy_tuning_for_app(
+        &self,
+        config: AppProxyConfig,
+    ) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+
+        conn.execute(
+            "UPDATE proxy_config SET
+                auto_failover_enabled = ?2,
+                max_retries = ?3,
+                streaming_first_byte_timeout = ?4,
+                streaming_idle_timeout = ?5,
+                non_streaming_timeout = ?6,
+                circuit_failure_threshold = ?7,
+                circuit_success_threshold = ?8,
+                circuit_timeout_seconds = ?9,
+                circuit_error_rate_threshold = ?10,
+                circuit_min_requests = ?11,
+                updated_at = datetime('now')
+             WHERE app_type = ?1",
+            rusqlite::params![
+                config.app_type,
+                if config.auto_failover_enabled { 1 } else { 0 },
+                config.max_retries as i32,
+                config.streaming_first_byte_timeout as i32,
+                config.streaming_idle_timeout as i32,
+                config.non_streaming_timeout as i32,
+                config.circuit_failure_threshold as i32,
+                config.circuit_success_threshold as i32,
+                config.circuit_timeout_seconds as i32,
+                config.circuit_error_rate_threshold,
+                config.circuit_min_requests as i32,
+            ],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Update only the failover switch. Takeover ownership (`enabled`) is
+    /// controlled by `ProxyService` and must never be copied from a stale DTO.
+    pub async fn set_auto_failover_enabled_for_app(
+        &self,
+        app_type: &str,
+        enabled: bool,
+    ) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "UPDATE proxy_config SET
+                auto_failover_enabled = ?2,
+                updated_at = datetime('now')
+             WHERE app_type = ?1",
+            rusqlite::params![app_type, if enabled { 1 } else { 0 }],
+        )
+        .map_err(|error| AppError::Database(error.to_string()))?;
+        Ok(())
+    }
+
     /// 确保指定 app_type 的 proxy_config 行存在（同步版本，用于 set_* 函数）
     ///
     /// 使用与 schema.rs seed 相同的 per-app 默认值
@@ -457,30 +519,44 @@ impl Database {
 
     /// 更新代理配置（兼容旧接口，更新所有三行的公共字段）
     pub async fn update_proxy_config(&self, config: ProxyConfig) -> Result<(), AppError> {
-        let conn = lock_conn!(self.conn);
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn
+            .transaction()
+            .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 更新所有三行的公共字段
-        conn.execute(
+        // Address/logging are global. Retry and timeout values belong to the
+        // Claude row returned by the legacy `get_proxy_config` API and must not
+        // overwrite per-app tuning for Codex/Gemini/Grok Build.
+        tx.execute(
             "UPDATE proxy_config SET
                 listen_address = ?1,
                 listen_port = ?2,
-                max_retries = ?3,
-                enable_logging = ?4,
-                streaming_first_byte_timeout = ?5,
-                streaming_idle_timeout = ?6,
-                non_streaming_timeout = ?7,
+                enable_logging = ?3,
                 updated_at = datetime('now')",
             rusqlite::params![
                 config.listen_address,
                 config.listen_port as i32,
-                config.max_retries as i32,
                 if config.enable_logging { 1 } else { 0 },
+            ],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        tx.execute(
+            "UPDATE proxy_config SET
+                max_retries = ?1,
+                streaming_first_byte_timeout = ?2,
+                streaming_idle_timeout = ?3,
+                non_streaming_timeout = ?4,
+                updated_at = datetime('now')
+             WHERE app_type = 'claude'",
+            rusqlite::params![
+                config.max_retries as i32,
                 config.streaming_first_byte_timeout as i32,
                 config.streaming_idle_timeout as i32,
                 config.non_streaming_timeout as i32,
             ],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
+        tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
 
         Ok(())
     }

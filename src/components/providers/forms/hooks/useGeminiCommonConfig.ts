@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { configApi } from "@/lib/api";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 const LEGACY_STORAGE_KEY = "cc-switch:gemini-common-config-snippet";
 const DEFAULT_GEMINI_COMMON_CONFIG_SNIPPET = "{}";
@@ -467,7 +468,9 @@ export function useGeminiCommonConfig({
           .catch((error: unknown) => {
             console.error("保存 Gemini 通用配置失败:", error);
             setCommonConfigError(
-              t("geminiConfig.saveFailed", { error: String(error) }),
+              t("geminiConfig.saveFailed", {
+                error: extractErrorMessage(error),
+              }),
             );
           });
         return true;
@@ -510,7 +513,9 @@ export function useGeminiCommonConfig({
         .catch((error: unknown) => {
           console.error("保存 Gemini 通用配置失败:", error);
           setCommonConfigError(
-            t("geminiConfig.saveFailed", { error: String(error) }),
+            t("geminiConfig.saveFailed", {
+              error: extractErrorMessage(error),
+            }),
           );
         });
 
@@ -582,7 +587,9 @@ export function useGeminiCommonConfig({
     } catch (error) {
       console.error("提取 Gemini 通用配置失败:", error);
       setCommonConfigError(
-        t("geminiConfig.extractFailed", { error: String(error) }),
+        t("geminiConfig.extractFailed", {
+          error: extractErrorMessage(error),
+        }),
       );
     } finally {
       setIsExtracting(false);
