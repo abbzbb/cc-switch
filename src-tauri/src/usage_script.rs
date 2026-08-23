@@ -891,6 +891,26 @@ fn ipv6_is_restricted(v6: Ipv6Addr) -> bool {
     if let Some(v4) = v6.to_ipv4() {
         return ipv4_is_restricted(v4);
     }
+    let segs = v6.segments();
+    // NAT64 well-known prefix 64:ff9b::/96 embeds an IPv4 address in the
+    // last 32 bits (e.g. 64:ff9b::a9fe:a9fe → 169.254.169.254).
+    if segs[0] == 0x64 && segs[1] == 0xff9b {
+        return ipv4_is_restricted(Ipv4Addr::new(
+            (segs[6] >> 8) as u8,
+            segs[6] as u8,
+            (segs[7] >> 8) as u8,
+            segs[7] as u8,
+        ));
+    }
+    // 6to4 2002::/16 embeds IPv4 in the next 32 bits.
+    if segs[0] == 0x2002 {
+        return ipv4_is_restricted(Ipv4Addr::new(
+            (segs[1] >> 8) as u8,
+            segs[1] as u8,
+            (segs[2] >> 8) as u8,
+            segs[2] as u8,
+        ));
+    }
     false
 }
 
@@ -1074,6 +1094,8 @@ mod tests {
             "https://192.168.1.1/usage",
             "https://169.254.169.254/latest/meta-data/",
             "https://[::1]/usage",
+            "https://[64:ff9b::a9fe:a9fe]/latest/meta-data/",
+            "https://[2002:a9fe:a9fe::]/latest/meta-data/",
         ] {
             let parsed = Url::parse(url).unwrap();
             let restricted = url_resolves_to_restricted_host(&parsed)

@@ -65,6 +65,11 @@ pub enum ProxyError {
     #[error("超时: {0}")]
     Timeout(String),
 
+    /// HTTP 2xx 已经从上游发出之后，读 body / 首包失败。
+    /// 请求可能已经在上游执行完毕，换卡会重放非幂等 POST。
+    #[error("上游已接受请求但响应未完成: {0}")]
+    UpstreamCommitted(String),
+
     /// 流式响应空闲超时
     #[allow(dead_code)]
     #[error("流式响应空闲超时: {0}秒无数据")]
@@ -127,7 +132,9 @@ impl IntoResponse for ProxyError {
                     ProxyError::StopFailed(_) => {
                         (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
                     }
-                    ProxyError::ForwardFailed(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
+                    ProxyError::ForwardFailed(_) | ProxyError::UpstreamCommitted(_) => {
+                        (StatusCode::BAD_GATEWAY, self.to_string())
+                    }
                     ProxyError::NoAvailableProvider => {
                         (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
                     }

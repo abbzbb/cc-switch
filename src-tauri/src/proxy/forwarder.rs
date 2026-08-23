@@ -2731,11 +2731,16 @@ impl RequestForwarder {
         )
         .await
         .map_err(|_| {
-            ProxyError::Timeout(format!(
-                "响应体读取超时: {}s（上游发完响应头后 body 未到达）",
+            ProxyError::UpstreamCommitted(format!(
+                "响应体读取超时: {}s（上游已返回 2xx，body 未到达；不换卡重放）",
                 body_timeout.as_secs()
             ))
-        })??;
+        })?
+        .map_err(|e| {
+            ProxyError::UpstreamCommitted(format!(
+                "读取 2xx 响应体失败: {e}（上游可能已生成完毕，不换卡重放）"
+            ))
+        })?;
 
         Ok(ProxyResponse::buffered(status, headers, body))
     }
@@ -2895,20 +2900,23 @@ impl RequestForwarder {
         let first = tokio::time::timeout(timeout, stream.next())
             .await
             .map_err(|_| {
-                ProxyError::Timeout(format!(
-                    "流式响应首包超时: {}s（上游已返回响应头但未返回数据）",
+                ProxyError::UpstreamCommitted(format!(
+                    "流式响应首包超时: {}s（上游已返回 2xx，不换卡重放）",
                     timeout.as_secs()
                 ))
             })?;
 
         let Some(first) = first else {
-            return Err(ProxyError::ForwardFailed(
-                "流式响应在首包到达前结束".to_string(),
+            return Err(ProxyError::UpstreamCommitted(
+                "流式响应在首包到达前结束（上游已返回 2xx，不换卡重放）".to_string(),
             ));
         };
 
-        let first =
-            first.map_err(|e| ProxyError::ForwardFailed(format!("读取流式响应首包失败: {e}")))?;
+        let first = first.map_err(|e| {
+            ProxyError::UpstreamCommitted(format!(
+                "读取流式响应首包失败: {e}（上游已返回 2xx，不换卡重放）"
+            ))
+        })?;
 
         let replay = futures::stream::once(async move { Ok(first) }).chain(stream);
         Ok(ProxyResponse::streamed(status, headers, replay))
@@ -3053,6 +3061,9 @@ impl RequestForwarder {
             // 网络和上游错误：都应该尝试下一个供应商
             ProxyError::Timeout(_) => ErrorCategory::Retryable,
             ProxyError::ForwardFailed(_) => ErrorCategory::Retryable,
+            // HTTP 2xx already left the upstream. Replaying the POST on another
+            // card can double-spend. Same-card xAI continue does not use this.
+            ProxyError::UpstreamCommitted(_) => ErrorCategory::NonRetryable,
             ProxyError::ProviderUnhealthy(_) => ErrorCategory::Retryable,
             // 上游 HTTP 错误：按状态码分桶。
             //
@@ -4549,7 +4560,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_streaming_body_read_error_is_retryable_before_success_record() {
+    async fn non_streaming_body_read_error_after_2xx_is_not_retryable() {
         let forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
         let response = ProxyResponse::streamed(
             StatusCode::OK,
@@ -4567,7 +4578,11 @@ mod tests {
             Err(err) => err,
         };
 
-        assert!(matches!(err, ProxyError::ForwardFailed(_)));
+        assert!(matches!(err, ProxyError::UpstreamCommitted(_)));
+        assert_eq!(
+            forwarder.categorize_proxy_error(&err, &test_provider_with_type(None)),
+            ErrorCategory::NonRetryable
+        );
     }
 
     #[tokio::test]
@@ -4597,7 +4612,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streaming_first_chunk_error_is_retryable_before_success_record() {
+    async fn streaming_first_chunk_error_after_2xx_is_not_retryable() {
         let forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
         let response = ProxyResponse::streamed(
             StatusCode::OK,
@@ -4615,7 +4630,11 @@ mod tests {
             Err(err) => err,
         };
 
-        assert!(matches!(err, ProxyError::ForwardFailed(_)));
+        assert!(matches!(err, ProxyError::UpstreamCommitted(_)));
+        assert_eq!(
+            forwarder.categorize_proxy_error(&err, &test_provider_with_type(None)),
+            ErrorCategory::NonRetryable
+        );
     }
 
     #[test]

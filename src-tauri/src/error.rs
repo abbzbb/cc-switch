@@ -168,6 +168,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn serializes_plain_variant_as_message_object() {
+        let err = AppError::Config("bad toml".into());
+        let value = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(value["message"], "配置错误: bad toml");
+        assert!(value.get("key").is_none());
+    }
+
+    #[test]
     fn serializes_localized_as_object_with_key() {
         let err = AppError::localized("usage_script.request_failed", "中文", "English");
         let value = serde_json::to_value(&err).expect("serialize");

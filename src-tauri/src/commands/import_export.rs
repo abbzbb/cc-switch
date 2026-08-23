@@ -33,7 +33,7 @@ where
 pub async fn export_config_to_file(
     #[allow(non_snake_case)] filePath: String,
     state: State<'_, AppState>,
-) -> Result<Value, String> {
+) -> Result<Value, AppError> {
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let target_path = PathBuf::from(&filePath);
@@ -45,8 +45,7 @@ pub async fn export_config_to_file(
         }))
     })
     .await
-    .map_err(|e| format!("导出配置失败: {e}"))?
-    .map_err(|e: AppError| e.to_string())
+    .map_err(|e| AppError::Message(format!("导出配置失败: {e}")))?
 }
 
 /// 从 SQL 备份导入数据库
@@ -54,7 +53,7 @@ pub async fn export_config_to_file(
 pub async fn import_config_from_file(
     #[allow(non_snake_case)] filePath: String,
     state: State<'_, AppState>,
-) -> Result<Value, String> {
+) -> Result<Value, AppError> {
     let app_state_for_sync = state.inner().clone();
     let db = app_state_for_sync.db.clone();
     run_with_database_restore_lock(move || {
@@ -75,8 +74,7 @@ pub async fn import_config_from_file(
         })
     })
     .await
-    .map_err(|e| format!("导入配置失败: {e}"))?
-    .map_err(|e: AppError| e.to_string())
+    .map_err(|e| AppError::Message(format!("导入配置失败: {e}")))?
 }
 
 #[tauri::command]
@@ -163,8 +161,8 @@ pub async fn create_db_backup(state: State<'_, AppState>) -> Result<String, Stri
 
 /// List all database backup files
 #[tauri::command]
-pub fn list_db_backups() -> Result<Vec<BackupEntry>, String> {
-    Database::list_backups().map_err(|e| e.to_string())
+pub fn list_db_backups() -> Result<Vec<BackupEntry>, AppError> {
+    Database::list_backups()
 }
 
 /// Restore database from a backup file
@@ -172,7 +170,7 @@ pub fn list_db_backups() -> Result<Vec<BackupEntry>, String> {
 pub async fn restore_db_backup(
     state: State<'_, AppState>,
     filename: String,
-) -> Result<Value, String> {
+) -> Result<Value, AppError> {
     let app_state_for_sync = state.inner().clone();
     let db = app_state_for_sync.db.clone();
     run_with_database_restore_lock(move || {
@@ -197,8 +195,7 @@ pub async fn restore_db_backup(
         })
     })
     .await
-    .map_err(|e| format!("Restore failed: {e}"))?
-    .map_err(|e: AppError| e.to_string())
+    .map_err(|e| AppError::Message(format!("Restore failed: {e}")))?
 }
 
 /// Rename a database backup file

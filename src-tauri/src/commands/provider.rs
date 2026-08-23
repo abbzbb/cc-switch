@@ -24,15 +24,18 @@ const COPILOT_UNIT_PREMIUM: &str = "requests";
 pub fn get_providers(
     state: State<'_, AppState>,
     app: String,
-) -> Result<IndexMap<String, Provider>, String> {
-    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    ProviderService::list(state.inner(), app_type).map_err(|e| e.to_string())
+) -> Result<IndexMap<String, Provider>, AppError> {
+    let app_type = AppType::from_str(&app).map_err(|e| AppError::InvalidInput(e.to_string()))?;
+    ProviderService::list(state.inner(), app_type)
 }
 
 #[tauri::command]
-pub fn get_current_provider(state: State<'_, AppState>, app: String) -> Result<String, String> {
-    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    ProviderService::current(state.inner(), app_type).map_err(|e| e.to_string())
+pub fn get_current_provider(
+    state: State<'_, AppState>,
+    app: String,
+) -> Result<String, AppError> {
+    let app_type = AppType::from_str(&app).map_err(|e| AppError::InvalidInput(e.to_string()))?;
+    ProviderService::current(state.inner(), app_type)
 }
 
 #[tauri::command]
@@ -41,18 +44,17 @@ pub async fn add_provider(
     app: String,
     provider: Provider,
     #[allow(non_snake_case)] addToLive: Option<bool>,
-) -> Result<bool, String> {
-    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+) -> Result<bool, AppError> {
+    let app_type = AppType::from_str(&app).map_err(|e| AppError::InvalidInput(e.to_string()))?;
     let add_to_live = addToLive.unwrap_or(true);
     tauri::async_runtime::spawn_blocking(move || {
         let state = app_handle
             .try_state::<AppState>()
-            .ok_or_else(|| "应用状态不可用".to_string())?;
+            .ok_or_else(|| AppError::Message("应用状态不可用".to_string()))?;
         ProviderService::add(state.inner(), app_type, provider, add_to_live)
-            .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("供应商添加任务执行失败: {e}"))?
+    .map_err(|e| AppError::Message(format!("供应商添加任务执行失败: {e}")))?
 }
 
 #[tauri::command]
@@ -61,17 +63,16 @@ pub async fn update_provider(
     app: String,
     provider: Provider,
     #[allow(non_snake_case)] originalId: Option<String>,
-) -> Result<bool, String> {
-    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+) -> Result<bool, AppError> {
+    let app_type = AppType::from_str(&app).map_err(|e| AppError::InvalidInput(e.to_string()))?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app_handle
             .try_state::<AppState>()
-            .ok_or_else(|| "应用状态不可用".to_string())?;
+            .ok_or_else(|| AppError::Message("应用状态不可用".to_string()))?;
         ProviderService::update(state.inner(), app_type, originalId.as_deref(), provider)
-            .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("供应商更新任务执行失败: {e}"))?
+    .map_err(|e| AppError::Message(format!("供应商更新任务执行失败: {e}")))?
 }
 
 #[tauri::command]
@@ -79,11 +80,9 @@ pub fn delete_provider(
     state: State<'_, AppState>,
     app: String,
     id: String,
-) -> Result<bool, String> {
-    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    ProviderService::delete(state.inner(), app_type, &id)
-        .map(|_| true)
-        .map_err(|e| e.to_string())
+) -> Result<bool, AppError> {
+    let app_type = AppType::from_str(&app).map_err(|e| AppError::InvalidInput(e.to_string()))?;
+    ProviderService::delete(state.inner(), app_type, &id).map(|_| true)
 }
 
 #[tauri::command]
@@ -91,11 +90,9 @@ pub fn remove_provider_from_live_config(
     state: tauri::State<'_, AppState>,
     app: String,
     id: String,
-) -> Result<bool, String> {
-    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    ProviderService::remove_from_live_config(state.inner(), app_type, &id)
-        .map(|_| true)
-        .map_err(|e| e.to_string())
+) -> Result<bool, AppError> {
+    let app_type = AppType::from_str(&app).map_err(|e| AppError::InvalidInput(e.to_string()))?;
+    ProviderService::remove_from_live_config(state.inner(), app_type, &id).map(|_| true)
 }
 
 fn switch_provider_internal(
@@ -120,16 +117,16 @@ pub async fn switch_provider(
     app_handle: tauri::AppHandle,
     app: String,
     id: String,
-) -> Result<SwitchResult, String> {
-    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+) -> Result<SwitchResult, AppError> {
+    let app_type = AppType::from_str(&app).map_err(|e| AppError::InvalidInput(e.to_string()))?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app_handle
             .try_state::<AppState>()
-            .ok_or_else(|| "应用状态不可用".to_string())?;
-        switch_provider_internal(state.inner(), app_type, &id).map_err(|e| e.to_string())
+            .ok_or_else(|| AppError::Message("应用状态不可用".to_string()))?;
+        switch_provider_internal(state.inner(), app_type, &id)
     })
     .await
-    .map_err(|e| format!("供应商切换任务执行失败: {e}"))?
+    .map_err(|e| AppError::Message(format!("供应商切换任务执行失败: {e}")))?
 }
 
 fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result<bool, AppError> {
@@ -209,9 +206,9 @@ pub fn import_default_config_test_hook(
 }
 
 #[tauri::command]
-pub fn import_default_config(state: State<'_, AppState>, app: String) -> Result<bool, String> {
-    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    import_default_config_internal(&state, app_type).map_err(Into::into)
+pub fn import_default_config(state: State<'_, AppState>, app: String) -> Result<bool, AppError> {
+    let app_type = AppType::from_str(&app).map_err(|e| AppError::InvalidInput(e.to_string()))?;
+    import_default_config_internal(&state, app_type)
 }
 
 #[tauri::command]
