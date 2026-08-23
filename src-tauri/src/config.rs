@@ -562,58 +562,79 @@ fn atomic_write_with_unix_mode(
 }
 
 #[cfg(any(windows, test))]
-fn is_safe_wsl_path_payload(encoded_path: &str) -> bool {
-    !encoded_path.is_empty()
-        && encoded_path
+fn is_safe_wsl_sidecar_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= 64
+        && token
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 #[cfg(any(windows, test))]
-fn encode_wsl_path_payload(linux_path: &str) -> std::io::Result<String> {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-
-    let encoded_path = URL_SAFE_NO_PAD.encode(linux_path.as_bytes());
-    if is_safe_wsl_path_payload(&encoded_path) {
-        Ok(encoded_path)
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "WSL path encoding produced unsafe bytes",
-        ))
-    }
-}
-
-/// Build a `sh -c` script that carries the path as `encoded=<url-safe-b64>`.
-///
-/// wsl.exe mangles extra argv (`$1`) and stdin, which made `base64 -d` fail
-/// with `invalid input`. The `-c` script itself is transported intact, and
-/// URL-safe base64 without padding is a safe unquoted shell assignment.
-#[cfg(any(windows, test))]
-fn wsl_path_shell_script(encoded_path: &str, create: bool) -> std::io::Result<String> {
-    if !is_safe_wsl_path_payload(encoded_path) {
+fn wsl_sidecar_linux_path(token: &str) -> std::io::Result<String> {
+    if !is_safe_wsl_sidecar_token(token) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "WSL shell payload contains unsafe bytes",
+            "WSL sidecar token contains unsafe bytes",
         ));
     }
+    Ok(format!("/tmp/cc-switch-wsl-path-{token}"))
+}
 
-    const DECODE_SCRIPT: &str = concat!(
-        "encoded=$(printf '%s' \"$encoded\" | LC_ALL=C tr -cd 'A-Za-z0-9_-');",
-        "[ -n \"$encoded\" ] || exit 74;",
-        "case $((${#encoded} % 4)) in 0) ;; 2) encoded=$encoded== ;; ",
-        "3) encoded=$encoded= ;; *) exit 74 ;; esac;",
-        "path=$(printf '%s\\n' \"$encoded\" | tr '_-' '/+' | base64 -d) || { ",
-        "printf 'WSL path decode failed after sanitizing %s bytes (%s)\\n' ",
-        "\"${#encoded}\" \"$encoded\" >&2; exit 74; };",
-        "[ -n \"$path\" ] || exit 74;"
+/// Build a `sh -c` script that reads the target path from a sidecar file.
+///
+/// The sidecar name is `/tmp/cc-switch-wsl-path-<hex>` so the script never
+/// carries user-controlled path bytes. wsl.exe corrupts extra argv, stdin,
+/// and long `-c` payloads, which is why base64-in-command-line failed.
+#[cfg(any(windows, test))]
+fn wsl_path_shell_script(token: &str, create: bool) -> std::io::Result<String> {
+    let sidecar = wsl_sidecar_linux_path(token)?;
+    let load = format!(
+        "n=0\n\
+         while [ ! -f {sidecar} ]; do\n\
+         n=$((n+1))\n\
+         [ \"$n\" -ge 20 ] && exit 74\n\
+         sleep 0.05 2>/dev/null || sleep 1\n\
+         done\n\
+         path=$(cat -- {sidecar}) || exit 74\n\
+         rm -f -- {sidecar}\n\
+         [ -n \"$path\" ] || exit 74\n"
     );
     let action = if create {
-        "if [ -e \"$path\" ] || [ -L \"$path\" ]; then exit 73; fi; umask 077; set -C; : > \"$path\""
+        "if [ -e \"$path\" ] || [ -L \"$path\" ]; then exit 73; fi\n\
+         umask 077\n\
+         set -C\n\
+         : > \"$path\""
     } else {
         "rm -f -- \"$path\""
     };
-    Ok(format!("encoded={encoded_path};{DECODE_SCRIPT}{action}"))
+    Ok(format!("{load}{action}"))
+}
+
+#[cfg(windows)]
+fn wsl_unc_for_linux_path(reference: &Path, linux_path: &str) -> std::io::Result<PathBuf> {
+    let prefix = match reference.components().next() {
+        Some(Component::Prefix(prefix)) => prefix,
+        _ => return Err(std::io::Error::other("not a WSL UNC path")),
+    };
+    if !linux_path.starts_with('/') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "WSL linux path must be absolute",
+        ));
+    }
+
+    let mut unc = PathBuf::from(prefix.as_os_str());
+    for part in linux_path.split('/') {
+        if part.is_empty() {
+            continue;
+        }
+        if part == "." || part == ".." {
+            return Err(std::io::Error::other("invalid WSL linux path"));
+        }
+        unc.push(part);
+    }
+    Ok(unc)
 }
 
 #[cfg(windows)]
@@ -621,8 +642,7 @@ fn create_wsl_private_temp(path: &Path) -> std::io::Result<fs::File> {
     const ALREADY_EXISTS_EXIT_CODE: i32 = 73;
 
     let (distro, linux_path) = wsl_private_path_target(path)?;
-    let encoded_path = encode_wsl_path_payload(&linux_path)?;
-    let output = run_wsl_path_script(&distro, &encoded_path, true)?;
+    let output = run_wsl_path_script(path, &distro, &linux_path, true)?;
     if !output.status.success() {
         let message = format!(
             "WSL private temporary file creation failed for {linux_path}: status {}; stderr: {}",
@@ -641,7 +661,7 @@ fn create_wsl_private_temp(path: &Path) -> std::io::Result<fs::File> {
     match open_wsl_private_temp(path) {
         Ok(file) => Ok(file),
         Err(source) => {
-            let _ = run_wsl_path_script(&distro, &encoded_path, false);
+            let _ = run_wsl_path_script(path, &distro, &linux_path, false);
             Err(source)
         }
     }
@@ -649,20 +669,43 @@ fn create_wsl_private_temp(path: &Path) -> std::io::Result<fs::File> {
 
 #[cfg(windows)]
 fn run_wsl_path_script(
+    reference: &Path,
     distro: &std::ffi::OsStr,
-    encoded_path: &str,
+    linux_path: &str,
     create: bool,
 ) -> std::io::Result<std::process::Output> {
     use std::process::Stdio;
 
-    let script = wsl_path_shell_script(encoded_path, create)?;
-    std::process::Command::new("wsl.exe")
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let sidecar_linux = wsl_sidecar_linux_path(&token)?;
+    let sidecar_unc = wsl_unc_for_linux_path(reference, &sidecar_linux)?;
+    let script = wsl_path_shell_script(&token, create)?;
+
+    if let Err(source) = write_wsl_sidecar(&sidecar_unc, linux_path.as_bytes()) {
+        let _ = fs::remove_file(&sidecar_unc);
+        return Err(source);
+    }
+
+    let output = std::process::Command::new("wsl.exe")
         .arg("-d")
         .arg(distro)
-        .args(["--", "sh", "-c"])
+        .args(["-e", "sh", "-c"])
         .arg(&script)
         .stdin(Stdio::null())
-        .output()
+        .output();
+    let _ = fs::remove_file(&sidecar_unc);
+    output
+}
+
+#[cfg(windows)]
+fn write_wsl_sidecar(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()
 }
 
 #[cfg(windows)]
@@ -1002,34 +1045,30 @@ mod tests {
     }
 
     #[test]
-    fn wsl_path_shell_script_embeds_url_safe_payload() {
-        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-
-        let linux_path = "/tmp/cc-switch-windows-test-root/atomic write 'contract-3xJoNF/private collision 'candidate";
-        let encoded = encode_wsl_path_payload(linux_path).unwrap();
-        assert!(is_safe_wsl_path_payload(&encoded));
-        assert!(!encoded.contains(['=', '+', '/', '\r', '\n', ';', ' ', '\'']));
+    fn wsl_path_shell_script_reads_safe_sidecar_token() {
+        let token = "0123456789abcdef0123456789abcdef";
+        let sidecar = wsl_sidecar_linux_path(token).unwrap();
         assert_eq!(
-            URL_SAFE_NO_PAD.decode(&encoded).unwrap(),
-            linux_path.as_bytes()
+            sidecar,
+            "/tmp/cc-switch-wsl-path-0123456789abcdef0123456789abcdef"
         );
 
-        let create = wsl_path_shell_script(&encoded, true).unwrap();
-        assert!(create.starts_with(&format!("encoded={encoded};")));
+        let linux_path = "/tmp/cc-switch-windows-test-root/atomic write 'contract-3xJoNF/private collision 'candidate";
+        let create = wsl_path_shell_script(token, true).unwrap();
+        assert!(create.contains(&format!("cat -- {sidecar}")));
         assert!(!create.contains(linux_path));
-        assert!(!create.contains('\n'));
-        assert!(create.contains("base64 -d"));
+        assert!(!create.contains("base64"));
         assert!(create.contains(": > \"$path\""));
 
-        let remove = wsl_path_shell_script(&encoded, false).unwrap();
-        assert!(remove.starts_with(&format!("encoded={encoded};")));
+        let remove = wsl_path_shell_script(token, false).unwrap();
+        assert!(remove.contains(&format!("cat -- {sidecar}")));
         assert!(remove.contains("rm -f -- \"$path\""));
 
-        assert!(encode_wsl_path_payload("").is_err());
-        assert!(wsl_path_shell_script("", true).is_err());
+        assert!(wsl_sidecar_linux_path("").is_err());
         assert!(wsl_path_shell_script("abc;rm", true).is_err());
-        assert!(wsl_path_shell_script("abc$PATH", true).is_err());
-        assert!(wsl_path_shell_script("abc=def", true).is_err());
+        assert!(wsl_path_shell_script("ABC", true).is_err());
+        assert!(wsl_path_shell_script("abc-def", true).is_err());
+        assert!(wsl_path_shell_script("../tmp", true).is_err());
     }
 
     #[test]
@@ -1220,6 +1259,26 @@ mod tests {
         std::fs::write(&path, b"secret").unwrap();
         restrict_path_private(&path).expect("windows DACL restriction");
         assert_eq!(std::fs::read(&path).unwrap(), b"secret");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wsl_unc_for_linux_path_preserves_share_prefix() {
+        let reference =
+            PathBuf::from(r"\\wsl.localhost\Ubuntu-24.04\tmp\cc-switch-windows-test-root\file");
+        let unc = wsl_unc_for_linux_path(
+            &reference,
+            "/tmp/cc-switch-wsl-path-0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        assert_eq!(
+            unc,
+            PathBuf::from(
+                r"\\wsl.localhost\Ubuntu-24.04\tmp\cc-switch-wsl-path-0123456789abcdef0123456789abcdef"
+            )
+        );
+        assert!(wsl_unc_for_linux_path(&reference, "tmp/relative").is_err());
+        assert!(wsl_unc_for_linux_path(&reference, "/tmp/../etc/passwd").is_err());
     }
 
     #[cfg(windows)]
