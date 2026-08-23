@@ -615,7 +615,13 @@ fn wsl_path_shell_script(token: &str, create: bool) -> std::io::Result<String> {
          fi\n"
     );
     let action = if create {
-        "if [ -e \"$path\" ] || [ -L \"$path\" ]; then exit 73; fi\n\
+        "parent=${path%/*}\n\
+         [ -n \"$parent\" ] || parent=/\n\
+         if ! mkdir -p -- \"$parent\"; then\n\
+         printf 'WSL mkdir failed: %s\\n' \"$parent\" >&2\n\
+         exit 74\n\
+         fi\n\
+         if [ -e \"$path\" ] || [ -L \"$path\" ]; then exit 73; fi\n\
          umask 077\n\
          set -C\n\
          : > \"$path\""
@@ -1125,6 +1131,7 @@ mod tests {
         assert!(create.contains(&format!("cat -- {sidecar}")));
         assert!(!create.contains(linux_path));
         assert!(!create.contains("base64"));
+        assert!(create.contains("mkdir -p -- \"$parent\""));
         assert!(create.contains(": > \"$path\""));
 
         let remove = wsl_path_shell_script(token, false).unwrap();
