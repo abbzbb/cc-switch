@@ -565,6 +565,13 @@ pub(crate) fn restrict_path_private(path: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn restrict_path_private_windows(path: &Path) -> std::io::Result<()> {
+    // WSL's UNC provider may report a successful Win32 ACL update without
+    // translating it to Linux mode bits. Use chmod as the authoritative path
+    // whenever the UNC target can be resolved to a distro path.
+    if wsl_private_path_target(path).is_ok() {
+        return restrict_wsl_path_private(path);
+    }
+
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{
