@@ -84,7 +84,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version-file: ".node-version"
+          node-version: "20"
 
       - name: Setup pnpm
         env:
