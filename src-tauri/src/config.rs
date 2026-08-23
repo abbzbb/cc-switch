@@ -561,32 +561,68 @@ fn atomic_write_with_unix_mode(
     Ok(())
 }
 
-#[cfg(windows)]
-fn create_wsl_private_temp(path: &Path) -> std::io::Result<fs::File> {
+#[cfg(any(windows, test))]
+fn is_safe_wsl_path_payload(encoded_path: &str) -> bool {
+    !encoded_path.is_empty()
+        && encoded_path
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+#[cfg(any(windows, test))]
+fn encode_wsl_path_payload(linux_path: &str) -> std::io::Result<String> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
+    let encoded_path = URL_SAFE_NO_PAD.encode(linux_path.as_bytes());
+    if is_safe_wsl_path_payload(&encoded_path) {
+        Ok(encoded_path)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "WSL path encoding produced unsafe bytes",
+        ))
+    }
+}
+
+/// Build a `sh -c` script that carries the path as `encoded=<url-safe-b64>`.
+///
+/// wsl.exe mangles extra argv (`$1`) and stdin, which made `base64 -d` fail
+/// with `invalid input`. The `-c` script itself is transported intact, and
+/// URL-safe base64 without padding is a safe unquoted shell assignment.
+#[cfg(any(windows, test))]
+fn wsl_path_shell_script(encoded_path: &str, create: bool) -> std::io::Result<String> {
+    if !is_safe_wsl_path_payload(encoded_path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "WSL shell payload contains unsafe bytes",
+        ));
+    }
+
+    const DECODE_SCRIPT: &str = concat!(
+        "encoded=$(printf '%s' \"$encoded\" | LC_ALL=C tr -cd 'A-Za-z0-9_-');",
+        "[ -n \"$encoded\" ] || exit 74;",
+        "case $((${#encoded} % 4)) in 0) ;; 2) encoded=$encoded== ;; ",
+        "3) encoded=$encoded= ;; *) exit 74 ;; esac;",
+        "path=$(printf '%s\\n' \"$encoded\" | tr '_-' '/+' | base64 -d) || { ",
+        "printf 'WSL path decode failed after sanitizing %s bytes (%s)\\n' ",
+        "\"${#encoded}\" \"$encoded\" >&2; exit 74; };",
+        "[ -n \"$path\" ] || exit 74;"
+    );
+    let action = if create {
+        "if [ -e \"$path\" ] || [ -L \"$path\" ]; then exit 73; fi; umask 077; set -C; : > \"$path\""
+    } else {
+        "rm -f -- \"$path\""
+    };
+    Ok(format!("encoded={encoded_path};{DECODE_SCRIPT}{action}"))
+}
+
+#[cfg(windows)]
+fn create_wsl_private_temp(path: &Path) -> std::io::Result<fs::File> {
     const ALREADY_EXISTS_EXIT_CODE: i32 = 73;
-    const CREATE_SCRIPT: &str = "IFS= read -r encoded || [ -n \"$encoded\" ] || exit 74
-encoded=$(printf '%s' \"$encoded\" | LC_ALL=C tr -cd 'A-Za-z0-9_-')
-[ -n \"$encoded\" ] || exit 74
-case $((${#encoded} % 4)) in 0) ;; 2) encoded=$encoded== ;; 3) encoded=$encoded= ;; *) exit 74 ;; esac
-path=$(printf '%s' \"$encoded\" | tr '_-' '/+' | base64 -d) || { printf 'WSL path decode failed after sanitizing %s bytes\n' \"${#encoded}\" >&2; exit 74; }
-[ -n \"$path\" ] || exit 74
-if [ -e \"$path\" ] || [ -L \"$path\" ]; then exit 73; fi
-umask 077
-set -C
-: > \"$path\"";
-    const REMOVE_SCRIPT: &str = "IFS= read -r encoded || [ -n \"$encoded\" ] || exit 74
-encoded=$(printf '%s' \"$encoded\" | LC_ALL=C tr -cd 'A-Za-z0-9_-')
-[ -n \"$encoded\" ] || exit 74
-case $((${#encoded} % 4)) in 0) ;; 2) encoded=$encoded== ;; 3) encoded=$encoded= ;; *) exit 74 ;; esac
-path=$(printf '%s' \"$encoded\" | tr '_-' '/+' | base64 -d) || exit 74
-[ -n \"$path\" ] || exit 74
-rm -f -- \"$path\"";
 
     let (distro, linux_path) = wsl_private_path_target(path)?;
-    let encoded_path = URL_SAFE_NO_PAD.encode(linux_path.as_bytes());
-    let output = run_wsl_path_script(&distro, CREATE_SCRIPT, &encoded_path)?;
+    let encoded_path = encode_wsl_path_payload(&linux_path)?;
+    let output = run_wsl_path_script(&distro, &encoded_path, true)?;
     if !output.status.success() {
         let message = format!(
             "WSL private temporary file creation failed for {linux_path}: status {}; stderr: {}",
@@ -605,7 +641,7 @@ rm -f -- \"$path\"";
     match open_wsl_private_temp(path) {
         Ok(file) => Ok(file),
         Err(source) => {
-            let _ = run_wsl_path_script(&distro, REMOVE_SCRIPT, &encoded_path);
+            let _ = run_wsl_path_script(&distro, &encoded_path, false);
             Err(source)
         }
     }
@@ -614,29 +650,19 @@ rm -f -- \"$path\"";
 #[cfg(windows)]
 fn run_wsl_path_script(
     distro: &std::ffi::OsStr,
-    script: &str,
     encoded_path: &str,
+    create: bool,
 ) -> std::io::Result<std::process::Output> {
     use std::process::Stdio;
 
-    let mut child = std::process::Command::new("wsl.exe")
+    let script = wsl_path_shell_script(encoded_path, create)?;
+    std::process::Command::new("wsl.exe")
         .arg("-d")
         .arg(distro)
-        .args(["--", "sh", "-c", script])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let write_result = match child.stdin.take() {
-        Some(mut stdin) => stdin.write_all(encoded_path.as_bytes()),
-        None => Err(std::io::Error::other("WSL child stdin was not piped")),
-    };
-    if let Err(source) = write_result {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(source);
-    }
-    child.wait_with_output()
+        .args(["--", "sh", "-c"])
+        .arg(&script)
+        .stdin(Stdio::null())
+        .output()
 }
 
 #[cfg(windows)]
@@ -973,6 +999,37 @@ mod tests {
             .expect("read WSL private mode");
         assert!(output.status.success(), "WSL stat failed: {output:?}");
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "600");
+    }
+
+    #[test]
+    fn wsl_path_shell_script_embeds_url_safe_payload() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+        let linux_path = "/tmp/cc-switch-windows-test-root/atomic write 'contract-3xJoNF/private collision 'candidate";
+        let encoded = encode_wsl_path_payload(linux_path).unwrap();
+        assert!(is_safe_wsl_path_payload(&encoded));
+        assert!(!encoded.contains(['=', '+', '/', '\r', '\n', ';', ' ', '\'']));
+        assert_eq!(
+            URL_SAFE_NO_PAD.decode(&encoded).unwrap(),
+            linux_path.as_bytes()
+        );
+
+        let create = wsl_path_shell_script(&encoded, true).unwrap();
+        assert!(create.starts_with(&format!("encoded={encoded};")));
+        assert!(!create.contains(linux_path));
+        assert!(!create.contains('\n'));
+        assert!(create.contains("base64 -d"));
+        assert!(create.contains(": > \"$path\""));
+
+        let remove = wsl_path_shell_script(&encoded, false).unwrap();
+        assert!(remove.starts_with(&format!("encoded={encoded};")));
+        assert!(remove.contains("rm -f -- \"$path\""));
+
+        assert!(encode_wsl_path_payload("").is_err());
+        assert!(wsl_path_shell_script("", true).is_err());
+        assert!(wsl_path_shell_script("abc;rm", true).is_err());
+        assert!(wsl_path_shell_script("abc$PATH", true).is_err());
+        assert!(wsl_path_shell_script("abc=def", true).is_err());
     }
 
     #[test]
