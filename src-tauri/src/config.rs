@@ -567,14 +567,18 @@ fn create_wsl_private_temp(path: &Path) -> std::io::Result<fs::File> {
 
     const ALREADY_EXISTS_EXIT_CODE: i32 = 73;
     const CREATE_SCRIPT: &str = "IFS= read -r encoded || [ -n \"$encoded\" ] || exit 74
+encoded=$(printf '%s' \"$encoded\" | LC_ALL=C tr -cd 'A-Za-z0-9_-')
+[ -n \"$encoded\" ] || exit 74
 case $((${#encoded} % 4)) in 0) ;; 2) encoded=$encoded== ;; 3) encoded=$encoded= ;; *) exit 74 ;; esac
-path=$(printf '%s' \"$encoded\" | tr '_-' '/+' | base64 -d) || exit 74
+path=$(printf '%s' \"$encoded\" | tr '_-' '/+' | base64 -d) || { printf 'WSL path decode failed after sanitizing %s bytes\n' \"${#encoded}\" >&2; exit 74; }
 [ -n \"$path\" ] || exit 74
 if [ -e \"$path\" ] || [ -L \"$path\" ]; then exit 73; fi
 umask 077
 set -C
 : > \"$path\"";
     const REMOVE_SCRIPT: &str = "IFS= read -r encoded || [ -n \"$encoded\" ] || exit 74
+encoded=$(printf '%s' \"$encoded\" | LC_ALL=C tr -cd 'A-Za-z0-9_-')
+[ -n \"$encoded\" ] || exit 74
 case $((${#encoded} % 4)) in 0) ;; 2) encoded=$encoded== ;; 3) encoded=$encoded= ;; *) exit 74 ;; esac
 path=$(printf '%s' \"$encoded\" | tr '_-' '/+' | base64 -d) || exit 74
 [ -n \"$path\" ] || exit 74
