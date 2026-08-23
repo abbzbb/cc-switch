@@ -190,7 +190,22 @@ jobs:
         run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 
       - name: Run tests
+        if: runner.os != 'Windows'
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Run tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $testOutput = cargo test --manifest-path src-tauri/Cargo.toml 2>&1
+          $testExitCode = $LASTEXITCODE
+          $testOutput | ForEach-Object { Write-Host $_ }
+          if ($testExitCode -ne 0) {
+            $summary = (($testOutput | Select-Object -Last 60) -join "`n")
+            $summary = $summary.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+            Write-Host "::error title=Windows backend tests failed::$summary"
+            exit $testExitCode
+          }
 
   backend-windows-wsl2:
     name: Backend Checks (Windows + WSL2 home)
