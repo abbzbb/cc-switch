@@ -563,21 +563,25 @@ fn atomic_write_with_unix_mode(
 
 #[cfg(windows)]
 fn create_wsl_private_temp(path: &Path) -> std::io::Result<fs::File> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
     const ALREADY_EXISTS_EXIT_CODE: i32 = 73;
-    const CREATE_SCRIPT: &str = "path=$(printf '%s' \"$1\" | base64 -d) || exit 74
+    const CREATE_SCRIPT: &str = "encoded=$1
+case $((${#encoded} % 4)) in 0) ;; 2) encoded=$encoded== ;; 3) encoded=$encoded= ;; *) exit 74 ;; esac
+path=$(printf '%s' \"$encoded\" | tr '_-' '/+' | base64 -d) || exit 74
 [ -n \"$path\" ] || exit 74
 if [ -e \"$path\" ] || [ -L \"$path\" ]; then exit 73; fi
 umask 077
 set -C
 : > \"$path\"";
-    const REMOVE_SCRIPT: &str = "path=$(printf '%s' \"$1\" | base64 -d) || exit 74
+    const REMOVE_SCRIPT: &str = "encoded=$1
+case $((${#encoded} % 4)) in 0) ;; 2) encoded=$encoded== ;; 3) encoded=$encoded= ;; *) exit 74 ;; esac
+path=$(printf '%s' \"$encoded\" | tr '_-' '/+' | base64 -d) || exit 74
 [ -n \"$path\" ] || exit 74
 rm -f -- \"$path\"";
 
     let (distro, linux_path) = wsl_private_path_target(path)?;
-    let encoded_path = STANDARD.encode(linux_path.as_bytes());
+    let encoded_path = URL_SAFE_NO_PAD.encode(linux_path.as_bytes());
     let output = std::process::Command::new("wsl.exe")
         .arg("-d")
         .arg(&distro)
