@@ -578,27 +578,41 @@ fn wsl_sidecar_linux_path(token: &str) -> std::io::Result<String> {
             "WSL sidecar token contains unsafe bytes",
         ));
     }
-    Ok(format!("/tmp/cc-switch-wsl-path-{token}"))
+    Ok(format!("/tmp/cc-switch-wsl/{token}"))
 }
 
-/// Build a `sh -c` script that reads the target path from a sidecar file.
+/// Build a `sh -c` script that never interpolates the user path.
 ///
-/// The sidecar name is `/tmp/cc-switch-wsl-path-<hex>` so the script never
-/// carries user-controlled path bytes. wsl.exe corrupts extra argv, stdin,
-/// and long `-c` payloads, which is why base64-in-command-line failed.
+/// Prefer `CC_SWITCH_WSL_PATH` (WSLENV). Fall back to a sidecar whose name is
+/// only `/tmp/cc-switch-wsl/<hex>` — the same pattern CI already uses to make
+/// a 0777 Linux dir and then write it from Windows UNC.
 #[cfg(any(windows, test))]
 fn wsl_path_shell_script(token: &str, create: bool) -> std::io::Result<String> {
     let sidecar = wsl_sidecar_linux_path(token)?;
     let load = format!(
-        "n=0\n\
+        "path=$CC_SWITCH_WSL_PATH\n\
+         case \"$path\" in /*) ;; *) path= ;; esac\n\
+         if [ -z \"$path\" ]; then\n\
+         n=0\n\
          while [ ! -f {sidecar} ]; do\n\
          n=$((n+1))\n\
-         [ \"$n\" -ge 20 ] && exit 74\n\
+         if [ \"$n\" -ge 20 ]; then\n\
+         printf 'WSL path sidecar missing: %s\\n' '{sidecar}' >&2\n\
+         ls -la /tmp/cc-switch-wsl >&2\n\
+         exit 74\n\
+         fi\n\
          sleep 0.05 2>/dev/null || sleep 1\n\
          done\n\
-         path=$(cat -- {sidecar}) || exit 74\n\
+         if ! path=$(cat -- {sidecar}); then\n\
+         printf 'WSL path sidecar cat failed: %s\\n' '{sidecar}' >&2\n\
+         exit 74\n\
+         fi\n\
          rm -f -- {sidecar}\n\
-         [ -n \"$path\" ] || exit 74\n"
+         fi\n\
+         if [ -z \"$path\" ]; then\n\
+         printf 'WSL target path is empty\\n' >&2\n\
+         exit 74\n\
+         fi\n"
     );
     let action = if create {
         "if [ -e \"$path\" ] || [ -L \"$path\" ]; then exit 73; fi\n\
@@ -681,6 +695,10 @@ fn run_wsl_path_script(
     let sidecar_unc = wsl_unc_for_linux_path(reference, &sidecar_linux)?;
     let script = wsl_path_shell_script(&token, create)?;
 
+    if let Err(source) = ensure_wsl_sidecar_dir(distro) {
+        let _ = fs::remove_file(&sidecar_unc);
+        return Err(source);
+    }
     if let Err(source) = write_wsl_sidecar(&sidecar_unc, linux_path.as_bytes()) {
         let _ = fs::remove_file(&sidecar_unc);
         return Err(source);
@@ -689,6 +707,8 @@ fn run_wsl_path_script(
     let output = std::process::Command::new("wsl.exe")
         .arg("-d")
         .arg(distro)
+        .env("CC_SWITCH_WSL_PATH", linux_path)
+        .env("WSLENV", "CC_SWITCH_WSL_PATH/u")
         .args(["-e", "sh", "-c"])
         .arg(&script)
         .stdin(Stdio::null())
@@ -698,14 +718,60 @@ fn run_wsl_path_script(
 }
 
 #[cfg(windows)]
+fn ensure_wsl_sidecar_dir(distro: &std::ffi::OsStr) -> std::io::Result<()> {
+    use std::process::Stdio;
+
+    let output = std::process::Command::new("wsl.exe")
+        .arg("-d")
+        .arg(distro)
+        .args([
+            "-e",
+            "sh",
+            "-c",
+            "mkdir -p /tmp/cc-switch-wsl; chmod 0777 /tmp/cc-switch-wsl",
+        ])
+        .stdin(Stdio::null())
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "WSL sidecar directory setup failed: status {}; stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+}
+
+#[cfg(windows)]
 fn write_wsl_sidecar(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)?;
-    file.write_all(contents)?;
-    file.sync_all()
+    let mut last_error = None;
+    for attempt in 0..5 {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+        {
+            Ok(mut file) => {
+                file.write_all(contents)?;
+                file.sync_all()?;
+                return Ok(());
+            }
+            Err(source) => {
+                last_error = Some(source);
+                if attempt < 4 {
+                    std::thread::sleep(std::time::Duration::from_millis(50 * (attempt + 1)));
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        std::io::Error::other(format!(
+            "WSL sidecar path is not writable from Windows: {}",
+            path.display()
+        ))
+    }))
 }
 
 #[cfg(windows)]
@@ -1050,11 +1116,12 @@ mod tests {
         let sidecar = wsl_sidecar_linux_path(token).unwrap();
         assert_eq!(
             sidecar,
-            "/tmp/cc-switch-wsl-path-0123456789abcdef0123456789abcdef"
+            "/tmp/cc-switch-wsl/0123456789abcdef0123456789abcdef"
         );
 
         let linux_path = "/tmp/cc-switch-windows-test-root/atomic write 'contract-3xJoNF/private collision 'candidate";
         let create = wsl_path_shell_script(token, true).unwrap();
+        assert!(create.contains("path=$CC_SWITCH_WSL_PATH"));
         assert!(create.contains(&format!("cat -- {sidecar}")));
         assert!(!create.contains(linux_path));
         assert!(!create.contains("base64"));
@@ -1268,13 +1335,13 @@ mod tests {
             PathBuf::from(r"\\wsl.localhost\Ubuntu-24.04\tmp\cc-switch-windows-test-root\file");
         let unc = wsl_unc_for_linux_path(
             &reference,
-            "/tmp/cc-switch-wsl-path-0123456789abcdef0123456789abcdef",
+            "/tmp/cc-switch-wsl/0123456789abcdef0123456789abcdef",
         )
         .unwrap();
         assert_eq!(
             unc,
             PathBuf::from(
-                r"\\wsl.localhost\Ubuntu-24.04\tmp\cc-switch-wsl-path-0123456789abcdef0123456789abcdef"
+                r"\\wsl.localhost\Ubuntu-24.04\tmp\cc-switch-wsl\0123456789abcdef0123456789abcdef"
             )
         );
         assert!(wsl_unc_for_linux_path(&reference, "tmp/relative").is_err());
