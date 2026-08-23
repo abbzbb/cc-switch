@@ -1292,11 +1292,17 @@ impl LiveSnapshot {
                 }
             }
             LiveSnapshot::Grok { config } => {
-                let path = crate::grok_config::get_grok_config_path();
                 if let Some(text) = config {
-                    crate::config::write_text_file_private(&path, text)?;
-                } else if path.exists() {
-                    delete_file(&path)?;
+                    crate::grok_config::write_grok_live_settings(&json!({ "config": text }))?;
+                } else {
+                    crate::grok_config::with_live_grok_toml_lock(|| {
+                        let path = crate::grok_config::get_grok_config_path();
+                        if path.exists() {
+                            delete_file(&path)
+                        } else {
+                            Ok(())
+                        }
+                    })?;
                 }
             }
             LiveSnapshot::ClaudeDesktop { files } => {

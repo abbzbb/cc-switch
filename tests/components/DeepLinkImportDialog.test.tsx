@@ -28,8 +28,25 @@ vi.mock("@/lib/api/deeplink", async (importOriginal) => {
 });
 
 vi.mock("@/components/ui/dialog", () => ({
-  Dialog: ({ children }: { children: React.ReactNode }) => (
-    <div>{children}</div>
+  Dialog: ({
+    open,
+    onOpenChange,
+    children,
+  }: {
+    open?: boolean;
+    onOpenChange?: (open: boolean) => void;
+    children: React.ReactNode;
+  }) => (
+    <div>
+      {open ? children : null}
+      <button
+        type="button"
+        data-testid="dialog-request-close"
+        onClick={() => onOpenChange?.(false)}
+      >
+        request-close
+      </button>
+    </div>
   ),
   DialogContent: ({ children }: { children: React.ReactNode }) => (
     <div>{children}</div>
@@ -146,6 +163,7 @@ describe("DeepLinkImportDialog", () => {
         version: "v1",
         resource: "mcp",
         apps: "claude",
+        config: btoa(JSON.stringify({ mcpServers: { "ok-server": {} } })),
       });
     });
 
@@ -164,6 +182,71 @@ describe("DeepLinkImportDialog", () => {
     expect(
       screen.getByRole("button", { name: "deeplink.import" }),
     ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("dialog-request-close"));
+    expect(screen.getByText("bad-server")).toBeInTheDocument();
+  });
+
+  it("disables import when an MCP deeplink is missing config or apps", async () => {
+    render(<DeepLinkImportDialog />, { wrapper: Wrapper });
+
+    act(() => {
+      emitTauriEvent("deeplink-import", {
+        version: "v1",
+        resource: "mcp",
+        apps: "claude",
+      });
+    });
+
+    const importButton = await screen.findByRole("button", {
+      name: "deeplink.import",
+    });
+    expect(importButton).toBeDisabled();
+    fireEvent.click(importButton);
+    expect(deeplinkMocks.importFromDeeplink).not.toHaveBeenCalled();
+  });
+
+  it("ignores ESC close while an MCP import is in flight", async () => {
+    let resolveImport: (value: unknown) => void = () => {};
+    deeplinkMocks.importFromDeeplink.mockReturnValue(
+      new Promise((resolve) => {
+        resolveImport = resolve;
+      }),
+    );
+
+    render(<DeepLinkImportDialog />, { wrapper: Wrapper });
+
+    act(() => {
+      emitTauriEvent("deeplink-import", {
+        version: "v1",
+        resource: "mcp",
+        apps: "claude",
+        config: btoa(JSON.stringify({ mcpServers: { "ok-server": {} } })),
+      });
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "deeplink.import" }),
+    );
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "deeplink.importing" }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId("dialog-request-close"));
+    expect(
+      screen.getByRole("button", { name: "deeplink.importing" }),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      resolveImport({
+        type: "mcp",
+        importedCount: 1,
+        importedIds: ["ok-server"],
+        failed: [],
+      });
+    });
   });
 
   it("validates required provider fields before importing", async () => {

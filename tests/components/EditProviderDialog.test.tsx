@@ -466,6 +466,100 @@ describe("EditProviderDialog", () => {
     expect(reopenedButton).toBeDisabled();
   });
 
+  it("does not load live settings while proxy status is pending", async () => {
+    const provider: Provider = {
+      id: "desktop-custom",
+      name: "Desktop Custom",
+      category: "custom",
+      settingsConfig: {
+        env: {
+          ANTHROPIC_BASE_URL: "https://api.example.com",
+          ANTHROPIC_AUTH_TOKEN: "db-key",
+        },
+      },
+    };
+
+    apiMocks.getCurrent.mockResolvedValue(provider.id);
+    apiMocks.getLiveProviderSettings.mockResolvedValue({
+      env: {
+        ANTHROPIC_BASE_URL: "http://127.0.0.1:15721",
+        ANTHROPIC_AUTH_TOKEN: "PROXY_MANAGED",
+      },
+    });
+
+    render(
+      <EditProviderDialog
+        open
+        provider={provider}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+        appId="claude-desktop"
+        isProxyStatusPending
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-config")).toBeInTheDocument();
+    });
+
+    expect(apiMocks.getLiveProviderSettings).not.toHaveBeenCalled();
+    expect(apiMocks.getCurrent).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(screen.getByTestId("settings-config").textContent ?? "{}"),
+    ).toEqual(provider.settingsConfig);
+  });
+
+  it("discards previously loaded live settings when takeover becomes true", async () => {
+    const provider: Provider = {
+      id: "desktop-custom",
+      name: "Desktop Custom",
+      category: "custom",
+      settingsConfig: {
+        env: {
+          ANTHROPIC_BASE_URL: "https://api.example.com",
+          ANTHROPIC_AUTH_TOKEN: "db-key",
+        },
+      },
+    };
+    const liveSettings = {
+      env: {
+        ANTHROPIC_BASE_URL: "http://127.0.0.1:15721",
+        ANTHROPIC_AUTH_TOKEN: "PROXY_MANAGED",
+      },
+    };
+    const props = {
+      provider,
+      onOpenChange: vi.fn(),
+      onSubmit: vi.fn(),
+      appId: "claude-desktop" as const,
+    };
+
+    apiMocks.getCurrent.mockResolvedValue(provider.id);
+    apiMocks.getLiveProviderSettings.mockResolvedValue(liveSettings);
+
+    const { rerender } = render(
+      <EditProviderDialog open {...props} isProxyTakeover={false} />,
+    );
+
+    await waitFor(() => {
+      expect(
+        JSON.parse(screen.getByTestId("settings-config").textContent ?? "{}"),
+      ).toEqual(liveSettings);
+    });
+    expect(apiMocks.getLiveProviderSettings).toHaveBeenCalled();
+
+    rerender(<EditProviderDialog open {...props} isProxyTakeover />);
+
+    await waitFor(() => {
+      expect(
+        JSON.parse(screen.getByTestId("settings-config").textContent ?? "{}"),
+      ).toEqual(provider.settingsConfig);
+    });
+    expect(screen.getByTestId("settings-config").textContent).not.toContain(
+      "127.0.0.1",
+    );
+  });
+
   it("uses payload.providerKey as the next provider id for Hermes", async () => {
     mockProviderKey = "renamed-hermes";
     const onSubmit = vi.fn().mockResolvedValue(undefined);

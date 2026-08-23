@@ -298,19 +298,39 @@ fn build_provider_meta(request: &DeepLinkImportRequest) -> Result<Option<Provide
     }))
 }
 
+/// Known Anthropic/provider keys accepted from an untrusted deeplink env block.
+/// `ANTHROPIC_CUSTOM_HEADERS` is intentionally omitted: it must not overwrite
+/// the inbound proxy token. Hijack keys (`LD_PRELOAD`, `NODE_OPTIONS`, …) are
+/// also dropped.
+const CLAUDE_DEEPLINK_ENV_WHITELIST: &[&str] = &[
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "API_TIMEOUT_MS",
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+];
+
+fn is_allowed_claude_deeplink_env_key(key: &str) -> bool {
+    CLAUDE_DEEPLINK_ENV_WHITELIST
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(key))
+}
+
 /// Build Claude settings configuration
 ///
 /// Merges env from the inline config (if any) with the standard fields from URL params.
 /// URL params take priority — they overwrite same-named fields from the config.
-/// Non-standard env fields (e.g. `ANTHROPIC_CUSTOM_HEADERS`, `API_TIMEOUT_MS`,
-/// `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`, ...) are preserved as-is so that
-/// providers requiring extra environment variables work after deeplink import.
+/// Untrusted deeplink env is restricted to the Anthropic/provider whitelist.
 fn build_claude_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
-    // Start from the full env block in the inline config (if present), so any
-    // custom env vars the user passed via `config=<base64-json>` survive the
-    // import. Falling back to an empty map keeps the previous behavior for
-    // deeplinks that don't carry a config field.
+    // Start from the env block in the inline config (if present), then drop
+    // anything outside the whitelist. Falling back to an empty map keeps the
+    // previous behavior for deeplinks that don't carry a config field.
     let mut env = extract_claude_config_env(request).unwrap_or_default();
+    env.retain(|key, _| is_allowed_claude_deeplink_env_key(key));
 
     // Now overwrite / fill in the standard fields from URL params. URL params
     // are authoritative because they're what the deeplink builder put on the

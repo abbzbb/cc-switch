@@ -1025,13 +1025,17 @@ pub(crate) async fn refresh_gemini_token(refresh_token: &str) -> Option<String> 
 pub(crate) fn persist_gemini_oauth_access_token(access_token: &str) -> Result<(), AppError> {
     let cred_path = crate::gemini_config::get_gemini_dir().join("oauth_creds.json");
     let mut value = if cred_path.exists() {
-        crate::config::read_json_file::<serde_json::Value>(&cred_path).unwrap_or_else(|_| json!({}))
+        let parsed = crate::config::read_json_file::<serde_json::Value>(&cred_path)?;
+        if !parsed.is_object() {
+            return Err(AppError::Config(format!(
+                "Gemini OAuth credentials file is not a JSON object: {}",
+                cred_path.display()
+            )));
+        }
+        parsed
     } else {
         json!({})
     };
-    if !value.is_object() {
-        value = json!({});
-    }
     value["access_token"] = json!(access_token);
     value["expiry_date"] = json!(chrono::Utc::now().timestamp_millis() + 3_500_000);
     crate::config::write_json_file_private(&cred_path, &value)
@@ -1412,5 +1416,74 @@ mod tests {
         // 其他窗口按小时/天回退命名
         assert_eq!(window_seconds_to_tier_name(3600), "1_hour");
         assert_eq!(window_seconds_to_tier_name(86400), "1_day");
+    }
+
+    fn with_gemini_test_home<T>(test: impl FnOnce(&std::path::Path) -> T) -> T {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        let result = test(temp.path());
+        match old_test_home {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+        result
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn persist_gemini_oauth_access_token_keeps_refresh_token() {
+        with_gemini_test_home(|home| {
+            let cred_path = home.join(".gemini").join("oauth_creds.json");
+            std::fs::create_dir_all(cred_path.parent().unwrap()).expect("create gemini dir");
+            std::fs::write(
+                &cred_path,
+                r#"{"refresh_token":"keep-me","access_token":"old","expiry_date":1}"#,
+            )
+            .expect("seed oauth creds");
+
+            persist_gemini_oauth_access_token("new-access").expect("persist access token");
+
+            let parsed: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&cred_path).expect("read creds"))
+                    .expect("parse creds");
+            assert_eq!(parsed["refresh_token"], "keep-me");
+            assert_eq!(parsed["access_token"], "new-access");
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn persist_gemini_oauth_access_token_rejects_corrupt_json() {
+        with_gemini_test_home(|home| {
+            let cred_path = home.join(".gemini").join("oauth_creds.json");
+            std::fs::create_dir_all(cred_path.parent().unwrap()).expect("create gemini dir");
+            let corrupt = "{ not-json";
+            std::fs::write(&cred_path, corrupt).expect("seed corrupt creds");
+
+            persist_gemini_oauth_access_token("new-access")
+                .expect_err("corrupt oauth_creds.json must not be replaced with {}");
+            assert_eq!(
+                std::fs::read_to_string(&cred_path).expect("read creds"),
+                corrupt
+            );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn persist_gemini_oauth_access_token_rejects_non_object() {
+        with_gemini_test_home(|home| {
+            let cred_path = home.join(".gemini").join("oauth_creds.json");
+            std::fs::create_dir_all(cred_path.parent().unwrap()).expect("create gemini dir");
+            std::fs::write(&cred_path, "[1,2,3]").expect("seed array creds");
+
+            persist_gemini_oauth_access_token("new-access")
+                .expect_err("non-object oauth_creds.json must not be replaced with {}");
+            assert_eq!(
+                std::fs::read_to_string(&cred_path).expect("read creds"),
+                "[1,2,3]"
+            );
+        });
     }
 }

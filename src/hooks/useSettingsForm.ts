@@ -87,23 +87,30 @@ const omitSyncStatus = (settings: Settings): unknown => ({
     : settings.s3Sync,
 });
 
+const omitSyncFields = (settings: Settings): unknown => {
+  const { webdavSync: _webdavSync, s3Sync: _s3Sync, ...rest } = settings;
+  return rest;
+};
+
 export const onlySyncStatusChanged = (
   prev: Settings,
   next: Settings,
 ): boolean =>
   JSON.stringify(omitSyncStatus(prev)) === JSON.stringify(omitSyncStatus(next));
 
-const mergeSyncStatus = (
+export const onlySyncFieldsChanged = (
+  prev: Settings,
+  next: Settings,
+): boolean =>
+  JSON.stringify(omitSyncFields(prev)) === JSON.stringify(omitSyncFields(next));
+
+const mergeSyncSettings = (
   prev: SettingsFormState,
   incoming: Settings,
 ): SettingsFormState => ({
   ...prev,
-  webdavSync: prev.webdavSync
-    ? { ...prev.webdavSync, status: incoming.webdavSync?.status }
-    : incoming.webdavSync,
-  s3Sync: prev.s3Sync
-    ? { ...prev.s3Sync, status: incoming.s3Sync?.status }
-    : incoming.s3Sync,
+  webdavSync: incoming.webdavSync,
+  s3Sync: incoming.s3Sync,
 });
 
 export interface UseSettingsFormResult {
@@ -188,11 +195,11 @@ export function useSettingsForm(): UseSettingsFormResult {
       hasHydratedRef.current &&
       isDirtyRef.current &&
       prevServer &&
-      onlySyncStatusChanged(prevServer, data)
+      onlySyncFieldsChanged(prevServer, data)
     ) {
       setSettingsState((prev) => {
         if (!prev) return prev;
-        const next = mergeSyncStatus(prev, data);
+        const next = mergeSyncSettings(prev, data);
         settingsRef.current = next;
         return next;
       });

@@ -15,10 +15,11 @@ use crate::settings::{update_s3_sync_status, S3SyncSettings, WebDavSyncStatus};
 pub(crate) use super::sync_protocol::run_with_sync_lock;
 use super::sync_protocol::{
     apply_snapshot, build_local_snapshot, localized, persist_sync_success_best_effort,
-    require_if_match_etag, resolve_put_precondition, sha256_hex, should_allow_auto_upload,
-    validate_artifact_size_limit, validate_manifest_compat, verify_artifact, ArtifactMeta,
-    RemoteLayout, ResolvedPut, SyncManifest, DB_COMPAT_VERSION, MAX_MANIFEST_BYTES,
-    MAX_SYNC_ARTIFACT_BYTES, PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
+    require_if_match_etag, resolve_put_precondition, rollback_partial_upload, sha256_hex,
+    should_allow_auto_upload, validate_artifact_size_limit, validate_manifest_compat,
+    verify_artifact, ArtifactMeta, RemoteLayout, ResolvedPut, SyncManifest, DB_COMPAT_VERSION,
+    MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES, PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST,
+    REMOTE_SKILLS_ZIP,
 };
 
 #[cfg(test)]
@@ -100,9 +101,10 @@ async fn upload_snapshot(
 
     // Upload order: artifacts first, manifest last. Any 412 aborts remaining
     // objects. Auto-sync HEADs each artifact and uses If-Match / If-None-Match;
-    // manual upload stays overwrite.
+    // manual upload stays overwrite. Rollback must not DELETE an overwritten
+    // last-good snapshot.
     let db_key = s3_key(settings, REMOTE_DB_SQL);
-    put_object_for_snapshot(
+    let db_put = put_object_for_snapshot(
         &creds,
         &db_key,
         snapshot.db_sql,
@@ -112,7 +114,7 @@ async fn upload_snapshot(
     .await?;
 
     let skills_key = s3_key(settings, REMOTE_SKILLS_ZIP);
-    if let Err(error) = put_object_for_snapshot(
+    let skills_put = match put_object_for_snapshot(
         &creds,
         &skills_key,
         snapshot.skills_zip,
@@ -121,9 +123,12 @@ async fn upload_snapshot(
     )
     .await
     {
-        let _ = s3::delete_object(&creds, &db_key).await;
-        return Err(error);
-    }
+        Ok(uploaded) => uploaded,
+        Err(error) => {
+            rollback_s3_artifact(&creds, &db_key, db_put, "application/sql").await;
+            return Err(error);
+        }
+    };
 
     if let Err(error) = s3::put_object_conditional(
         &creds,
@@ -134,8 +139,8 @@ async fn upload_snapshot(
     )
     .await
     {
-        let _ = s3::delete_object(&creds, &skills_key).await;
-        let _ = s3::delete_object(&creds, &db_key).await;
+        rollback_s3_artifact(&creds, &skills_key, skills_put, "application/zip").await;
+        rollback_s3_artifact(&creds, &db_key, db_put, "application/sql").await;
         return Err(error);
     }
 
@@ -333,6 +338,43 @@ fn put_precondition<'a>(
     )
 }
 
+struct UploadedArtifact {
+    existed_before: bool,
+    previous_bytes: Option<Vec<u8>>,
+}
+
+async fn previous_s3_bytes(creds: &s3::S3Credentials, key: &str) -> Option<Vec<u8>> {
+    match s3::get_object(creds, key, MAX_SYNC_ARTIFACT_BYTES as usize).await {
+        Ok(Some((bytes, _etag))) => Some(bytes),
+        Ok(None) => None,
+        Err(error) => {
+            log::warn!("[S3] Failed to GET existing '{key}' before overwrite: {error}");
+            None
+        }
+    }
+}
+
+async fn rollback_s3_artifact(
+    creds: &s3::S3Credentials,
+    key: &str,
+    uploaded: UploadedArtifact,
+    content_type: &str,
+) {
+    if rollback_partial_upload(uploaded.existed_before) {
+        if let Err(error) = s3::delete_object(creds, key).await {
+            log::warn!("[S3] Failed to delete newly uploaded '{key}' during rollback: {error}");
+        }
+        return;
+    }
+    if let Some(bytes) = uploaded.previous_bytes {
+        if let Err(error) = s3::put_object(creds, key, bytes, content_type).await {
+            log::warn!("[S3] Failed to restore overwritten '{key}' during rollback: {error}");
+        }
+        return;
+    }
+    log::warn!("[S3] Skipping DELETE of overwritten '{key}'; previous object was not captured");
+}
+
 /// PUT one snapshot object. Auto-sync HEADs first and fails closed when the
 /// object exists without an ETag. Manual upload overwrites unconditionally.
 /// A 412 aborts the caller so later objects (including the manifest) are not PUT.
@@ -342,9 +384,17 @@ async fn put_object_for_snapshot(
     bytes: Vec<u8>,
     content_type: &str,
     conditional: bool,
-) -> Result<(), AppError> {
+) -> Result<UploadedArtifact, AppError> {
     if !conditional {
-        return s3::put_object(creds, key, bytes, content_type).await;
+        let (existed_before, previous_bytes) = match s3::head_object_state(creds, key).await? {
+            s3::HeadState::Missing => (false, None),
+            s3::HeadState::Exists { .. } => (true, previous_s3_bytes(creds, key).await),
+        };
+        s3::put_object(creds, key, bytes, content_type).await?;
+        return Ok(UploadedArtifact {
+            existed_before,
+            previous_bytes,
+        });
     }
 
     match s3::head_object_state(creds, key).await? {
@@ -356,10 +406,15 @@ async fn put_object_for_snapshot(
                 content_type,
                 s3::PutPrecondition::IfNoneMatchAny,
             )
-            .await
+            .await?;
+            Ok(UploadedArtifact {
+                existed_before: false,
+                previous_bytes: None,
+            })
         }
         s3::HeadState::Exists { etag } => {
             let etag = require_if_match_etag(etag.as_deref())?.to_string();
+            let previous_bytes = previous_s3_bytes(creds, key).await;
             s3::put_object_conditional(
                 creds,
                 key,
@@ -367,7 +422,11 @@ async fn put_object_for_snapshot(
                 content_type,
                 s3::PutPrecondition::IfMatch(&etag),
             )
-            .await
+            .await?;
+            Ok(UploadedArtifact {
+                existed_before: true,
+                previous_bytes,
+            })
         }
     }
 }
@@ -525,6 +584,59 @@ mod tests {
         .expect_err("412 on an artifact must abort remaining PUTs");
 
         assert_eq!(attempted, vec!["db.sql", "skills.zip"]);
+        assert!(err.to_string().contains("412"));
+    }
+
+    #[test]
+    fn rollback_partial_upload_deletes_only_newly_created_objects() {
+        assert!(
+            rollback_partial_upload(false),
+            "first-upload rollback should DELETE"
+        );
+        assert!(
+            !rollback_partial_upload(true),
+            "overwrite rollback must not DELETE the previous snapshot"
+        );
+    }
+
+    #[test]
+    fn artifact_412_does_not_delete_overwritten_objects() {
+        use super::super::sync_protocol::put_in_order;
+
+        let existed_before = [
+            ("db.sql", true),
+            ("skills.zip", false),
+            ("manifest.json", true),
+        ];
+        let mut attempted = Vec::new();
+        let mut deleted = Vec::new();
+        let err = put_in_order(["db.sql", "skills.zip", "manifest.json"], |name| {
+            attempted.push(name);
+            if name == "skills.zip" {
+                for (uploaded, existed) in existed_before {
+                    if uploaded == name {
+                        break;
+                    }
+                    if rollback_partial_upload(existed) {
+                        deleted.push(uploaded);
+                    }
+                }
+                Err(AppError::localized(
+                    "s3.put.precondition_failed",
+                    "远端数据已被其他设备更新（412），未覆盖远端。",
+                    "Remote data was updated by another client (412 Precondition Failed); remote was not overwritten.",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("412 on an artifact must abort remaining PUTs");
+
+        assert_eq!(attempted, vec!["db.sql", "skills.zip"]);
+        assert!(
+            deleted.is_empty(),
+            "overwritten db.sql must not be deleted: {deleted:?}"
+        );
         assert!(err.to_string().contains("412"));
     }
 

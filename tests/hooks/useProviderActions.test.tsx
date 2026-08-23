@@ -798,6 +798,27 @@ describe("useProviderActions", () => {
     ).rejects.toThrow("delete failed");
   });
 
+  it("toasts actual switch warning text", async () => {
+    switchProviderMutateAsync.mockResolvedValueOnce({
+      warnings: ["live backfill skipped for previous-provider"],
+    });
+    const { wrapper } = createWrapper();
+    const provider = createProvider({ category: "custom" });
+
+    const { result } = renderHook(() => useProviderActions("claude"), {
+      wrapper,
+    });
+
+    await act(async () => {
+      await result.current.switchProvider(provider);
+    });
+
+    expect(toastWarningMock).toHaveBeenCalled();
+    expect(String(toastWarningMock.mock.calls[0]?.[0])).toContain(
+      "live backfill skipped for previous-provider",
+    );
+  });
+
   it("handles switch mutation errors silently", async () => {
     switchProviderMutateAsync.mockRejectedValueOnce(new Error("switch failed"));
     const { wrapper } = createWrapper();

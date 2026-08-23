@@ -1,6 +1,7 @@
 import { Loader2, Radio } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
+import { useQueryClient } from "@tanstack/react-query";
 import { Switch } from "@/components/ui/switch";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
 import { cn } from "@/lib/utils";
@@ -13,17 +14,17 @@ export function ClaudeDesktopRouteToggle({
   className,
 }: ClaudeDesktopRouteToggleProps) {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const {
     isRunning,
     status,
     takeoverStatus,
     startProxyServer,
-    stopProxyServer,
-    isStarting,
-    isStoppingServer,
+    stopWithRestore,
+    isPending,
   } = useProxyStatus();
 
-  const isBusy = isStarting || isStoppingServer;
+  const isBusy = isPending;
   const otherTakeoverActive = Boolean(
     takeoverStatus?.claude ||
       takeoverStatus?.codex ||
@@ -51,7 +52,10 @@ export function ClaudeDesktopRouteToggle({
         return;
       }
 
-      await stopProxyServer();
+      await stopWithRestore();
+      await queryClient.invalidateQueries({
+        queryKey: ["providers", "claude-desktop"],
+      });
     } catch (error) {
       console.error("[ClaudeDesktopRouteToggle] Toggle route failed:", error);
     }

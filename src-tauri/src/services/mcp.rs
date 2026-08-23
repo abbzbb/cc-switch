@@ -71,17 +71,19 @@ impl McpService {
         app: AppType,
         enabled: bool,
     ) -> Result<(), AppError> {
-        if let Some(server) = state
-            .db
-            .update_mcp_server_app_enabled(server_id, &app, enabled)?
-        {
-            // 同步到对应应用
-            if enabled {
-                Self::sync_server_to_app(state, &server, &app)?;
-            } else {
-                Self::remove_server_from_app(state, server_id, &app)?;
-            }
+        let Some(server) = state.db.get_all_mcp_servers()?.get(server_id).cloned() else {
+            return Ok(());
+        };
+
+        // Live first: a failed projection must not leave SSOT ahead of disk.
+        if enabled {
+            Self::sync_server_to_app(state, &server, &app)?;
+        } else {
+            Self::remove_server_from_app(state, server_id, &app)?;
         }
+        state
+            .db
+            .update_mcp_server_app_enabled(server_id, &app, enabled)?;
 
         Ok(())
     }
@@ -541,5 +543,81 @@ impl McpService {
                 failures.join("; ")
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_config::McpApps;
+    use crate::database::Database;
+    use serde_json::json;
+    use serial_test::serial;
+    use std::sync::Arc;
+
+    fn with_test_home<T>(test: impl FnOnce(&AppState, &std::path::Path) -> T) -> T {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        std::env::set_var("HOME", temp.path());
+
+        let db = Arc::new(Database::memory().expect("in-memory database"));
+        let state = AppState::new(db);
+        let result = test(&state, temp.path());
+
+        match old_test_home {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        result
+    }
+
+    fn sample_server() -> McpServer {
+        McpServer {
+            id: "echo".to_string(),
+            name: "echo".to_string(),
+            server: json!({ "type": "stdio", "command": "echo" }),
+            apps: McpApps::default(),
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn toggle_app_does_not_update_db_when_live_write_fails() {
+        with_test_home(|state, home| {
+            state
+                .db
+                .save_mcp_server(&sample_server())
+                .expect("seed mcp server");
+
+            let codex_dir = home.join(".codex");
+            std::fs::create_dir_all(&codex_dir).expect("create codex dir");
+            std::fs::write(codex_dir.join("config.toml"), "model = [\n")
+                .expect("write invalid toml");
+
+            McpService::toggle_app(state, "echo", AppType::Codex, true)
+                .expect_err("invalid live toml must fail closed");
+
+            let saved = state
+                .db
+                .get_all_mcp_servers()
+                .expect("read servers")
+                .get("echo")
+                .cloned()
+                .expect("server still exists");
+            assert!(
+                !saved.apps.codex,
+                "DB flag must stay off when live projection fails"
+            );
+        });
     }
 }

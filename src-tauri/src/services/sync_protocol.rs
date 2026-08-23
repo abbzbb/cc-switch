@@ -565,6 +565,17 @@ where
     Ok(())
 }
 
+/// Whether a partial-upload rollback should DELETE the object.
+///
+/// First-upload (`existed_before == false`): DELETE the newly created object so
+/// a later artifact/manifest failure cannot leave a half-snapshot.
+/// Overwrite (`existed_before == true`): do **not** DELETE — that would destroy
+/// the last good remote snapshot. Callers should PUT previous bytes back when
+/// they captured them; otherwise skip DELETE.
+pub(crate) fn rollback_partial_upload(existed_before: bool) -> bool {
+    !existed_before
+}
+
 /// Decide whether auto-sync may upload the local snapshot.
 ///
 /// - Empty remote: allow (first seed).
@@ -1046,5 +1057,17 @@ mod tests {
 
         assert_eq!(attempted, vec!["db.sql", "skills.zip"]);
         assert!(err.to_string().contains("412"));
+    }
+
+    #[test]
+    fn rollback_partial_upload_deletes_only_newly_created_objects() {
+        assert!(
+            rollback_partial_upload(false),
+            "first-upload rollback should DELETE"
+        );
+        assert!(
+            !rollback_partial_upload(true),
+            "overwrite rollback must not DELETE the previous snapshot"
+        );
     }
 }

@@ -27,6 +27,7 @@ interface EditProviderDialogProps {
   }) => Promise<void> | void;
   appId: AppId;
   isProxyTakeover?: boolean; // 代理接管模式下不读取 live（避免显示被接管后的代理配置）
+  isProxyStatusPending?: boolean; // 接管状态未知时不要把 pending 当成“未接管”
 }
 
 export function EditProviderDialog({
@@ -36,6 +37,7 @@ export function EditProviderDialog({
   onSubmit,
   appId,
   isProxyTakeover = false,
+  isProxyStatusPending = false,
 }: EditProviderDialogProps) {
   const { t } = useTranslation();
   const [isFormSubmitting, setIsFormSubmitting] = useState(false);
@@ -100,18 +102,25 @@ export function EditProviderDialog({
         return;
       }
 
-      // 关键修复：只在首次打开时加载一次
-      if (hasLoadedLive) {
+      // 接管查询尚未返回：不要把 isProxyTakeover=false 当成“未接管”去读 live。
+      // 也不要置 hasLoadedLive，否则查询完成后会被短路、无法再走 SSOT。
+      if (isProxyStatusPending) {
         return;
       }
 
       // 代理接管模式：Live 配置已被代理改写，读取 live 会导致编辑界面展示代理地址/占位符等内容
-      // 因此直接回退到 SSOT（数据库）配置，避免用户困惑与误保存
+      // 因此直接回退到 SSOT（数据库）配置，避免用户困惑与误保存。
+      // 即使之前已经加载过 live（hasLoadedLive=true），接管变为 true 时也必须丢掉。
       if (isProxyTakeover) {
         if (!cancelled) {
           setLiveSettings(null);
           setHasLoadedLive(true);
         }
+        return;
+      }
+
+      // 关键修复：只在首次打开时加载一次
+      if (hasLoadedLive) {
         return;
       }
 
@@ -178,7 +187,14 @@ export function EditProviderDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, provider?.id, appId, hasLoadedLive, isProxyTakeover]); // 只依赖 provider.id，不依赖整个 provider 对象
+  }, [
+    open,
+    provider?.id,
+    appId,
+    hasLoadedLive,
+    isProxyTakeover,
+    isProxyStatusPending,
+  ]); // 只依赖 provider.id，不依赖整个 provider 对象
 
   const initialSettingsConfig = useMemo(() => {
     const base = (liveSettings ?? provider?.settingsConfig ?? {}) as Record<

@@ -290,7 +290,7 @@ fn synthesize_stream_stop_reason(
         if has_tool_use {
             Some("tool_use".to_string())
         } else {
-            Some("end_turn".to_string())
+            Some("max_tokens".to_string())
         }
     })
 }
@@ -310,13 +310,15 @@ fn finalize_anthropic_sse(
         return Vec::new();
     }
 
-    let has_tool_use = !tool_blocks_by_index.is_empty();
     let mut events = close_open_streaming_blocks(
         current_non_tool_block_index,
         current_non_tool_block_type,
         tool_blocks_by_index,
         open_tool_block_indices,
     );
+    let has_tool_use = tool_blocks_by_index
+        .values()
+        .any(|state| state.started && !state.name.trim().is_empty());
 
     let (stop_reason, usage_json) = match pending_message_delta.take() {
         Some(pending) => pending,
@@ -1325,7 +1327,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stream_end_without_finish_reason_closes_blocks_and_emits_end_turn() {
+    async fn test_stream_end_without_finish_reason_closes_blocks_and_emits_max_tokens() {
         let input = "data: {\"id\":\"chatcmpl_truncated\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n";
 
         let events = collect_anthropic_events(input).await;
@@ -1335,7 +1337,8 @@ mod tests {
             .any(|event| event_type(event) == Some("content_block_stop")));
         assert!(events.iter().any(|event| {
             event_type(event) == Some("message_delta")
-                && event.pointer("/delta/stop_reason").and_then(|v| v.as_str()) == Some("end_turn")
+                && event.pointer("/delta/stop_reason").and_then(|v| v.as_str())
+                    == Some("max_tokens")
         }));
         assert_eq!(
             events.last().and_then(|event| event_type(event)),
@@ -1369,7 +1372,8 @@ mod tests {
         assert!(delta_pos < message_stop_pos);
         assert!(events.iter().any(|event| {
             event_type(event) == Some("message_delta")
-                && event.pointer("/delta/stop_reason").and_then(|v| v.as_str()) == Some("end_turn")
+                && event.pointer("/delta/stop_reason").and_then(|v| v.as_str())
+                    == Some("max_tokens")
         }));
     }
 

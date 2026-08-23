@@ -1475,10 +1475,11 @@ mod tests {
         ])
         .await;
 
-        assert!(output.contains("event: response.completed"));
+        assert!(output.contains("event: response.incomplete"));
         assert!(output.contains("\"status\":\"incomplete\""));
         assert!(output.contains("\"incomplete_details\":{\"reason\":\"max_output_tokens\"}"));
         assert!(!output.contains("event: response.failed"));
+        assert!(!output.contains("event: response.completed"));
     }
 
     #[tokio::test]

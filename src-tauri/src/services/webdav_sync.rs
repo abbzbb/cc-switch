@@ -19,11 +19,11 @@ use crate::settings::{update_webdav_sync_status, WebDavSyncSettings, WebDavSyncS
 pub(crate) use super::sync_protocol::run_with_sync_lock;
 use super::sync_protocol::{
     apply_snapshot, build_local_snapshot, effective_db_compat_version, localized,
-    persist_sync_success_best_effort, require_if_match_etag, resolve_put_precondition, sha256_hex,
-    should_allow_auto_upload, validate_artifact_size_limit, validate_manifest_compat,
-    verify_artifact, ArtifactMeta, RemoteLayout, ResolvedPut, SyncManifest, DB_COMPAT_VERSION,
-    MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES, PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST,
-    REMOTE_SKILLS_ZIP,
+    persist_sync_success_best_effort, require_if_match_etag, resolve_put_precondition,
+    rollback_partial_upload, sha256_hex, should_allow_auto_upload, validate_artifact_size_limit,
+    validate_manifest_compat, verify_artifact, ArtifactMeta, RemoteLayout, ResolvedPut,
+    SyncManifest, DB_COMPAT_VERSION, MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES, PROTOCOL_VERSION,
+    REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
 };
 
 #[cfg(test)]
@@ -136,9 +136,10 @@ async fn upload_snapshot(
 
     // Upload order: artifacts first, manifest last. Any 412 aborts remaining
     // objects. Auto-sync HEADs each artifact and uses If-Match / If-None-Match;
-    // manual upload stays overwrite.
+    // manual upload stays overwrite. Rollback must not DELETE an overwritten
+    // last-good snapshot.
     let db_url = remote_file_url(settings, RemoteLayout::Current, REMOTE_DB_SQL)?;
-    put_bytes_for_snapshot(
+    let db_put = put_bytes_for_snapshot(
         &db_url,
         &auth,
         snapshot.db_sql,
@@ -148,7 +149,7 @@ async fn upload_snapshot(
     .await?;
 
     let skills_url = remote_file_url(settings, RemoteLayout::Current, REMOTE_SKILLS_ZIP)?;
-    if let Err(error) = put_bytes_for_snapshot(
+    let skills_put = match put_bytes_for_snapshot(
         &skills_url,
         &auth,
         snapshot.skills_zip,
@@ -157,9 +158,12 @@ async fn upload_snapshot(
     )
     .await
     {
-        let _ = delete_bytes(&db_url, &auth).await;
-        return Err(error);
-    }
+        Ok(uploaded) => uploaded,
+        Err(error) => {
+            rollback_webdav_artifact(&db_url, &auth, db_put, "application/sql").await;
+            return Err(error);
+        }
+    };
 
     if let Err(error) = put_bytes(
         &manifest_url,
@@ -170,8 +174,8 @@ async fn upload_snapshot(
     )
     .await
     {
-        let _ = delete_bytes(&skills_url, &auth).await;
-        let _ = delete_bytes(&db_url, &auth).await;
+        rollback_webdav_artifact(&skills_url, &auth, skills_put, "application/zip").await;
+        rollback_webdav_artifact(&db_url, &auth, db_put, "application/sql").await;
         return Err(error);
     }
 
@@ -413,6 +417,43 @@ fn put_precondition<'a>(
     )
 }
 
+struct UploadedArtifact {
+    existed_before: bool,
+    previous_bytes: Option<Vec<u8>>,
+}
+
+async fn previous_webdav_bytes(url: &str, auth: &WebDavAuth) -> Option<Vec<u8>> {
+    match get_bytes(url, auth, MAX_SYNC_ARTIFACT_BYTES as usize).await {
+        Ok(Some((bytes, _etag))) => Some(bytes),
+        Ok(None) => None,
+        Err(error) => {
+            log::warn!("[WebDAV] Failed to GET existing '{url}' before overwrite: {error}");
+            None
+        }
+    }
+}
+
+async fn rollback_webdav_artifact(
+    url: &str,
+    auth: &WebDavAuth,
+    uploaded: UploadedArtifact,
+    content_type: &str,
+) {
+    if rollback_partial_upload(uploaded.existed_before) {
+        if let Err(error) = delete_bytes(url, auth).await {
+            log::warn!("[WebDAV] Failed to delete newly uploaded '{url}' during rollback: {error}");
+        }
+        return;
+    }
+    if let Some(bytes) = uploaded.previous_bytes {
+        if let Err(error) = put_bytes(url, auth, bytes, content_type, PutPrecondition::None).await {
+            log::warn!("[WebDAV] Failed to restore overwritten '{url}' during rollback: {error}");
+        }
+        return;
+    }
+    log::warn!("[WebDAV] Skipping DELETE of overwritten '{url}'; previous object was not captured");
+}
+
 /// PUT one snapshot object. Auto-sync HEADs first and fails closed when the
 /// object exists without an ETag. Manual upload overwrites unconditionally.
 /// A 412 aborts the caller so later objects (including the manifest) are not PUT.
@@ -422,9 +463,17 @@ async fn put_bytes_for_snapshot(
     bytes: Vec<u8>,
     content_type: &str,
     conditional: bool,
-) -> Result<(), AppError> {
+) -> Result<UploadedArtifact, AppError> {
     if !conditional {
-        return put_bytes(url, auth, bytes, content_type, PutPrecondition::None).await;
+        let (existed_before, previous_bytes) = match head_object_state(url, auth).await? {
+            HeadState::Missing => (false, None),
+            HeadState::Exists { .. } => (true, previous_webdav_bytes(url, auth).await),
+        };
+        put_bytes(url, auth, bytes, content_type, PutPrecondition::None).await?;
+        return Ok(UploadedArtifact {
+            existed_before,
+            previous_bytes,
+        });
     }
 
     match head_object_state(url, auth).await? {
@@ -436,10 +485,15 @@ async fn put_bytes_for_snapshot(
                 content_type,
                 PutPrecondition::IfNoneMatchAny,
             )
-            .await
+            .await?;
+            Ok(UploadedArtifact {
+                existed_before: false,
+                previous_bytes: None,
+            })
         }
         HeadState::Exists { etag } => {
             let etag = require_if_match_etag(etag.as_deref())?.to_string();
+            let previous_bytes = previous_webdav_bytes(url, auth).await;
             put_bytes(
                 url,
                 auth,
@@ -447,7 +501,11 @@ async fn put_bytes_for_snapshot(
                 content_type,
                 PutPrecondition::IfMatch(&etag),
             )
-            .await
+            .await?;
+            Ok(UploadedArtifact {
+                existed_before: true,
+                previous_bytes,
+            })
         }
     }
 }
@@ -560,6 +618,59 @@ mod tests {
         .expect_err("412 on an artifact must abort remaining PUTs");
 
         assert_eq!(attempted, vec!["db.sql", "skills.zip"]);
+        assert!(err.to_string().contains("412"));
+    }
+
+    #[test]
+    fn rollback_partial_upload_deletes_only_newly_created_objects() {
+        assert!(
+            rollback_partial_upload(false),
+            "first-upload rollback should DELETE"
+        );
+        assert!(
+            !rollback_partial_upload(true),
+            "overwrite rollback must not DELETE the previous snapshot"
+        );
+    }
+
+    #[test]
+    fn artifact_412_does_not_delete_overwritten_objects() {
+        use super::super::sync_protocol::put_in_order;
+
+        let existed_before = [
+            ("db.sql", true),
+            ("skills.zip", false),
+            ("manifest.json", true),
+        ];
+        let mut attempted = Vec::new();
+        let mut deleted = Vec::new();
+        let err = put_in_order(["db.sql", "skills.zip", "manifest.json"], |name| {
+            attempted.push(name);
+            if name == "skills.zip" {
+                for (uploaded, existed) in existed_before {
+                    if uploaded == name {
+                        break;
+                    }
+                    if rollback_partial_upload(existed) {
+                        deleted.push(uploaded);
+                    }
+                }
+                Err(AppError::localized(
+                    "webdav.put.precondition_failed",
+                    "远端数据已被其他设备更新（412），未覆盖远端。",
+                    "Remote data was updated by another client (412 Precondition Failed); remote was not overwritten.",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("412 on an artifact must abort remaining PUTs");
+
+        assert_eq!(attempted, vec!["db.sql", "skills.zip"]);
+        assert!(
+            deleted.is_empty(),
+            "overwritten db.sql must not be deleted: {deleted:?}"
+        );
         assert!(err.to_string().contains("412"));
     }
 

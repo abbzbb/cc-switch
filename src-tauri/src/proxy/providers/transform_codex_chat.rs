@@ -1473,10 +1473,25 @@ pub(crate) fn chat_completion_to_response_with_context(
     // 🔴 与流式分支一致，只对本应 `completed` 的回合生效：`finish_reason=length`
     // 是截断，工具调用缺 name 是截断的后果而非上游发了畸形数据，报成
     // tool_call_dropped 会给出错误的归因。
-    if response_status_from_finish_reason(finish_reason) == "completed"
-        && tool_calls.dropped > 0
-        && tool_calls.items.is_empty()
-    {
+    let has_visible_output = output.iter().any(|item| {
+        item.get("type").and_then(Value::as_str) == Some("message")
+            && item
+                .get("content")
+                .and_then(Value::as_array)
+                .is_some_and(|parts| {
+                    parts.iter().any(|part| {
+                        part.get("text")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| !text.trim().is_empty())
+                    })
+                })
+    });
+    let status = chat_finish_status(
+        finish_reason,
+        !tool_calls.items.is_empty(),
+        has_visible_output,
+    );
+    if status == "completed" && tool_calls.dropped > 0 && tool_calls.items.is_empty() {
         return Err(ProxyError::TransformError(format!(
             "Upstream returned {} tool call(s) without a function name, \
              leaving no usable tool call in this turn",
@@ -1489,13 +1504,13 @@ pub(crate) fn chat_completion_to_response_with_context(
         "id": response_id,
         "object": "response",
         "created_at": created_at,
-        "status": response_status_from_finish_reason(finish_reason),
+        "status": status,
         "model": model,
         "output": output,
         "usage": chat_usage_to_responses_usage(body.get("usage"))
     });
 
-    if finish_reason == Some("length") {
+    if status == "incomplete" {
         response["incomplete_details"] = json!({ "reason": "max_output_tokens" });
     }
 
@@ -1956,7 +1971,22 @@ pub(crate) fn response_id_from_chat_id(id: Option<&str>) -> String {
 pub(crate) fn response_status_from_finish_reason(finish_reason: Option<&str>) -> &'static str {
     match finish_reason {
         Some("length") => "incomplete",
-        _ => "completed",
+        Some(_) => "completed",
+        None => "incomplete",
+    }
+}
+
+fn chat_finish_status(
+    finish_reason: Option<&str>,
+    has_tool_calls: bool,
+    has_visible_output: bool,
+) -> &'static str {
+    match finish_reason {
+        Some("length") => "incomplete",
+        Some(_) => "completed",
+        None if has_tool_calls => "completed",
+        None if has_visible_output => "incomplete",
+        None => "failed",
     }
 }
 
@@ -4471,6 +4501,23 @@ mod tests {
         let err = chat_completion_to_response_with_context(chat, &CodexToolContext::default())
             .unwrap_err();
         assert!(matches!(err, ProxyError::TransformError(_)));
+    }
+
+    #[test]
+    fn chat_response_missing_finish_reason_with_text_is_incomplete() {
+        let chat = json!({
+            "id": "chatcmpl_cut",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "kimi-k3",
+            "choices": [{
+                "message": {"role": "assistant", "content": "一半"}
+            }]
+        });
+        let result =
+            chat_completion_to_response_with_context(chat, &CodexToolContext::default()).unwrap();
+        assert_eq!(result["status"], "incomplete");
+        assert_eq!(result["incomplete_details"]["reason"], "max_output_tokens");
     }
 
     /// 纯文本回合（从未出现工具调用）不受判据影响。

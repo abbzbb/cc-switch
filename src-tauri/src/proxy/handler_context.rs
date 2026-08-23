@@ -49,7 +49,9 @@ pub struct RequestContext {
     promote_current_on_success: bool,
     /// 请求开始时的"当前供应商"（用于判断是否需要同步 UI/托盘）
     ///
-    /// 这里使用本地 settings 的设备级 current provider。
+    /// Snapshot via `get_effective_current_provider` (local settings with DB
+    /// fallback). Empty local settings must not look like "no current" and
+    /// later clobber a user switch on failover promote.
     /// 仅经典故障转移成功时才会提升当前供应商；pin / combo / pool 不会改写。
     pub current_provider_id: String,
     /// 请求中的模型名称
@@ -114,7 +116,10 @@ impl RequestContext {
         let copilot_optimizer_config = state.db.get_copilot_optimizer_config().unwrap_or_default();
 
         let current_provider_id =
-            crate::settings::get_current_provider(&app_type).unwrap_or_default();
+            crate::settings::get_effective_current_provider(&state.db, &app_type)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
 
         // 从请求体提取模型名称
         let request_model = body

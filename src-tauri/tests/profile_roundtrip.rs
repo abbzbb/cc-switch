@@ -748,6 +748,80 @@ fn profile_switch_auto_disables_takeover_before_apply() {
     );
 }
 
+#[test]
+fn apply_skips_mcp_when_provider_switch_fails() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let home = ensure_test_home();
+    let state = create_test_state().expect("create test state");
+
+    state
+        .db
+        .save_provider(AppType::Claude.as_str(), &claude_provider("p1", "key-1"))
+        .expect("save provider p1");
+    state
+        .db
+        .save_provider(AppType::Claude.as_str(), &claude_provider("p2", "key-2"))
+        .expect("save provider p2");
+    state
+        .db
+        .set_current_provider(AppType::Claude.as_str(), "p1")
+        .expect("set current provider p1");
+
+    let claude_dir = home.join(".claude");
+    fs::create_dir_all(&claude_dir).expect("create .claude dir");
+    fs::write(
+        claude_dir.join("settings.json"),
+        serde_json::to_string_pretty(&claude_provider("p1", "key-1").settings_config)
+            .expect("serialize p1 settings"),
+    )
+    .expect("seed live settings.json");
+
+    state
+        .db
+        .save_mcp_server(&mcp_server("m1", true))
+        .expect("save mcp m1");
+
+    let profile = ProfileService::create(&state, "Project A", ProfileScope::Claude)
+        .expect("create profile A");
+
+    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch to p2");
+    McpService::toggle_app(&state, "m1", AppType::Claude, false).expect("disable m1");
+
+    // Corrupt live settings so the next provider switch fails closed before
+    // writing. MCP uses ~/.claude.json, which stays writable — without the
+    // skip, toggle would still succeed and mix live state.
+    fs::write(claude_dir.join("settings.json"), "{ not-json").expect("corrupt live settings.json");
+
+    let (warnings, _) =
+        ProfileService::apply(&state, &profile.id, ProfileScope::Claude).expect("apply profile");
+    assert!(
+        warnings.iter().any(|w| w.contains("switch provider")),
+        "expected provider switch warning, got {warnings:?}"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("skipped MCP/skill/prompt")),
+        "expected follow-on skip warning, got {warnings:?}"
+    );
+
+    let servers = state.db.get_all_mcp_servers().expect("get mcp servers");
+    assert!(
+        !servers.get("m1").expect("m1").apps.claude,
+        "MCP must stay disabled when the provider switch failed"
+    );
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Claude.as_str())
+            .expect("get current provider")
+            .as_deref(),
+        Some("p2"),
+        "current provider must stay on p2 when switch-back fails"
+    );
+}
+
 #[cfg(any(target_os = "macos", windows))]
 #[test]
 fn claude_desktop_profile_scope_is_independent() {

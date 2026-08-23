@@ -355,7 +355,15 @@ pub async fn delete_bytes(url: &str, auth: &WebDavAuth) -> Result<(), AppError> 
     )
     .send()
     .await
-    .map_err(|e| webdav_transport_error("webdav.delete_failed", "DELETE 请求", "DELETE request", url, &e))?;
+    .map_err(|e| {
+        webdav_transport_error(
+            "webdav.delete_failed",
+            "DELETE 请求",
+            "DELETE request",
+            url,
+            &e,
+        )
+    })?;
 
     if resp.status().is_success() || resp.status() == StatusCode::NOT_FOUND {
         return Ok(());

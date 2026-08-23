@@ -30,7 +30,7 @@ use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{oneshot, watch, RwLock};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 /// 代理服务器状态（共享）
 #[derive(Clone)]
@@ -249,6 +249,7 @@ impl ProxyServer {
         let state = self.state.clone();
         let handle = tokio::spawn(async move {
             let mut shutdown_rx = shutdown_rx;
+            let mut connections = JoinSet::new();
             loop {
                 tokio::select! {
                     result = listener.accept() => {
@@ -263,7 +264,7 @@ impl ProxyServer {
 
                         let app = app.clone();
                         let mut conn_shutdown_rx = conn_shutdown_rx.clone();
-                        tokio::spawn(async move {
+                        connections.spawn(async move {
                             // Peek raw TCP bytes to capture original header casing
                             // before hyper parses (and lowercases) the header names.
                             let original_cases = {
@@ -307,11 +308,19 @@ impl ProxyServer {
                                     .preserve_header_case(true)
                                     .serve_connection(TokioIo::new(stream), service)
                             );
-                            let result = tokio::select! {
-                                result = conn.as_mut() => result,
-                                _ = conn_shutdown_rx.changed() => {
-                                    conn.as_mut().graceful_shutdown();
-                                    conn.await
+                            // Clones taken after `send(true)` already have the new
+                            // value; `changed()` would wait forever. Shut down
+                            // immediately when the flag is already set.
+                            let result = if *conn_shutdown_rx.borrow() {
+                                conn.as_mut().graceful_shutdown();
+                                conn.await
+                            } else {
+                                tokio::select! {
+                                    result = conn.as_mut() => result,
+                                    _ = conn_shutdown_rx.changed() => {
+                                        conn.as_mut().graceful_shutdown();
+                                        conn.await
+                                    }
                                 }
                             };
                             if let Err(e) = result {
@@ -326,9 +335,21 @@ impl ProxyServer {
                 }
             }
 
+            // Release the listen port before waiting on in-flight connections.
+            drop(listener);
             // 服务器停止后更新状态
-            state.status.write().await.running = false;
+            {
+                let mut status = state.status.write().await;
+                status.running = false;
+                status.port = 0;
+            }
             *state.start_time.write().await = None;
+            crate::proxy::http_client::set_proxy_port(0);
+
+            // Wait for graceful connection shutdown. If `ProxyServer::stop`
+            // times out it aborts this task, which drops JoinSet and aborts
+            // leftovers so they cannot keep the port/work alive.
+            while connections.join_next().await.is_some() {}
         });
 
         // 保存服务器任务句柄
@@ -353,27 +374,40 @@ impl ProxyServer {
         }
 
         // 2. 等待服务器任务结束（带 5 秒超时保护）
-        if let Some(handle) = self.server_handle.write().await.take() {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+        if let Some(mut handle) = self.server_handle.write().await.take() {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
                 Ok(Ok(())) => {
                     log::info!("[{}] 代理服务器已完全停止", log_srv::STOPPED);
                     Ok(())
                 }
                 Ok(Err(e)) => {
                     log::warn!("[{}] 代理服务器任务异常终止: {e}", log_srv::TASK_ERROR);
+                    self.clear_listen_state().await;
                     Err(ProxyError::StopFailed(e.to_string()))
                 }
                 Err(_) => {
                     log::warn!(
-                        "[{}] 代理服务器停止超时（5秒），强制继续",
+                        "[{}] 代理服务器停止超时（5秒），中止 accept 循环",
                         log_srv::STOP_TIMEOUT
                     );
+                    handle.abort();
+                    self.clear_listen_state().await;
                     Err(ProxyError::StopTimeout)
                 }
             }
         } else {
+            self.clear_listen_state().await;
             Ok(())
         }
+    }
+
+    async fn clear_listen_state(&self) {
+        let mut status = self.state.status.write().await;
+        status.running = false;
+        status.port = 0;
+        drop(status);
+        *self.state.start_time.write().await = None;
+        crate::proxy::http_client::set_proxy_port(0);
     }
 
     pub async fn get_status(&self) -> ProxyStatus {
@@ -617,6 +651,8 @@ mod tests {
             .expect("save test provider");
         db.set_current_provider("codex", &provider.id)
             .expect("select test provider");
+        let inbound =
+            crate::proxy::inbound_auth::get_or_create_inbound_token(&db).expect("inbound token");
 
         let proxy = ProxyServer::new(
             ProxyConfig {
@@ -644,6 +680,7 @@ mod tests {
                     proxy_info.port, path
                 ))
                 .header(header::AUTHORIZATION, "Bearer client-secret")
+                .header("x-cc-switch-proxy", &inbound)
                 .json(&json!({
                     "id": format!("search-{index}"),
                     "model": "gpt-5.6-sol",
@@ -696,6 +733,7 @@ mod tests {
                 proxy_info.port
             ))
             .header(header::AUTHORIZATION, "Bearer client-secret")
+            .header("x-cc-switch-proxy", &inbound)
             .json(&json!({
                 "id": "search-full-url",
                 "model": "gpt-5.6-sol",
@@ -777,6 +815,8 @@ mod tests {
             .expect("save deepseek");
         db.set_current_provider("claude", "kimi")
             .expect("set current kimi");
+        let inbound =
+            crate::proxy::inbound_auth::get_or_create_inbound_token(&db).expect("inbound token");
 
         let proxy = ProxyServer::new(
             ProxyConfig {
@@ -795,6 +835,7 @@ mod tests {
         let discovered: Value = client
             .get(format!("{base}/v1/models?limit=1000"))
             .header("anthropic-version", "2023-06-01")
+            .header("x-cc-switch-proxy", &inbound)
             .send()
             .await
             .expect("GET Claude discovery")
@@ -812,6 +853,7 @@ mod tests {
 
         let prefixed: Value = client
             .get(format!("{base}/claude/v1/models"))
+            .header("x-cc-switch-proxy", &inbound)
             .send()
             .await
             .expect("GET /claude/v1/models")
@@ -832,6 +874,7 @@ mod tests {
 
         let codex_probe: Value = client
             .get(format!("{base}/v1/models"))
+            .header("x-cc-switch-proxy", &inbound)
             .send()
             .await
             .expect("GET Codex catalog probe")
@@ -984,6 +1027,8 @@ mod tests {
             .expect("save test provider");
         db.set_current_provider("gemini", &provider.id)
             .expect("select test provider");
+        let inbound =
+            crate::proxy::inbound_auth::get_or_create_inbound_token(&db).expect("inbound token");
 
         let proxy = ProxyServer::new(
             ProxyConfig {
@@ -1001,6 +1046,7 @@ mod tests {
                 "http://127.0.0.1:{}/v1beta/models?key=PROXY_MANAGED&alt=sse",
                 proxy_info.port
             ))
+            .header("x-cc-switch-proxy", inbound)
             .send()
             .await
             .expect("send gemini GET");

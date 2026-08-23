@@ -2719,7 +2719,8 @@
     "validation": {
       "providerRequired": "Importing a provider requires an app type and name",
       "skillRepoRequired": "Importing a skill requires a repository",
-      "promptContentRequired": "Importing a prompt requires content"
+      "promptContentRequired": "Importing a prompt requires content",
+      "mcpRequired": "Importing MCP servers requires a config and target apps"
     },
     "skillImportSuccess": "Skill repository added successfully",
     "skillImportSuccessDescription": "Added repository: {{repo}}",

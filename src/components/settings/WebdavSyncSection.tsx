@@ -40,32 +40,10 @@ import type {
   S3SyncSettings,
   WebDavSyncSettings,
 } from "@/types";
+import { invalidateAfterImport } from "@/lib/query";
 
 const invalidateSettingsQueries = (queryClient: QueryClient) =>
   queryClient.invalidateQueries({ queryKey: ["settings"] });
-
-const invalidateAfterRemoteConfigDownload = (queryClient: QueryClient) =>
-  Promise.all([
-    queryClient.invalidateQueries({ queryKey: ["settings"] }),
-    queryClient.invalidateQueries({ queryKey: ["providers"] }),
-    queryClient.invalidateQueries({ queryKey: ["mcp"] }),
-    queryClient.invalidateQueries({ queryKey: ["skills"] }),
-    queryClient.invalidateQueries({ queryKey: ["profiles"] }),
-    queryClient.invalidateQueries({ queryKey: ["sessions"] }),
-    queryClient.invalidateQueries({ queryKey: ["sessionMessages"] }),
-    queryClient.invalidateQueries({ queryKey: ["proxyStatus"] }),
-    queryClient.invalidateQueries({ queryKey: ["proxyTakeoverStatus"] }),
-    queryClient.invalidateQueries({ queryKey: ["modelCombos"] }),
-    queryClient.invalidateQueries({ queryKey: ["sidecarSettings"] }),
-    queryClient.invalidateQueries({ queryKey: ["globalProxyUrl"] }),
-    queryClient.invalidateQueries({ queryKey: ["usage"] }),
-    queryClient.invalidateQueries({ queryKey: ["pi"] }),
-    queryClient.invalidateQueries({ queryKey: ["openclaw"] }),
-    queryClient.invalidateQueries({ queryKey: ["hermes"] }),
-    queryClient.invalidateQueries({ queryKey: ["opencodeLiveProviderIds"] }),
-    queryClient.invalidateQueries({ queryKey: ["omo"] }),
-    queryClient.invalidateQueries({ queryKey: ["omo-slim"] }),
-  ]);
 
 // ─── WebDAV service presets ─────────────────────────────────
 
@@ -661,9 +639,12 @@ export function WebdavSyncSection({
     closeDialog();
     setActionState("downloading");
     try {
-      await settingsApi.webdavSyncDownload();
+      const result = await settingsApi.webdavSyncDownload();
       toast.success(t("settings.webdavSync.downloadSuccess"));
-      await invalidateAfterRemoteConfigDownload(queryClient);
+      if (result.warning) {
+        toast.warning(result.warning);
+      }
+      await invalidateAfterImport(queryClient);
     } catch (error) {
       toast.error(
         t("settings.webdavSync.downloadFailed", {
@@ -872,9 +853,12 @@ export function WebdavSyncSection({
     closeS3Dialog();
     setS3ActionState("downloading");
     try {
-      await settingsApi.s3SyncDownload();
+      const result = await settingsApi.s3SyncDownload();
       toast.success(t("settings.s3Sync.downloadSuccess"));
-      await invalidateAfterRemoteConfigDownload(queryClient);
+      if (result.warning) {
+        toast.warning(result.warning);
+      }
+      await invalidateAfterImport(queryClient);
     } catch (error) {
       toast.error(
         t("settings.s3Sync.downloadFailed", {

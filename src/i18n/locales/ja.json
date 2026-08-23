@@ -2719,7 +2719,8 @@
     "validation": {
       "providerRequired": "プロバイダーのインポートにはアプリ種別と名前が必要です",
       "skillRepoRequired": "スキルのインポートにはリポジトリが必要です",
-      "promptContentRequired": "プロンプトのインポートには内容が必要です"
+      "promptContentRequired": "プロンプトのインポートには内容が必要です",
+      "mcpRequired": "MCP のインポートには設定と対象アプリが必要です"
     },
     "skillImportSuccess": "スキルリポジトリを追加しました",
     "skillImportSuccessDescription": "追加したリポジトリ: {{repo}}",

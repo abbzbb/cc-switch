@@ -3741,6 +3741,58 @@ wire_api = "responses"
 
     #[test]
     #[serial]
+    fn add_additive_live_managed_does_not_persist_db_when_live_write_fails() {
+        with_test_home(|state, home| {
+            let opencode_dir = home.join(".config").join("opencode");
+            fs::create_dir_all(&opencode_dir).expect("create opencode dir");
+            fs::write(opencode_dir.join("opencode.json"), "{ invalid json")
+                .expect("write malformed opencode config");
+
+            let provider = opencode_provider("live-fail");
+            ProviderService::add(state, AppType::OpenCode, provider.clone(), true)
+                .expect_err("malformed live config must fail before DB commit");
+
+            assert!(
+                state
+                    .db
+                    .get_provider_by_id(&provider.id, AppType::OpenCode.as_str())
+                    .expect("query failed additive add")
+                    .is_none(),
+                "failed live write must not leave an additive provider row"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn update_additive_live_managed_does_not_persist_db_when_live_write_fails() {
+        with_test_home(|state, home| {
+            let provider = opencode_provider("live-managed");
+            ProviderService::add(state, AppType::OpenCode, provider.clone(), true)
+                .expect("seed live-managed opencode provider");
+
+            let opencode_path = home.join(".config").join("opencode").join("opencode.json");
+            fs::write(&opencode_path, "{ invalid json").expect("corrupt opencode config");
+
+            let mut updated = provider.clone();
+            updated.name = "Should Not Persist".to_string();
+            ProviderService::update(state, AppType::OpenCode, None, updated)
+                .expect_err("malformed live config must fail closed");
+
+            let saved = state
+                .db
+                .get_provider_by_id(&provider.id, AppType::OpenCode.as_str())
+                .expect("query updated provider")
+                .expect("provider should still exist");
+            assert_eq!(
+                saved.name, provider.name,
+                "DB must stay unchanged when live write fails"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
     fn update_persists_non_current_omo_variants_in_database() {
         with_test_home(|state, _| {
             for category in ["omo", "omo-slim"] {
@@ -3935,6 +3987,37 @@ wire_api = "responses"
 
     #[test]
     #[serial]
+    fn delete_current_omo_does_not_remove_db_row_when_file_delete_fails() {
+        with_test_home(|state, home| {
+            let provider = opencode_omo_provider("omo-current", "omo");
+            state
+                .db
+                .save_provider(AppType::OpenCode.as_str(), &provider)
+                .expect("seed current omo provider");
+            state
+                .db
+                .set_omo_provider_current(AppType::OpenCode.as_str(), &provider.id, "omo")
+                .expect("set current omo provider");
+
+            let config_path = omo_config_path(home, "omo");
+            fs::create_dir_all(&config_path).expect("block omo config path as a directory");
+
+            ProviderService::delete(state, AppType::OpenCode, &provider.id)
+                .expect_err("delete must fail when the OMO config file cannot be cleared");
+
+            assert!(
+                state
+                    .db
+                    .get_provider_by_id(&provider.id, AppType::OpenCode.as_str())
+                    .expect("query omo provider")
+                    .is_some(),
+                "DB row must remain when live file delete fails"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
     fn switch_live_write_failure_does_not_commit_current() {
         with_test_home(|state, _home| {
             crate::settings::reload_settings().expect("reload settings");
@@ -4104,6 +4187,29 @@ wire_api = "responses"
                 fs::read_to_string(&env_path).expect("read restored env"),
                 original,
                 "Gemini LiveSnapshot must restore raw .env bytes"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn live_snapshot_grok_restores_config_toml() {
+        with_test_home(|_, _home| {
+            crate::settings::reload_settings().expect("reload settings");
+            let path = crate::grok_config::get_grok_config_path();
+            fs::create_dir_all(path.parent().expect("grok dir")).expect("create grok dir");
+            let original = "[models]\ndefault = \"grok-4.5\"\n";
+            fs::write(&path, original).expect("seed grok config");
+
+            let snapshot =
+                LiveSnapshot::capture(&AppType::GrokBuild).expect("capture Grok live snapshot");
+            fs::write(&path, "model = \"mutated\"\n").expect("mutate grok config");
+            snapshot.restore().expect("restore Grok live snapshot");
+
+            assert_eq!(
+                fs::read_to_string(&path).expect("read restored grok config"),
+                original,
+                "Grok LiveSnapshot must restore config.toml through the grok lock"
             );
         });
     }
@@ -4399,6 +4505,83 @@ impl ProviderService {
                 Err(err) => Err(AppError::io(path, err)),
             },
         }
+    }
+
+    fn capture_additive_live_fragment(
+        app_type: &AppType,
+        id: &str,
+    ) -> Result<Option<Value>, AppError> {
+        match app_type {
+            AppType::OpenCode => Ok(crate::opencode_config::get_providers()?.get(id).cloned()),
+            AppType::OpenClaw => crate::openclaw_config::get_provider(id),
+            AppType::Hermes => crate::hermes_config::get_provider(id),
+            _ => Ok(None),
+        }
+    }
+
+    fn restore_additive_live_fragment(
+        app_type: &AppType,
+        id: &str,
+        previous: Option<&Value>,
+    ) -> Result<(), AppError> {
+        match app_type {
+            AppType::OpenCode => match previous {
+                Some(fragment) => crate::opencode_config::set_provider(id, fragment.clone()),
+                None => remove_opencode_provider_from_live(id),
+            },
+            AppType::OpenClaw => match previous {
+                Some(fragment) => {
+                    crate::openclaw_config::set_provider(id, fragment.clone()).map(|_| ())
+                }
+                None => remove_openclaw_provider_from_live(id),
+            },
+            AppType::Hermes => match previous {
+                Some(fragment) => {
+                    crate::hermes_config::set_provider(id, fragment.clone()).map(|_| ())
+                }
+                None => remove_hermes_provider_from_live(id),
+            },
+            _ => Ok(()),
+        }
+    }
+
+    fn restore_additive_live_after_failure(
+        app_type: &AppType,
+        id: &str,
+        previous: Option<&Value>,
+        error: AppError,
+    ) -> AppError {
+        match Self::restore_additive_live_fragment(app_type, id, previous) {
+            Ok(()) => error,
+            Err(rollback_error) => {
+                AppError::Message(format!("{error}; 回滚 live 同时失败: {rollback_error}"))
+            }
+        }
+    }
+
+    fn commit_additive_live_then_db(
+        state: &AppState,
+        app_type: &AppType,
+        provider: &Provider,
+    ) -> Result<(), AppError> {
+        let previous = Self::capture_additive_live_fragment(app_type, &provider.id)?;
+        if let Err(error) = write_live_with_common_config_for_state(state, app_type, provider) {
+            return Err(Self::restore_additive_live_after_failure(
+                app_type,
+                &provider.id,
+                previous.as_ref(),
+                error,
+            ));
+        }
+        if let Err(error) = state.db.save_provider(app_type.as_str(), provider) {
+            return Err(Self::restore_additive_live_after_failure(
+                app_type,
+                &provider.id,
+                previous.as_ref(),
+                error,
+            ));
+        }
+        Ok(())
     }
 
     fn restore_omo_after_current_commit_failure(
@@ -4817,26 +5000,30 @@ impl ProviderService {
             return Ok(true);
         }
 
-        // Save to database
-        state.db.save_provider(app_type.as_str(), &provider)?;
-        Self::drop_codex_discovery_and_rewrite(state, &app_type, &provider.id);
-
-        // Additive mode apps (OpenCode, OpenClaw): optionally write to live config.
+        // Additive mode apps (OpenCode, OpenClaw, Hermes): write live first so a
+        // failed projection cannot leave SSOT ahead of disk. OMO / OMO Slim skip
+        // auto-enable and only persist the DB row.
         if app_type.is_additive_mode() {
-            // OMO / OMO Slim providers use exclusive mode and write to dedicated config file.
             if matches!(app_type, AppType::OpenCode)
                 && matches!(provider.category.as_deref(), Some("omo") | Some("omo-slim"))
             {
-                // Do not auto-enable newly added OMO / OMO Slim providers.
-                // Users must explicitly switch/apply an OMO provider to activate it.
+                state.db.save_provider(app_type.as_str(), &provider)?;
+                Self::drop_codex_discovery_and_rewrite(state, &app_type, &provider.id);
                 return Ok(true);
             }
             if !add_to_live {
+                state.db.save_provider(app_type.as_str(), &provider)?;
+                Self::drop_codex_discovery_and_rewrite(state, &app_type, &provider.id);
                 return Ok(true);
             }
-            write_live_with_common_config_for_state(state, &app_type, &provider)?;
+            Self::commit_additive_live_then_db(state, &app_type, &provider)?;
+            Self::drop_codex_discovery_and_rewrite(state, &app_type, &provider.id);
             return Ok(true);
         }
+
+        // Save to database
+        state.db.save_provider(app_type.as_str(), &provider)?;
+        Self::drop_codex_discovery_and_rewrite(state, &app_type, &provider.id);
 
         // For other apps: Check if sync is needed (if this is current provider, or no current provider)
         let current = state.db.get_current_provider(app_type.as_str())?;
@@ -5027,14 +5214,13 @@ impl ProviderService {
             )?;
             Self::set_provider_live_config_managed(&mut provider, live_config_managed);
 
-            // Save to database after live-config presence is resolved so parse errors
-            // do not report failure after already mutating DB state.
-            state.db.save_provider(app_type.as_str(), &provider)?;
-
-            if !live_config_managed {
-                return Ok(true);
+            if live_config_managed {
+                Self::commit_additive_live_then_db(state, &app_type, &provider)?;
+            } else {
+                // Save to database after live-config presence is resolved so parse
+                // errors do not report failure after already mutating DB state.
+                state.db.save_provider(app_type.as_str(), &provider)?;
             }
-            write_live_with_common_config_for_state(state, &app_type, &provider)?;
             return Ok(true);
         }
 
@@ -5301,10 +5487,10 @@ impl ProviderService {
                         id,
                         variant.category,
                     )?;
-                    state.db.delete_provider(app_type.as_str(), id)?;
                     if was_current {
                         crate::services::OmoService::delete_config_file(variant)?;
                     }
+                    state.db.delete_provider(app_type.as_str(), id)?;
                     return Ok(());
                 }
             }
@@ -5376,18 +5562,17 @@ impl ProviderService {
                     _ => None,
                 };
                 if let Some(variant) = omo_variant {
+                    let was_current = state.db.is_omo_provider_current(
+                        app_type.as_str(),
+                        id,
+                        variant.category,
+                    )?;
+                    if was_current {
+                        crate::services::OmoService::delete_config_file(variant)?;
+                    }
                     state
                         .db
                         .clear_omo_provider_current(app_type.as_str(), id, variant.category)?;
-                    let still_has_current = state
-                        .db
-                        .get_current_omo_provider("opencode", variant.category)?
-                        .is_some();
-                    if still_has_current {
-                        crate::services::OmoService::write_config_to_file(state, variant)?;
-                    } else {
-                        crate::services::OmoService::delete_config_file(variant)?;
-                    }
                 } else {
                     remove_opencode_provider_from_live(id)?;
                 }

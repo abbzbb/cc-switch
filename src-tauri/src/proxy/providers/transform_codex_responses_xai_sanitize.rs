@@ -62,23 +62,23 @@ pub(crate) fn request_contains_tool_search(body: &Value) -> bool {
     body.get("tools")
         .and_then(Value::as_array)
         .is_some_and(|tools| {
-            tools.iter().any(|tool| {
-                tool.get("type").and_then(Value::as_str) == Some("tool_search")
-            })
+            tools
+                .iter()
+                .any(|tool| tool.get("type").and_then(Value::as_str) == Some("tool_search"))
         })
 }
 
 fn output_has_tool_search_call(value: &Value) -> bool {
-    let output = value
-        .get("output")
-        .or_else(|| value.get("response").and_then(|response| response.get("output")));
-    output
-        .and_then(Value::as_array)
-        .is_some_and(|items| {
-            items.iter().any(|item| {
-                item.get("type").and_then(Value::as_str) == Some("tool_search_call")
-            })
-        })
+    let output = value.get("output").or_else(|| {
+        value
+            .get("response")
+            .and_then(|response| response.get("output"))
+    });
+    output.and_then(Value::as_array).is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item.get("type").and_then(Value::as_str) == Some("tool_search_call"))
+    })
 }
 
 fn empty_tool_search_call() -> Value {
@@ -89,8 +89,18 @@ fn empty_tool_search_call() -> Value {
     })
 }
 
+fn response_status_is_unsuccessful(value: &Value) -> bool {
+    let status = value.get("status").and_then(Value::as_str).or_else(|| {
+        value
+            .get("response")
+            .and_then(|response| response.get("status"))
+            .and_then(Value::as_str)
+    });
+    matches!(status, Some("incomplete" | "failed" | "cancelled"))
+}
+
 pub(crate) fn inject_empty_tool_search_json(body: &mut Value) -> bool {
-    if output_has_tool_search_call(body) {
+    if response_status_is_unsuccessful(body) || output_has_tool_search_call(body) {
         return false;
     }
     let item = empty_tool_search_call();
@@ -113,16 +123,53 @@ pub(crate) fn inject_empty_tool_search_json(body: &mut Value) -> bool {
     false
 }
 
+fn sse_has_tool_search_item(sse: &str) -> bool {
+    sse.lines().any(|line| {
+        let Some(data) = line.strip_prefix("data:") else {
+            return false;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(data.trim()) else {
+            return false;
+        };
+        value
+            .get("item")
+            .and_then(|item| item.get("type"))
+            .and_then(Value::as_str)
+            == Some("tool_search_call")
+            || value.get("type").and_then(Value::as_str) == Some("tool_search_call")
+    })
+}
+
+fn max_sse_output_index(sse: &str) -> i64 {
+    let mut max = -1i64;
+    for line in sse.lines() {
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(data.trim()) else {
+            continue;
+        };
+        if let Some(index) = value.get("output_index").and_then(Value::as_i64) {
+            max = max.max(index);
+        }
+    }
+    max
+}
+
 pub(crate) fn inject_empty_tool_search_sse(sse: &str) -> String {
-    if sse.contains("tool_search_call") {
+    if sse.contains("event: response.incomplete")
+        || sse.contains("event: response.failed")
+        || sse_has_tool_search_item(sse)
+    {
         return sse.to_string();
     }
+    let output_index = max_sse_output_index(sse).saturating_add(1).max(0);
     let item = empty_tool_search_call();
     let added = format!(
         "event: response.output_item.added\ndata: {}\n\n",
         serde_json::to_string(&json!({
             "type": "response.output_item.added",
-            "output_index": 0,
+            "output_index": output_index,
             "item": item
         }))
         .unwrap_or_default()
@@ -131,20 +178,18 @@ pub(crate) fn inject_empty_tool_search_sse(sse: &str) -> String {
         "event: response.output_item.done\ndata: {}\n\n",
         serde_json::to_string(&json!({
             "type": "response.output_item.done",
-            "output_index": 0,
+            "output_index": output_index,
             "item": item
         }))
         .unwrap_or_default()
     );
     let injected = format!("{added}{done}");
-    for marker in ["event: response.completed", "event: response.incomplete"] {
-        if let Some(index) = sse.find(marker) {
-            let mut out = String::with_capacity(sse.len() + injected.len());
-            out.push_str(&sse[..index]);
-            out.push_str(&injected);
-            out.push_str(&sse[index..]);
-            return out;
-        }
+    if let Some(index) = sse.find("event: response.completed") {
+        let mut out = String::with_capacity(sse.len() + injected.len());
+        out.push_str(&sse[..index]);
+        out.push_str(&injected);
+        out.push_str(&sse[index..]);
+        return out;
     }
     format!("{sse}{injected}")
 }
@@ -646,6 +691,27 @@ mod tests {
         );
         let rewritten = inject_empty_tool_search_sse(sse);
         assert!(rewritten.contains("tool_search_call"));
-        assert!(rewritten.find("tool_search_call").unwrap() < rewritten.find("response.completed").unwrap());
+        assert!(
+            rewritten.find("tool_search_call").unwrap()
+                < rewritten.find("response.completed").unwrap()
+        );
+    }
+
+    #[test]
+    fn does_not_inject_tool_search_on_incomplete() {
+        let mut body = json!({
+            "status": "incomplete",
+            "output": [{"type": "message"}]
+        });
+        assert!(!inject_empty_tool_search_json(&mut body));
+
+        let sse = concat!(
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n",
+            "event: response.incomplete\n",
+            "data: {\"type\":\"response.incomplete\"}\n\n"
+        );
+        let rewritten = inject_empty_tool_search_sse(sse);
+        assert_eq!(rewritten, sse);
     }
 }

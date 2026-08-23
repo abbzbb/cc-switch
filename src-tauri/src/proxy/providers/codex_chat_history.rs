@@ -387,6 +387,16 @@ pub fn record_responses_sse_stream(
                 Err(err) => yield Err(err),
             }
         }
+        if !utf8_remainder.is_empty() {
+            buffer.push_str(&String::from_utf8_lossy(&utf8_remainder));
+            utf8_remainder.clear();
+        }
+        if !buffer.trim().is_empty() {
+            buffer.push_str("\n\n");
+            while let Some(block) = take_sse_block(&mut buffer) {
+                inspect_sse_block(&block, &mut current_response_id, history.as_ref()).await;
+            }
+        }
     }
 }
 

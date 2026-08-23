@@ -93,6 +93,9 @@ export function useProxyStatus() {
       );
       queryClient.invalidateQueries({ queryKey: proxyKeys.status });
       queryClient.invalidateQueries({ queryKey: proxyKeys.takeoverStatus });
+      queryClient.invalidateQueries({
+        queryKey: ["providers", "claude-desktop"],
+      });
       // 彻底删除所有供应商健康状态缓存（后端已清空数据库记录）
       queryClient.removeQueries({ queryKey: ["providerHealth"] });
       // 彻底删除所有熔断器统计缓存（代理停止后熔断器状态已重置）

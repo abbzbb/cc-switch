@@ -68,6 +68,7 @@ pub fn is_status_path(path: &str) -> bool {
     path == "/status"
 }
 
+#[allow(dead_code)]
 pub fn is_loopback_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback(),
@@ -77,21 +78,16 @@ pub fn is_loopback_ip(ip: IpAddr) -> bool {
     }
 }
 
+#[allow(dead_code)]
 pub fn is_loopback_peer(peer: SocketAddr) -> bool {
     is_loopback_ip(peer.ip())
 }
 
-/// `/health` is always public. `/status` always requires the inbound
-/// capability token. Other paths keep the historical no-token CLI behavior
-/// for loopback peers; any other peer must present the token.
-pub fn inbound_peer_exempt(path: &str, peer: Option<SocketAddr>) -> bool {
-    if is_public_health_path(path) {
-        return true;
-    }
-    if is_status_path(path) {
-        return false;
-    }
-    peer.is_some_and(is_loopback_peer)
+/// `/health` is always public. Every other path — including loopback CLI
+/// traffic that spends Official OAuth or hosted sidecar — requires the
+/// inbound capability token. Live configs already inject `x-cc-switch-proxy`.
+pub fn inbound_peer_exempt(path: &str, _peer: Option<SocketAddr>) -> bool {
+    is_public_health_path(path)
 }
 
 pub fn inbound_request_allowed(
@@ -304,6 +300,8 @@ mod tests {
         let tokens = vec!["ccs-proxy-secret".to_string()];
         let peer: SocketAddr = "192.168.1.10:4000".parse().unwrap();
         let headers = HeaderMap::new();
+        assert!(is_status_path("/status"));
+        assert!(!is_status_path("/v1/messages"));
 
         assert!(inbound_request_allowed(
             "/health",
@@ -368,21 +366,25 @@ mod tests {
             &with_header,
             &tokens
         ));
+        assert!(
+            !inbound_request_allowed("/v1/messages", Some(loopback), &headers, &tokens),
+            "loopback spend paths require the inbound token"
+        );
         assert!(inbound_request_allowed(
             "/v1/messages",
             Some(loopback),
-            &headers,
+            &with_header,
             &tokens
         ));
         let v6: SocketAddr = "[::1]:9".parse().unwrap();
-        assert!(inbound_request_allowed(
+        assert!(!inbound_request_allowed(
             "/v1/messages",
             Some(v6),
             &headers,
             &tokens
         ));
         let mapped: SocketAddr = "[::ffff:127.0.0.1]:9".parse().unwrap();
-        assert!(inbound_request_allowed(
+        assert!(!inbound_request_allowed(
             "/v1/messages",
             Some(mapped),
             &headers,

@@ -26,6 +26,7 @@ import {
 } from "@/lib/query";
 import { usageKeys } from "@/lib/query/usage";
 import { extractErrorMessage } from "@/utils/errorUtils";
+import { redactFrontendLogText } from "@/lib/frontendLogger";
 import { openclawKeys } from "@/hooks/useOpenClaw";
 import {
   extractCodexWireApi,
@@ -299,13 +300,15 @@ export function useProviderActions(
         const result = await switchProviderMutation.mutateAsync(provider.id);
         await syncClaudePlugin(provider);
 
-        // Show backfill warning if present
+        // Show actual switch warnings (redacted) rather than a generic string
         if (result?.warnings?.length) {
+          const warningText = redactFrontendLogText(result.warnings.join("\n"));
           toast.warning(
-            t("notifications.backfillWarning", {
-              defaultValue:
-                "切换成功，但旧供应商配置回填失败，您手动修改的配置可能未保存",
-            }),
+            warningText ||
+              t("notifications.backfillWarning", {
+                defaultValue:
+                  "切换成功，但旧供应商配置回填失败，您手动修改的配置可能未保存",
+              }),
             { duration: 5000 },
           );
         }

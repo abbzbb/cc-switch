@@ -420,8 +420,14 @@ pub fn write_grok_live_settings(settings: &Value) -> Result<(), AppError> {
                 "Grok Build configuration is missing the config field",
             )
         })?;
+    with_live_grok_toml_lock(|| write_grok_live_config_atomic_unlocked(config))
+}
+
+/// Write live `config.toml` without taking the lock. The caller must already
+/// hold `with_live_grok_toml_lock`.
+pub(crate) fn write_grok_live_config_atomic_unlocked(config: &str) -> Result<(), AppError> {
     validate_config_toml_syntax(config)?;
-    with_live_grok_toml_lock(|| write_text_file_private(&get_grok_config_path(), config))
+    write_text_file_private(&get_grok_config_path(), config)
 }
 
 #[cfg(test)]

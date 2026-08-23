@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
@@ -189,13 +189,18 @@ export function useSettings(): UseSettingsResult {
 
   // 即时保存设置（用于 General 标签页的实时更新）
   // 保存基础配置 + 独立的系统 API 调用（开机自启）
+  const autoSaveInFlightRef = useRef(0);
   const autoSaveSettings = useCallback(
     async (updates: Partial<SettingsFormState>): Promise<SaveResult | null> => {
       const latest = getLatestSettings() ?? settings;
-      const mergedSettings = latest ? { ...latest, ...updates } : null;
-      if (!mergedSettings) return null;
+      if (!latest) return null;
 
+      autoSaveInFlightRef.current += 1;
       try {
+        // Re-read immediately before mutate so overlapping toggles send the
+        // latest merged form state (last-write-wins).
+        const latestNow = getLatestSettings() ?? latest;
+        const mergedSettings = { ...latestNow, ...updates };
         const sanitizedClaudeDir = sanitizeDir(mergedSettings.claudeConfigDir);
         const sanitizedCodexDir = sanitizeDir(mergedSettings.codexConfigDir);
         const sanitizedGeminiDir = sanitizeDir(mergedSettings.geminiConfigDir);
@@ -235,7 +240,9 @@ export function useSettings(): UseSettingsResult {
 
         // 保存到配置文件
         await saveMutation.mutateAsync(payload);
-        markSettingsClean();
+        if (autoSaveInFlightRef.current === 1) {
+          markSettingsClean();
+        }
 
         // 如果开机自启状态改变，调用系统 API
         if (
@@ -318,6 +325,8 @@ export function useSettings(): UseSettingsResult {
           }),
         );
         throw error;
+      } finally {
+        autoSaveInFlightRef.current -= 1;
       }
     },
     [

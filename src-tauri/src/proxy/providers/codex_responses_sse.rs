@@ -80,6 +80,32 @@ pub(crate) fn response_terminal(status: &str, response: &Value) -> Bytes {
     }
 }
 
+/// Expand a finished Responses JSON object into the SSE envelope Codex expects
+/// when the upstream ignored `stream:true` and returned a JSON body.
+pub(crate) fn responses_sse_events_from_response_value(response: &Value) -> Vec<Bytes> {
+    let mut events = Vec::new();
+    let mut created = response.clone();
+    if let Some(object) = created.as_object_mut() {
+        object.insert("status".to_string(), json!("in_progress"));
+        object.insert("output".to_string(), json!([]));
+    }
+    events.push(response_created(&created));
+    events.push(response_in_progress(&created));
+    if let Some(output) = response.get("output").and_then(Value::as_array) {
+        for (index, item) in output.iter().enumerate() {
+            let output_index = index as u32;
+            events.push(output_item_added(output_index, item));
+            events.push(output_item_done(output_index, item));
+        }
+    }
+    let status = response
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("completed");
+    events.push(response_terminal(status, response));
+    events
+}
+
 // ---------------------------------------------------------------------------
 // Generic output-item add/done (item value supplied by the caller)
 // ---------------------------------------------------------------------------

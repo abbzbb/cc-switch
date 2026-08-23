@@ -1,4 +1,4 @@
-import { renderHook, act } from "@testing-library/react";
+import { renderHook, act, waitFor } from "@testing-library/react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { useSettings } from "@/hooks/useSettings";
 import type { Settings } from "@/types";
@@ -275,6 +275,63 @@ describe("useSettings hook", () => {
 
     expect(clearClaudeOnboardingSkipMock).toHaveBeenCalledTimes(1);
     expect(toastErrorMock).not.toHaveBeenCalled();
+  });
+
+  it("overlapping autoSaves send the latest merged settings", async () => {
+    let latest = {
+      ...serverSettings,
+      showInTray: true,
+      minimizeToTrayOnClose: true,
+      language: "zh" as const,
+    };
+    const markSettingsClean = vi.fn();
+    settingsFormMock = createSettingsFormMock({
+      settings: latest,
+      getLatestSettings: () => latest,
+      markSettingsClean,
+    });
+
+    let releaseFirst!: (value: boolean) => void;
+    const firstSave = new Promise<boolean>((resolve) => {
+      releaseFirst = resolve;
+    });
+    mutateAsyncMock
+      .mockImplementationOnce(() => firstSave)
+      .mockResolvedValue(true);
+
+    const { result } = renderHook(() => useSettings());
+
+    let firstDone!: Promise<unknown>;
+    act(() => {
+      firstDone = result.current.autoSaveSettings({ showInTray: false });
+    });
+    await waitFor(() => expect(mutateAsyncMock).toHaveBeenCalledTimes(1));
+
+    latest = {
+      ...latest,
+      showInTray: false,
+      minimizeToTrayOnClose: false,
+    };
+
+    let secondDone!: Promise<unknown>;
+    await act(async () => {
+      secondDone = result.current.autoSaveSettings({
+        minimizeToTrayOnClose: false,
+      });
+      await secondDone;
+    });
+
+    expect(mutateAsyncMock).toHaveBeenCalledTimes(2);
+    const secondPayload = mutateAsyncMock.mock.calls[1][0] as Settings;
+    expect(secondPayload.showInTray).toBe(false);
+    expect(secondPayload.minimizeToTrayOnClose).toBe(false);
+    expect(markSettingsClean).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseFirst(true);
+      await firstDone;
+    });
+    expect(markSettingsClean).toHaveBeenCalled();
   });
 
   it("saves settings and flags restart when app config directory changes", async () => {

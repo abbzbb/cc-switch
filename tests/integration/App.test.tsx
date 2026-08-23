@@ -233,14 +233,10 @@ describe("App integration with MSW", () => {
     const { default: App } = await import("@/App");
     renderApp(App);
 
-    await waitFor(() =>
-      expect(providerListText()).toContain("claude-1"),
-    );
+    await waitFor(() => expect(providerListText()).toContain("claude-1"));
 
     fireEvent.click(screen.getByText("switch-codex"));
-    await waitFor(() =>
-      expect(providerListText()).toContain("codex-1"),
-    );
+    await waitFor(() => expect(providerListText()).toContain("codex-1"));
 
     fireEvent.click(screen.getByText("usage"));
     expect(screen.getByTestId("usage-modal")).toBeInTheDocument();
@@ -512,13 +508,14 @@ describe("App integration with MSW", () => {
       expect.arrayContaining([
         ["providers"],
         ["settings"],
-        ["mcp", "all"],
+        ["mcp"],
         ["skills"],
         ["profiles"],
         ["proxyStatus"],
         ["proxyTakeoverStatus"],
         ["modelCombos"],
         ["sidecarSettings"],
+        ["globalProxyConfig"],
         ["sessions"],
         ["sessionMessages"],
         ["globalProxyUrl"],
@@ -530,7 +527,27 @@ describe("App integration with MSW", () => {
         ["providers", "claude-desktop"],
         ["omo", "current-provider-id"],
         ["omo-slim", "current-provider-id"],
+        ["autoFailoverEnabled"],
+        ["failoverQueue"],
+        ["circuitBreakerConfig"],
+        ["claudeDesktopStatus"],
+        ["subscription"],
       ]),
     );
+  });
+
+  it("does not restore OpenClaw skills view on first paint", async () => {
+    localStorage.setItem("cc-switch-last-view", "skills");
+    localStorage.setItem("cc-switch-last-app", "openclaw");
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("app-switcher")).toHaveTextContent("openclaw");
+    });
+    expect(
+      screen.queryByTestId("unified-skills-panel"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("provider-list")).toBeInTheDocument();
   });
 });

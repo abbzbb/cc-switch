@@ -22,6 +22,7 @@ use super::{
     providers::{
         codex_chat_common::extract_reasoning_field_text,
         codex_chat_history::record_responses_sse_stream,
+        codex_responses_sse::responses_sse_events_from_response_value,
         get_adapter, get_claude_api_format, provider_is_xai_prompt_cache_upstream,
         streaming::create_anthropic_sse_stream,
         streaming_codex_anthropic::{
@@ -1224,8 +1225,7 @@ fn inject_dropped_tool_search(
     headers.remove(http::header::CONTENT_LENGTH);
     if response_is_sse(&headers) {
         let sse = String::from_utf8_lossy(&body);
-        let rewritten =
-            transform_codex_responses_xai_sanitize::inject_empty_tool_search_sse(&sse);
+        let rewritten = transform_codex_responses_xai_sanitize::inject_empty_tool_search_sse(&sse);
         return super::hyper_client::ProxyResponse::buffered(
             status,
             headers,
@@ -2014,7 +2014,10 @@ async fn handle_codex_chat_to_responses_transform(
         return handle_codex_chat_error_response(response, ctx, status).await;
     }
 
-    if is_stream || response.is_sse() {
+    // Align with the Anthropic bridge: explicit JSON is buffered and converted
+    // even when the client asked for `stream:true`. Feeding a JSON body into
+    // the Chat SSE parser yields `response.failed` for a successful turn.
+    if response.is_sse() || (is_stream && !response.is_json()) {
         let stream = response.bytes_stream();
         let sse_stream = create_responses_sse_stream_from_chat_with_context(stream, tool_context);
         let sse_stream = record_responses_sse_stream(sse_stream, state.codex_chat_history.clone());
@@ -2105,7 +2108,6 @@ async fn handle_codex_chat_to_responses_transform(
         return Ok((headers, body).into_response());
     }
 
-    let _connection_guard = connection_guard;
     let body_timeout =
         if ctx.app_config.auto_failover_enabled && ctx.app_config.non_streaming_timeout > 0 {
             std::time::Duration::from_secs(ctx.app_config.non_streaming_timeout as u64)
@@ -2155,6 +2157,85 @@ async fn handle_codex_chat_to_responses_transform(
         .codex_chat_history
         .record_response(&responses_response)
         .await;
+
+    if is_stream {
+        let events = responses_sse_events_from_response_value(&responses_response);
+        let sse_stream = futures::stream::iter(events.into_iter().map(Ok::<Bytes, std::io::Error>));
+        let sse_stream = record_responses_sse_stream(sse_stream, state.codex_chat_history.clone());
+        let usage_collector = if usage_logging_enabled(state) {
+            let state = state.clone();
+            let provider_id = ctx.provider.id.clone();
+            let request_model = ctx.request_model.clone();
+            let fallback_model = ctx
+                .outbound_model
+                .clone()
+                .unwrap_or_else(|| ctx.request_model.clone());
+            let app_type_str = ctx.app_type_str;
+            let start_time = ctx.start_time;
+            let session_id = ctx.session_id.clone();
+            Some(SseUsageCollector::new(
+                start_time,
+                Some(codex_stream_usage_event_filter),
+                move |events, first_token_ms| {
+                    let usage =
+                        TokenUsage::from_codex_stream_events_auto(&events).unwrap_or_default();
+                    if !usage.has_billable_tokens() {
+                        return;
+                    }
+                    let model = usage
+                        .model
+                        .clone()
+                        .filter(|m| !m.is_empty())
+                        .unwrap_or_else(|| fallback_model.clone());
+                    let latency_ms = start_time.elapsed().as_millis() as u64;
+                    let state = state.clone();
+                    let provider_id = provider_id.clone();
+                    let request_model = request_model.clone();
+                    let outbound_model = fallback_model.clone();
+                    let session_id = session_id.clone();
+                    tokio::spawn(async move {
+                        log_usage(
+                            &state,
+                            &provider_id,
+                            app_type_str,
+                            &model,
+                            &request_model,
+                            &outbound_model,
+                            usage,
+                            latency_ms,
+                            first_token_ms,
+                            true,
+                            status.as_u16(),
+                            Some(session_id),
+                        )
+                        .await;
+                    });
+                },
+            ))
+        } else {
+            None
+        };
+        let logged_stream = create_logged_passthrough_stream(
+            sse_stream,
+            ctx.tag,
+            usage_collector,
+            ctx.streaming_timeout_config(),
+            connection_guard,
+        );
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "Content-Type",
+            axum::http::HeaderValue::from_static("text/event-stream"),
+        );
+        headers.insert(
+            "Cache-Control",
+            axum::http::HeaderValue::from_static("no-cache"),
+        );
+        let body = axum::body::Body::from_stream(logged_stream);
+        return Ok((headers, body).into_response());
+    }
+
+    let _connection_guard = connection_guard;
 
     // 上游非流式 Chat 省略 usage 时，chat_usage_to_responses_usage 会合成全 0 usage
     // (transform_codex_chat.rs:1581)，from_codex_response 对 input/output 字段存在(哪怕=0)

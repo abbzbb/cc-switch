@@ -60,7 +60,9 @@ impl FailoverSwitchManager {
         provider_name: &str,
         expected_current: Option<&str>,
     ) -> Result<bool, AppError> {
-        let switch_key = format!("{app_type}:{provider_id}");
+        // One in-flight promote per app: a recovery to P1 must not race a
+        // failover promote to P2 (or a later user switch) for the same app.
+        let switch_key = pending_switch_key(app_type);
 
         // 去重检查：如果相同切换已在进行中，跳过
         {
@@ -155,5 +157,35 @@ impl FailoverSwitchManager {
         }
 
         Ok(switched)
+    }
+}
+
+fn pending_switch_key(app_type: &str) -> String {
+    app_type.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_switch_key_is_per_app_not_per_target() {
+        // Recovery to P1 and failover promote to P2 must serialize on the
+        // same app key; a per-target key would let them clobber each other.
+        assert_eq!(pending_switch_key("claude"), "claude");
+        assert_eq!(pending_switch_key("claude"), pending_switch_key("claude"));
+        assert_ne!(pending_switch_key("claude"), pending_switch_key("codex"));
+        assert!(!pending_switch_key("claude").contains(':'));
+    }
+
+    #[tokio::test]
+    async fn try_switch_without_app_handle_does_not_promote() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("memory db"));
+        let manager = FailoverSwitchManager::new(db);
+        let switched = manager
+            .try_switch(None, "claude", "p1", "P1")
+            .await
+            .expect("try_switch");
+        assert!(!switched);
     }
 }

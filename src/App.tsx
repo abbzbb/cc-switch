@@ -31,8 +31,12 @@ import {
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Provider, VisibleApps } from "@/types";
 import type { EnvConflict } from "@/types/env";
-import { proxyKeys, useProvidersQuery, useSettingsQuery } from "@/lib/query";
-import { usageKeys } from "@/lib/query/usage";
+import {
+  invalidateAfterImport,
+  proxyKeys,
+  useProvidersQuery,
+  useSettingsQuery,
+} from "@/lib/query";
 import {
   piApi,
   providersApi,
@@ -101,11 +105,7 @@ import {
   useDisableCurrentOmo,
   useDisableCurrentOmoSlim,
 } from "@/lib/query/omo";
-import {
-  invalidatePiProviderCaches,
-  piKeys,
-  usePiCurrentState,
-} from "@/lib/query/pi";
+import { invalidatePiProviderCaches, usePiCurrentState } from "@/lib/query/pi";
 import WorkspaceFilesPanel from "@/components/workspace/WorkspaceFilesPanel";
 import EnvPanel from "@/components/openclaw/EnvPanel";
 import ToolsPanel from "@/components/openclaw/ToolsPanel";
@@ -170,9 +170,45 @@ const VALID_VIEWS: View[] = [
   "hermesMemory",
 ];
 
+const resolveSharedFeatureApp = (app: AppId): AppId =>
+  app === "claude-desktop" ? "claude" : app;
+
+const isViewSupportedForApp = (view: View, app: AppId): boolean => {
+  const featureApp = resolveSharedFeatureApp(app);
+  if (view === "mcp" && featureApp === "pi") {
+    return false;
+  }
+  if (
+    (view === "skills" ||
+      view === "skillsDiscovery" ||
+      view === "prompts" ||
+      view === "mcp") &&
+    featureApp === "openclaw"
+  ) {
+    return false;
+  }
+  if (view === "sessions") {
+    return (
+      featureApp === "claude" ||
+      featureApp === "codex" ||
+      featureApp === "grokbuild" ||
+      featureApp === "opencode" ||
+      featureApp === "openclaw" ||
+      featureApp === "gemini" ||
+      featureApp === "hermes" ||
+      featureApp === "pi"
+    );
+  }
+  return true;
+};
+
 const getInitialView = (): View => {
   const saved = localStorage.getItem(VIEW_STORAGE_KEY) as View | null;
-  if (saved && VALID_VIEWS.includes(saved)) {
+  if (
+    saved &&
+    VALID_VIEWS.includes(saved) &&
+    isViewSupportedForApp(saved, getInitialApp())
+  ) {
     return saved;
   }
   return "providers";
@@ -185,8 +221,7 @@ function App() {
   const [activeApp, setActiveApp] = useState<AppId>(getInitialApp);
   const activeAppRef = useRef(activeApp);
   activeAppRef.current = activeApp;
-  const sharedFeatureApp: AppId =
-    activeApp === "claude-desktop" ? "claude" : activeApp;
+  const sharedFeatureApp: AppId = resolveSharedFeatureApp(activeApp);
   const [currentView, setCurrentView] = useState<View>(getInitialView);
   const [skillsDiscoverySource, setSkillsDiscoverySource] =
     useState<SkillsPageSource>("repos");
@@ -233,34 +268,10 @@ function App() {
 
   // Fallback from sessions view when switching to an app without session support
   useEffect(() => {
-    if (currentView === "mcp" && sharedFeatureApp === "pi") {
-      setCurrentView("providers");
-      return;
-    }
-    if (
-      (currentView === "skills" ||
-        currentView === "skillsDiscovery" ||
-        currentView === "prompts" ||
-        currentView === "mcp") &&
-      sharedFeatureApp === "openclaw"
-    ) {
-      setCurrentView("providers");
-      return;
-    }
-    if (
-      currentView === "sessions" &&
-      sharedFeatureApp !== "claude" &&
-      sharedFeatureApp !== "codex" &&
-      sharedFeatureApp !== "grokbuild" &&
-      sharedFeatureApp !== "opencode" &&
-      sharedFeatureApp !== "openclaw" &&
-      sharedFeatureApp !== "gemini" &&
-      sharedFeatureApp !== "hermes" &&
-      sharedFeatureApp !== "pi"
-    ) {
+    if (!isViewSupportedForApp(currentView, activeApp)) {
       setCurrentView("providers");
     }
-  }, [sharedFeatureApp, currentView]);
+  }, [activeApp, currentView]);
 
   const [editingProvider, setEditingProvider] = useState<Provider | null>(null);
   const [usageProvider, setUsageProvider] = useState<Provider | null>(null);
@@ -294,6 +305,7 @@ function App() {
     isRunning: isProxyRunning,
     takeoverStatus,
     status: proxyStatus,
+    isInitialStatusPending,
   } = useProxyStatus();
   const proxyAppId = isProxyAppId(activeApp) ? activeApp : null;
   const currentAppUsesProxy =
@@ -945,38 +957,7 @@ function App() {
       // Import mutates providers/settings/mcp/skills/profiles/proxy/sessions.
       // Never call bare invalidateQueries() — that refetches every query and
       // re-hydrates dirty settings forms.
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["providers"] }),
-        queryClient.invalidateQueries({ queryKey: ["settings"] }),
-        queryClient.invalidateQueries({ queryKey: ["mcp", "all"] }),
-        queryClient.invalidateQueries({ queryKey: ["skills"] }),
-        queryClient.invalidateQueries({ queryKey: ["profiles"] }),
-        queryClient.invalidateQueries({ queryKey: proxyKeys.status }),
-        queryClient.invalidateQueries({
-          queryKey: proxyKeys.takeoverStatus,
-        }),
-        queryClient.invalidateQueries({ queryKey: proxyKeys.combos }),
-        queryClient.invalidateQueries({ queryKey: proxyKeys.sidecars }),
-        queryClient.invalidateQueries({ queryKey: ["sessions"] }),
-        queryClient.invalidateQueries({ queryKey: ["sessionMessages"] }),
-        queryClient.invalidateQueries({ queryKey: ["globalProxyUrl"] }),
-        queryClient.invalidateQueries({ queryKey: usageKeys.all }),
-        queryClient.invalidateQueries({ queryKey: piKeys.all }),
-        queryClient.invalidateQueries({ queryKey: openclawKeys.all }),
-        queryClient.invalidateQueries({ queryKey: hermesKeys.all }),
-        queryClient.invalidateQueries({
-          queryKey: ["opencodeLiveProviderIds"],
-        }),
-        queryClient.invalidateQueries({
-          queryKey: ["providers", "claude-desktop"],
-        }),
-        queryClient.invalidateQueries({
-          queryKey: ["omo", "current-provider-id"],
-        }),
-        queryClient.invalidateQueries({
-          queryKey: ["omo-slim", "current-provider-id"],
-        }),
-      ]);
+      await invalidateAfterImport(queryClient);
     } catch (error) {
       console.error("[App] Failed to refresh queries after import", error);
       await refetch();
@@ -1801,6 +1782,7 @@ function App() {
           isProxyRunning &&
           (isCurrentAppTakeoverActive || activeApp === "claude-desktop")
         }
+        isProxyStatusPending={isInitialStatusPending}
       />
 
       {effectiveUsageProvider && (

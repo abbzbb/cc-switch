@@ -2720,7 +2720,8 @@
     "validation": {
       "providerRequired": "匯入供應商需要指定應用類型和名稱",
       "skillRepoRequired": "匯入 Skill 需要指定倉庫位址",
-      "promptContentRequired": "匯入提示詞需要提供內容"
+      "promptContentRequired": "匯入提示詞需要提供內容",
+      "mcpRequired": "匯入 MCP 需要指定目標應用和配置"
     },
     "skillImportSuccess": "Skill 儲存庫新增成功",
     "skillImportSuccessDescription": "已新增儲存庫：{{repo}}",

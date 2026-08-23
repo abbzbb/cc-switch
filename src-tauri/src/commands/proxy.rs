@@ -343,9 +343,13 @@ pub async fn reset_circuit_breaker(
     provider_id: String,
     app_type: String,
 ) -> Result<(), String> {
-    require_proxy_app(&app_type)?;
-    // 1. 重置数据库健康状态
+    let app = require_proxy_app(&app_type)?;
     let db = &state.db;
+    // Snapshot before health reset so a user switch during recovery wins.
+    let expected_current =
+        crate::settings::get_effective_current_provider(db, &app).map_err(|e| e.to_string())?;
+
+    // 1. 重置数据库健康状态
     db.update_provider_health(&provider_id, &app_type, true, None)
         .await
         .map_err(|e| e.to_string())?;
@@ -367,12 +371,7 @@ pub async fn reset_circuit_breaker(
     };
 
     if app_enabled && auto_failover_enabled && state.proxy_service.is_running().await {
-        // 获取当前供应商 ID
-        let current_id = db
-            .get_current_provider(&app_type)
-            .map_err(|e| e.to_string())?;
-
-        if let Some(current_id) = current_id {
+        if let Some(current_id) = expected_current.as_deref() {
             // 获取故障转移队列
             let queue = db
                 .get_failover_queue(&app_type)
@@ -403,11 +402,17 @@ pub async fn reset_circuit_breaker(
                         .and_then(|providers| providers.get(&provider_id).map(|p| p.name.clone()))
                         .unwrap_or_else(|| provider_id.clone());
 
-                    // 创建故障转移切换管理器并执行切换
+                    // Promote only if current is still the snapshotted provider.
                     let switch_manager =
                         crate::proxy::failover_switch::FailoverSwitchManager::new(db.clone());
                     if let Err(e) = switch_manager
-                        .try_switch(Some(&app_handle), &app_type, &provider_id, &provider_name)
+                        .try_switch_if_current(
+                            Some(&app_handle),
+                            &app_type,
+                            &provider_id,
+                            &provider_name,
+                            Some(current_id),
+                        )
                         .await
                     {
                         log::error!("[Recovery] 自动切换失败: {e}");

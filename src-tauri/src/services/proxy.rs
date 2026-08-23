@@ -3,7 +3,9 @@
 //! 提供代理服务器的启动、停止和配置管理
 
 use crate::app_config::AppType;
-use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
+#[cfg(test)]
+use crate::config::write_json_file;
+use crate::config::{get_claude_settings_path, read_json_file, write_json_file_private};
 use crate::database::Database;
 use crate::provider::Provider;
 use crate::proxy::official_pool::OfficialPoolState;
@@ -968,6 +970,11 @@ impl ProxyService {
     /// 启动代理服务器
     pub async fn start(&self) -> Result<ProxyServerInfo, String> {
         let _start_guard = self.start_lock.lock().await;
+        self.start_unlocked().await
+    }
+
+    /// Assumes `start_lock` is already held. Not reentrant.
+    async fn start_unlocked(&self) -> Result<ProxyServerInfo, String> {
         // 1. 启动时自动设置 proxy_enabled = true
         let mut global_config = self
             .db
@@ -1187,20 +1194,25 @@ impl ProxyService {
     ///
     /// - 开启：自动启动代理服务，仅接管当前 app 的 Live 配置
     /// - 关闭：仅恢复当前 app 的 Live 配置；若无其它接管，则自动停止代理服务
+    ///
+    /// Lock order: `start_lock` → `switch_lock` → `server`. `start()`/`stop()`
+    /// take `start_lock`, so they must not run while this method holds
+    /// `switch_lock`.
     pub async fn set_takeover_for_app(&self, app_type: &str, enabled: bool) -> Result<(), String> {
         let app = AppType::from_str(app_type).map_err(|e| format!("无效的应用类型: {e}"))?;
         if !app.supports_local_proxy() {
             return Err(format!("{} 不支持本地路由", app.as_str()));
         }
         let app_type_str = app.as_str();
+
+        // Start without switch_lock so we never invert start_lock → switch_lock.
+        if enabled && !self.is_running().await {
+            self.start().await?;
+        }
+
         let _guard = self.switch_locks.lock_for_app(app_type_str).await;
 
         if enabled {
-            // 1) 代理服务未运行则自动启动
-            if !self.is_running().await {
-                self.start().await?;
-            }
-
             // 2) 已接管则直接返回（幂等）；但如果缺少备份或占位符残留，需要重建接管
             let current_config = self
                 .db
@@ -1409,11 +1421,16 @@ impl ProxyService {
             .await
             .map_err(|e| format!("检查接管状态失败: {e}"))?;
 
+        let should_stop = !any_enabled && self.is_running().await;
         if !any_enabled {
             let _ = self.db.set_live_takeover_active(false).await;
-
-            if self.is_running().await {
-                // 此时没有任何 app 处于接管状态，停止服务即可
+        }
+        // Drop switch_lock before stop(): stop() takes start_lock.
+        drop(_guard);
+        if should_stop {
+            // A concurrent enable may have started takeover after we released
+            // the lock; only stop if still nobody is taken over.
+            if !self.is_takeover_active().await.unwrap_or(true) {
                 let _ = self.stop().await;
             }
         }
@@ -1767,6 +1784,12 @@ impl ProxyService {
 
     /// 停止代理服务器
     pub async fn stop(&self) -> Result<(), String> {
+        let _start_guard = self.start_lock.lock().await;
+        self.stop_unlocked().await
+    }
+
+    /// Assumes `start_lock` is already held. Not reentrant.
+    async fn stop_unlocked(&self) -> Result<(), String> {
         if let Some(server) = self.server.write().await.take() {
             server
                 .stop()
@@ -3656,7 +3679,7 @@ impl ProxyService {
     fn write_claude_live(&self, config: &Value) -> Result<(), String> {
         let path = get_claude_settings_path();
         let settings = crate::services::provider::sanitize_claude_settings_for_live(config);
-        write_json_file(&path, &settings).map_err(|e| format!("写入 Claude 配置失败: {e}"))
+        write_json_file_private(&path, &settings).map_err(|e| format!("写入 Claude 配置失败: {e}"))
     }
 
     fn read_codex_live(&self) -> Result<Value, String> {
@@ -3856,7 +3879,30 @@ impl ProxyService {
         }
         let providers = self.codex_catalog_providers()?;
         crate::proxy::catalog_refresh::refresh_discovery_cache(&providers).await;
+        // Network fetch dropped any switch_lock the caller held. Re-check
+        // takeover before rewriting live toml so a user disable/restore
+        // that landed during the fetch is not clobbered.
+        let _guard = self
+            .switch_locks
+            .lock_for_app(AppType::Codex.as_str())
+            .await;
+        if !self.codex_takeover_live_still_managed().await {
+            log::info!(
+                "skip Codex catalog rewrite: takeover disabled or live is no longer proxy-managed"
+            );
+            return Ok(());
+        }
         self.write_merged_codex_routing_catalog_from_db()
+    }
+
+    async fn codex_takeover_live_still_managed(&self) -> bool {
+        let enabled = self
+            .db
+            .get_proxy_config_for_app(AppType::Codex.as_str())
+            .await
+            .map(|config| config.enabled)
+            .unwrap_or(false);
+        enabled && self.detect_takeover_in_live_config_for_app(&AppType::Codex)
     }
 
     pub async fn refresh_codex_routing_catalog_if_takeover(&self) -> Result<(), String> {
@@ -3994,7 +4040,7 @@ impl ProxyService {
                     if auth.as_object().is_some_and(Map::is_empty) {
                         Ok(())
                     } else {
-                        write_json_file(&get_codex_auth_path(), auth)
+                        write_json_file_private(&get_codex_auth_path(), auth)
                             .map_err(|e| format!("写入 Codex auth 失败: {e}"))
                     }
                 }
@@ -4107,18 +4153,22 @@ impl ProxyService {
             .await
             .map_err(|e| format!("保存代理配置失败: {e}"))?;
 
-        // 检查服务器当前状态
-        let mut server_guard = self.server.write().await;
-        if server_guard.is_none() {
-            return Ok(());
-        }
-
         // 判断是否需要重启（地址或端口变更）
         let require_restart = new_config.listen_address != previous.listen_address
             || new_config.listen_port != previous.listen_port;
 
+        // Serialize with start()/stop(). Do not call `self.start()` here:
+        // start_lock is not reentrant, and this path already holds it.
+        let _start_guard = self.start_lock.lock().await;
+        if self.server.read().await.is_none() {
+            return Ok(());
+        }
+
         if require_restart {
-            if let Some(server) = server_guard.take() {
+            // Take the old server out and drop the write guard before stop+start
+            // so we never hold `server.write` across `ProxyServer::start`.
+            let old_server = self.server.write().await.take();
+            if let Some(server) = old_server {
                 if let Err(e) = server.stop().await {
                     log::warn!("重启前停止代理服务器失败: {e}");
                 }
@@ -4143,7 +4193,7 @@ impl ProxyService {
                     let fallback = spawn_server(previous.clone());
                     match fallback.start().await {
                         Ok(_) => {
-                            *server_guard = Some(fallback);
+                            *self.server.write().await = Some(fallback);
                             return Err(format!("重启代理服务器失败，已回退旧监听: {e}"));
                         }
                         Err(fallback_err) => {
@@ -4161,18 +4211,15 @@ impl ProxyService {
                 let _ = new_server.stop().await;
                 let fallback = spawn_server(previous.clone());
                 if fallback.start().await.is_ok() {
-                    *server_guard = Some(fallback);
+                    *self.server.write().await = Some(fallback);
                 }
                 return Err(e);
             }
 
-            *server_guard = Some(new_server);
+            *self.server.write().await = Some(new_server);
             log::info!("代理配置已更新，服务器已自动重启应用最新配置");
 
-            // 如果当前存在任意 app 的 Live 接管，需要同步更新 Live 中的代理地址（否则客户端仍指向旧端口）。
-            // 必须先释放 server 写锁，再逐 app 获取 switch lock：set_takeover_for_app
-            // 按 switch lock -> server lock 的顺序执行，反向持锁会造成死锁。
-            drop(server_guard);
+            // Reproject Live under start_lock → switch_lock (never reverse).
             let mut updated_any = false;
             for app_type in [
                 AppType::Claude,
@@ -4190,7 +4237,7 @@ impl ProxyService {
             }
 
             return Ok(());
-        } else if let Some(server) = server_guard.as_ref() {
+        } else if let Some(server) = self.server.read().await.as_ref() {
             server.apply_runtime_config(&new_config).await;
             log::info!("代理配置已实时应用，无需重启代理服务器");
         }
@@ -4345,6 +4392,33 @@ mod tests {
         assert!(service.set_takeover_for_app("pi", true).await.is_err());
         assert!(!service.is_running().await);
         assert!(service.switch_proxy_target("pi", "missing").await.is_err());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn catalog_rewrite_skips_when_takeover_disabled_or_live_restored() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+
+        assert!(
+            !service.codex_takeover_live_still_managed().await,
+            "disabled takeover must skip post-fetch catalog rewrite"
+        );
+
+        let mut config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("get codex proxy config");
+        config.enabled = true;
+        db.update_proxy_config_for_app(config)
+            .await
+            .expect("mark enabled");
+        assert!(
+            !service.codex_takeover_live_still_managed().await,
+            "enabled but live not proxy-managed must still skip rewrite"
+        );
     }
 
     async fn running_codex_base_url(service: &ProxyService) -> String {
@@ -10686,9 +10760,12 @@ experimental_bearer_token = "PROXY_MANAGED"
         let status = service.get_status().await.expect("proxy status");
         assert!(status.running, "takeover must start the proxy");
         let proxy_base = format!("http://127.0.0.1:{}", status.port);
+        let inbound =
+            crate::proxy::inbound_auth::get_or_create_inbound_token(&db).expect("inbound token");
         let client = reqwest::Client::new();
         let models_body: Value = client
             .get(format!("{proxy_base}/v1/models"))
+            .header("x-cc-switch-proxy", &inbound)
             .send()
             .await
             .expect("GET /v1/models")
@@ -10709,6 +10786,7 @@ experimental_bearer_token = "PROXY_MANAGED"
         .expect("stale the on-disk catalog");
         let models_body_after_stale: Value = client
             .get(format!("{proxy_base}/v1/models"))
+            .header("x-cc-switch-proxy", &inbound)
             .send()
             .await
             .expect("GET /v1/models after stale file")
@@ -10726,12 +10804,14 @@ experimental_bearer_token = "PROXY_MANAGED"
 
         let post_responses = |model: &str| {
             let client = client.clone();
+            let inbound = inbound.clone();
             let url = format!("{proxy_base}/v1/responses");
             let model = model.to_string();
             async move {
                 client
                     .post(url)
                     .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .header("x-cc-switch-proxy", inbound)
                     .json(&json!({
                         "model": model,
                         "input": "verification",
@@ -10998,10 +11078,13 @@ experimental_bearer_token = "PROXY_MANAGED"
 
         let status = service.get_status().await.expect("proxy status");
         let proxy_base = format!("http://127.0.0.1:{}", status.port);
+        let inbound =
+            crate::proxy::inbound_auth::get_or_create_inbound_token(&db).expect("inbound token");
         let client = reqwest::Client::new();
         let response = client
             .post(format!("{proxy_base}/v1/responses"))
             .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .header("x-cc-switch-proxy", inbound)
             .json(&json!({
                 "model": "combo/main",
                 "input": "hi"
@@ -11377,9 +11460,12 @@ experimental_bearer_token = "PROXY_MANAGED"
             .expect("enable Codex takeover");
 
         let status = service.get_status().await.expect("proxy status");
+        let inbound =
+            crate::proxy::inbound_auth::get_or_create_inbound_token(&db).expect("inbound token");
         let response = reqwest::Client::new()
             .post(format!("http://127.0.0.1:{}/v1/responses", status.port))
             .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .header("x-cc-switch-proxy", inbound)
             .json(&json!({
                 "model": "kimi-for-coding",
                 "input": "hi"
@@ -11522,9 +11608,12 @@ experimental_bearer_token = "PROXY_MANAGED"
             .expect("enable Codex takeover");
 
         let status = service.get_status().await.expect("proxy status");
+        let inbound =
+            crate::proxy::inbound_auth::get_or_create_inbound_token(&db).expect("inbound token");
         let response = reqwest::Client::new()
             .post(format!("http://127.0.0.1:{}/v1/responses", status.port))
             .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .header("x-cc-switch-proxy", &inbound)
             .json(&json!({
                 "model": "kimi-for-coding",
                 "input": "hi"
@@ -11560,6 +11649,7 @@ experimental_bearer_token = "PROXY_MANAGED"
         let pinned = reqwest::Client::new()
             .post(format!("http://127.0.0.1:{}/v1/responses", status.port))
             .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .header("x-cc-switch-proxy", &inbound)
             .json(&json!({
                 "model": "kimi-a/kimi-for-coding",
                 "input": "hi"
@@ -11826,11 +11916,14 @@ experimental_bearer_token = "PROXY_MANAGED"
         );
 
         let status = service.get_status().await.expect("proxy status");
+        let inbound =
+            crate::proxy::inbound_auth::get_or_create_inbound_token(&db).expect("inbound token");
         let client = reqwest::Client::new();
 
         let kimi_pool = client
             .post(format!("http://127.0.0.1:{}/v1/responses", status.port))
             .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .header("x-cc-switch-proxy", &inbound)
             .json(&json!({ "model": "kimi-for-coding", "input": "hi" }))
             .send()
             .await
@@ -11854,6 +11947,7 @@ experimental_bearer_token = "PROXY_MANAGED"
         let kimi_pin = client
             .post(format!("http://127.0.0.1:{}/v1/responses", status.port))
             .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .header("x-cc-switch-proxy", &inbound)
             .json(&json!({ "model": "kimi-a/kimi-for-coding", "input": "hi" }))
             .send()
             .await
@@ -11876,6 +11970,7 @@ experimental_bearer_token = "PROXY_MANAGED"
         let anthropic_pool = client
             .post(format!("http://127.0.0.1:{}/v1/messages", status.port))
             .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .header("x-cc-switch-proxy", &inbound)
             .header("anthropic-version", "2023-06-01")
             .json(&json!({
                 "model": "claude-sonnet-4-6",
@@ -11902,6 +11997,7 @@ experimental_bearer_token = "PROXY_MANAGED"
         let anthropic_pin = client
             .post(format!("http://127.0.0.1:{}/v1/messages", status.port))
             .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .header("x-cc-switch-proxy", &inbound)
             .header("anthropic-version", "2023-06-01")
             .json(&json!({
                 "model": "claude-a/claude-sonnet-4-6",
@@ -11926,6 +12022,7 @@ experimental_bearer_token = "PROXY_MANAGED"
         let missing_account = client
             .post(format!("http://127.0.0.1:{}/v1/messages", status.port))
             .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .header("x-cc-switch-proxy", &inbound)
             .header("anthropic-version", "2023-06-01")
             .json(&json!({
                 "model": "claude-missing/claude-sonnet-4-6",

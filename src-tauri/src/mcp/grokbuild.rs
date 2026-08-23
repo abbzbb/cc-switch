@@ -139,41 +139,38 @@ pub fn sync_single_server_to_grokbuild(
     }
     use toml_edit::Item;
 
-    let path = crate::grok_config::get_grok_config_path();
-    let text = read_config_text()?;
-    let mut doc = if text.trim().is_empty() {
-        toml_edit::DocumentMut::new()
-    } else {
-        text.parse::<toml_edit::DocumentMut>().map_err(|e| {
-            AppError::McpValidation(format!("解析 Grok Build config.toml 失败: {e}"))
-        })?
-    };
-    // 若 mcp_servers 缺失或存在但不是 table（如 `mcp_servers = "x"` / `[]`），
-    // 用空 table 归一化，避免后续 `doc["mcp_servers"][id] = …` 对非 table 索引
-    // 触发 toml_edit 的 IndexMut panic。用户手写的 config.toml 不可信。
-    // 判定走不可变的 `as_table_like`：借可变引用只为判空，会逼着下面再 get_mut 一次。
-    if doc
-        .get("mcp_servers")
-        .is_none_or(|item| item.as_table_like().is_none())
-    {
-        // 归一化会丢掉用户手写的那个非表值，必须留痕。
-        if doc.get("mcp_servers").is_some_and(|item| !item.is_none()) {
-            log::warn!("Grok Build config.toml 的 mcp_servers 不是表，已重置为空表");
-        }
-        doc["mcp_servers"] = toml_edit::table();
-    }
-    let servers = doc
-        .get_mut("mcp_servers")
-        .and_then(toml_edit::Item::as_table_like_mut)
-        .ok_or_else(|| {
-            AppError::McpValidation("Grok Build config.toml 的 mcp_servers 不是表".to_string())
-        })?;
-    servers.insert(
-        id,
-        Item::Table(json_server_to_grokbuild_toml_table(server_spec)?),
-    );
+    let table = json_server_to_grokbuild_toml_table(server_spec)?;
     crate::grok_config::with_live_grok_toml_lock(|| {
-        crate::config::write_text_file(&path, &doc.to_string())
+        let text = read_config_text()?;
+        let mut doc = if text.trim().is_empty() {
+            toml_edit::DocumentMut::new()
+        } else {
+            text.parse::<toml_edit::DocumentMut>().map_err(|e| {
+                AppError::McpValidation(format!("解析 Grok Build config.toml 失败: {e}"))
+            })?
+        };
+        // 若 mcp_servers 缺失或存在但不是 table（如 `mcp_servers = "x"` / `[]`），
+        // 用空 table 归一化，避免后续 `doc["mcp_servers"][id] = …` 对非 table 索引
+        // 触发 toml_edit 的 IndexMut panic。用户手写的 config.toml 不可信。
+        // 判定走不可变的 `as_table_like`：借可变引用只为判空，会逼着下面再 get_mut 一次。
+        if doc
+            .get("mcp_servers")
+            .is_none_or(|item| item.as_table_like().is_none())
+        {
+            // 归一化会丢掉用户手写的那个非表值，必须留痕。
+            if doc.get("mcp_servers").is_some_and(|item| !item.is_none()) {
+                log::warn!("Grok Build config.toml 的 mcp_servers 不是表，已重置为空表");
+            }
+            doc["mcp_servers"] = toml_edit::table();
+        }
+        let servers = doc
+            .get_mut("mcp_servers")
+            .and_then(toml_edit::Item::as_table_like_mut)
+            .ok_or_else(|| {
+                AppError::McpValidation("Grok Build config.toml 的 mcp_servers 不是表".to_string())
+            })?;
+        servers.insert(id, Item::Table(table));
+        crate::grok_config::write_grok_live_config_atomic_unlocked(&doc.to_string())
     })
 }
 
@@ -181,37 +178,36 @@ pub fn remove_server_from_grokbuild(id: &str) -> Result<(), AppError> {
     if !should_sync_grokbuild_mcp() {
         return Ok(());
     }
-    let path = crate::grok_config::get_grok_config_path();
-    if !path.exists() {
-        return Ok(());
-    }
-    let text = read_config_text()?;
-    let mut doc = match text.parse::<toml_edit::DocumentMut>() {
-        Ok(doc) => doc,
-        Err(error) => {
-            return Err(AppError::McpValidation(format!(
-                "解析 Grok Build config.toml 失败，无法删除 MCP 服务器: {error}"
-            )));
-        }
-    };
-    // 与写入侧对称使用 as_table_like_mut：inline table 形态下 as_table_mut 返回
-    // None，删除会静默失效——界面显示已移除，Grok Build 下次启动仍会加载它。
-    if let Some(item) = doc.get_mut("mcp_servers") {
-        // `Item::None` 是 toml_edit 的占位形态，不是用户写下的值——对它告警是噪音。
-        // 必须在取可变借用之前算出来。
-        let user_authored = !item.is_none();
-        match item.as_table_like_mut() {
-            Some(servers) => {
-                servers.remove(id);
-            }
-            None if user_authored => {
-                log::warn!("Grok Build config.toml 的 mcp_servers 不是表，无法删除服务器 '{id}'");
-            }
-            None => {}
-        }
-    }
     crate::grok_config::with_live_grok_toml_lock(|| {
-        crate::config::write_text_file(&path, &doc.to_string())
+        let path = crate::grok_config::get_grok_config_path();
+        if !path.exists() {
+            return Ok(());
+        }
+        let text = read_config_text()?;
+        let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(|error| {
+            AppError::McpValidation(format!(
+                "解析 Grok Build config.toml 失败，无法删除 MCP 服务器: {error}"
+            ))
+        })?;
+        // 与写入侧对称使用 as_table_like_mut：inline table 形态下 as_table_mut 返回
+        // None，删除会静默失效——界面显示已移除，Grok Build 下次启动仍会加载它。
+        if let Some(item) = doc.get_mut("mcp_servers") {
+            // `Item::None` 是 toml_edit 的占位形态，不是用户写下的值——对它告警是噪音。
+            // 必须在取可变借用之前算出来。
+            let user_authored = !item.is_none();
+            match item.as_table_like_mut() {
+                Some(servers) => {
+                    servers.remove(id);
+                }
+                None if user_authored => {
+                    log::warn!(
+                        "Grok Build config.toml 的 mcp_servers 不是表，无法删除服务器 '{id}'"
+                    );
+                }
+                None => {}
+            }
+        }
+        crate::grok_config::write_grok_live_config_atomic_unlocked(&doc.to_string())
     })
 }
 
@@ -252,5 +248,40 @@ http_headers = { Authorization = "Bearer token" }
                 .and_then(toml_edit::Item::as_str),
             Some("Bearer token")
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn remove_server_fails_closed_on_invalid_toml() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+
+        let path = crate::grok_config::get_grok_config_path();
+        std::fs::create_dir_all(path.parent().expect("grok dir")).expect("create grok dir");
+        let broken = "model = [\n";
+        std::fs::write(&path, broken).expect("write invalid toml");
+
+        let err = remove_server_from_grokbuild("echo")
+            .expect_err("invalid toml must fail closed instead of wiping the file");
+        match err {
+            AppError::McpValidation(msg) => {
+                assert!(
+                    msg.contains("config.toml"),
+                    "error message should mention config.toml: {msg}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read config"),
+            broken,
+            "invalid config.toml must be left untouched"
+        );
+
+        match original_test_home {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
     }
 }

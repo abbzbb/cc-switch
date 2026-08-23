@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{
     atomic_write, atomic_write_private, delete_file, get_home_dir, path_is_within, read_json_file,
-    sanitize_provider_name, write_json_file, write_json_file_private, write_text_file,
+    sanitize_provider_name, write_json_file, write_json_file_private, write_text_file_private,
 };
 use crate::error::AppError;
 use crate::model_capabilities::{image_input_capability_from_modalities, ImageInputCapability};
@@ -926,7 +926,7 @@ pub(crate) fn write_codex_live_config_atomic_unlocked(
         toml::from_str::<toml::Table>(&cfg_text).map_err(|e| AppError::toml(&config_path, e))?;
     }
 
-    write_text_file(&config_path, &cfg_text)
+    write_text_file_private(&config_path, &cfg_text)
 }
 
 pub fn extract_codex_auth_api_key(auth: &Value) -> Option<String> {
@@ -3256,6 +3256,23 @@ mod tests {
         record_codex_managed_oauth_live_auth(&auth).expect("seed managed auth marker");
 
         capture_codex_live_test_state()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn write_codex_live_config_atomic_unlocked_creates_0600_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _home = CodexLiveTestHome::new();
+        write_codex_live_config_atomic(Some(
+            "model = \"gpt-5.4\"\nexperimental_bearer_token = \"secret\"\n",
+        ))
+        .expect("write live config");
+
+        let path = get_codex_config_path();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

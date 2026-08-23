@@ -770,6 +770,19 @@ impl RequestForwarder {
 
         // 依次尝试每个供应商
         for (attempt_index, provider) in providers.iter().enumerate() {
+            if endpoint_is_remote_compact(endpoint)
+                && super::model_routing::provider_rejects_remote_compact(provider)
+            {
+                log::warn!(
+                    "[{app_type_str}] skip remote compact for non-official provider {}",
+                    provider.id
+                );
+                last_error = Some(ProxyError::InvalidRequest(
+                    "Remote compact is not supported for this provider. CC Switch takeover sets name = \"CC Switch\" so Codex uses local compact; fully quit and restart Codex, or start a new thread.".into(),
+                ));
+                last_provider = Some(provider.clone());
+                continue;
+            }
             // 整流器重试标记：每个 provider 独立持有，避免标记跨 provider 短路故障转移
             // —— 首家 provider 整流后被 5xx/timeout 击落时，下家仍能用整流后的请求体走整流流程
             let mut rectifier_retried = false;
@@ -3843,6 +3856,12 @@ fn is_streaming_request(endpoint: &str, body: &Value, headers: &axum::http::Head
         .unwrap_or(false)
 }
 
+fn endpoint_is_remote_compact(endpoint: &str) -> bool {
+    let path = endpoint.split(['?', '#']).next().unwrap_or(endpoint);
+    let path = path.trim_end_matches('/');
+    path.ends_with("/responses/compact") || path.ends_with("/compact")
+}
+
 #[cfg(test)]
 fn should_force_identity_encoding(
     endpoint: &str,
@@ -4963,6 +4982,17 @@ mod tests {
         assert!(
             codex_anthropic_error_envelope_message(br#"{"type":"message","content":[]}"#).is_none()
         );
+    }
+
+    #[test]
+    fn compact_endpoint_detection_covers_query_and_v1() {
+        assert!(endpoint_is_remote_compact("/v1/responses/compact"));
+        assert!(endpoint_is_remote_compact("/responses/compact?foo=1"));
+        assert!(endpoint_is_remote_compact(
+            "https://api.example/v1/responses/compact/"
+        ));
+        assert!(!endpoint_is_remote_compact("/v1/responses"));
+        assert!(!endpoint_is_remote_compact("/v1/chat/completions"));
     }
 
     #[test]

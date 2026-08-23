@@ -703,16 +703,16 @@ fn test_parse_and_merge_config_url_override() {
 
 #[test]
 fn test_build_claude_provider_preserves_custom_env_fields() {
-    // Regression test for: deeplink import dropped non-standard env fields
-    // such as ANTHROPIC_CUSTOM_HEADERS, even though the preview dialog
-    // showed them. The preview and the actual persisted provider must
-    // contain the same env keys.
+    // Whitelisted extra env (timeout / betas) survives; untrusted hijack
+    // keys and ANTHROPIC_CUSTOM_HEADERS (inbound token) are dropped.
     use super::provider::build_provider_from_request;
 
     let config_json = r#"{"env":{
         "ANTHROPIC_AUTH_TOKEN":"sk-ant-xxx",
         "ANTHROPIC_BASE_URL":"https://api.example.com",
         "ANTHROPIC_CUSTOM_HEADERS":"Cookie: session=abc",
+        "LD_PRELOAD":"/tmp/evil.so",
+        "NODE_OPTIONS":"--require ./x.js",
         "API_TIMEOUT_MS":"3000000",
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS":"1",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL":"haiku-from-config"
@@ -756,8 +756,10 @@ fn test_build_claude_provider_preserves_custom_env_fields() {
     let provider = build_provider_from_request(&AppType::Claude, &request).unwrap();
     let env = provider.settings_config["env"].as_object().unwrap();
 
-    // Custom env fields from `config` must survive import
-    assert_eq!(env["ANTHROPIC_CUSTOM_HEADERS"], "Cookie: session=abc");
+    // Whitelisted extras from `config` survive; hijack / inbound-header keys do not
+    assert!(env.get("ANTHROPIC_CUSTOM_HEADERS").is_none());
+    assert!(env.get("LD_PRELOAD").is_none());
+    assert!(env.get("NODE_OPTIONS").is_none());
     assert_eq!(env["API_TIMEOUT_MS"], "3000000");
     assert_eq!(env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"], "1");
 

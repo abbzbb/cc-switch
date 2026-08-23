@@ -1,7 +1,7 @@
 use crate::config::{get_home_dir, write_text_file_private};
 use crate::error::AppError;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -222,19 +222,45 @@ pub fn write_gemini_env_atomic(map: &HashMap<String, String>) -> Result<(), AppE
     write_gemini_env_text_atomic(&content)
 }
 
+fn is_gemini_managed_env_key(key: &str) -> bool {
+    matches!(
+        key,
+        "GEMINI_API_KEY"
+            | "GOOGLE_GEMINI_BASE_URL"
+            | "GEMINI_BASE_URL"
+            | "GEMINI_MODEL"
+            | "GOOGLE_GEMINI_API_KEY"
+            | "GOOGLE_API_KEY"
+            | "GOOGLE_CLOUD_PROJECT"
+            | "GEMINI_API_BASE"
+    )
+}
+
 fn upsert_env_entries_preserving_layout(
     existing: &str,
     updates: &HashMap<String, String>,
 ) -> String {
     let mut remaining = updates.clone();
+    let mut rewritten: HashSet<String> = HashSet::new();
     let mut lines: Vec<String> = Vec::new();
     for line in existing.lines() {
         let trimmed = line.trim();
         if !trimmed.is_empty() && !trimmed.starts_with('#') {
             if let Some((key, _)) = trimmed.split_once('=') {
                 let key = key.trim();
-                if let Some(value) = remaining.remove(key) {
-                    lines.push(format!("{key}={value}"));
+                if let Some(value) = updates.get(key) {
+                    // Rewrite every occurrence of an updated key so last-wins
+                    // parsers cannot keep a leftover secret. Emit the new value
+                    // once and drop later duplicates of the same key.
+                    if rewritten.insert(key.to_string()) {
+                        lines.push(format!("{key}={value}"));
+                        remaining.remove(key);
+                    }
+                    continue;
+                }
+                if is_gemini_managed_env_key(key) {
+                    // Drop managed keys that are not in this write (OAuth official
+                    // and provider switches must not leave the previous secret).
                     continue;
                 }
             }
@@ -667,6 +693,37 @@ GEMINI_API_KEY=sk-test123";
         assert!(next.contains("GEMINI_API_KEY=new"));
         assert!(next.contains("GOOGLE_CLOUD_PROJECT=proj"));
         assert!(!next.contains("GEMINI_API_KEY=old"));
+    }
+
+    #[test]
+    fn upsert_env_empty_updates_strips_managed_keys() {
+        let existing = "# keep me\nUSER_CUSTOM=hello\nGEMINI_API_KEY=old-secret\nGOOGLE_CLOUD_PROJECT=proj\nGEMINI_MODEL=gemini-3.5-flash\n";
+        let next = upsert_env_entries_preserving_layout(existing, &HashMap::new());
+        assert!(next.contains("# keep me"));
+        assert!(next.contains("USER_CUSTOM=hello"));
+        assert!(
+            !next.contains("GEMINI_API_KEY"),
+            "OAuth official writes must drop leftover API keys: {next}"
+        );
+        assert!(!next.contains("GOOGLE_CLOUD_PROJECT"));
+        assert!(!next.contains("GEMINI_MODEL"));
+    }
+
+    #[test]
+    fn upsert_env_rewrites_duplicate_managed_keys() {
+        let existing = "GEMINI_API_KEY=old-first\nUSER_CUSTOM=keep\nGEMINI_API_KEY=old-second\n";
+        let mut updates = HashMap::new();
+        updates.insert("GEMINI_API_KEY".to_string(), "new-secret".to_string());
+        let next = upsert_env_entries_preserving_layout(existing, &updates);
+        assert!(next.contains("USER_CUSTOM=keep"));
+        assert!(next.contains("GEMINI_API_KEY=new-secret"));
+        assert!(!next.contains("old-first"));
+        assert!(!next.contains("old-second"));
+        assert_eq!(
+            next.matches("GEMINI_API_KEY=").count(),
+            1,
+            "duplicate managed keys must collapse to a single rewritten line: {next}"
+        );
     }
 
     #[test]

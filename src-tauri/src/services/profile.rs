@@ -362,6 +362,7 @@ impl ProfileService {
 
         for app in scope.apps().iter() {
             let app_str = app.as_str();
+            let mut skip_follow_on = false;
 
             // 1. 切换项目前无条件关闭当前应用的代理接管。
             // 接管态下 live 文件属于代理；用户希望切换工作目录时总是退出当前
@@ -386,6 +387,7 @@ impl ProfileService {
                             Ok(result) => warnings.extend(result.warnings),
                             Err(e) => {
                                 provider_switch_failed = true;
+                                skip_follow_on = true;
                                 warnings.push(format!(
                                     "[{app_str}] switch provider '{target_pid}' failed: {e}"
                                 ));
@@ -393,6 +395,13 @@ impl ProfileService {
                         }
                     }
                 }
+            }
+
+            if skip_follow_on {
+                warnings.push(format!(
+                    "[{app_str}] skipped MCP/skill/prompt because provider switch failed"
+                ));
+                continue;
             }
 
             // 3. MCP diff（最小 toggle：仅动目标态≠当前态的条目；None = 该侧未拍过，不动）

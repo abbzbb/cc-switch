@@ -2719,7 +2719,8 @@
     "validation": {
       "providerRequired": "导入供应商需要指定应用类型和名称",
       "skillRepoRequired": "导入 Skill 需要指定仓库地址",
-      "promptContentRequired": "导入提示词需要提供内容"
+      "promptContentRequired": "导入提示词需要提供内容",
+      "mcpRequired": "导入 MCP 需要指定目标应用和配置"
     },
     "skillImportSuccess": "Skill 仓库添加成功",
     "skillImportSuccessDescription": "已添加仓库: {{repo}}",

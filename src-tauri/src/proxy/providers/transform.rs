@@ -691,20 +691,21 @@ pub fn openai_to_anthropic(body: Value) -> Result<Value, ProxyError> {
 
     // 工具调用（tool_calls）
     if let Some(tool_calls) = message.get("tool_calls").and_then(|t| t.as_array()) {
-        if !tool_calls.is_empty() {
-            has_tool_use = true;
-        }
         for tc in tool_calls {
             let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("");
             let empty_obj = json!({});
             let func = tc.get("function").unwrap_or(&empty_obj);
             let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            if name.trim().is_empty() {
+                continue;
+            }
             let args_str = func
                 .get("arguments")
                 .and_then(|a| a.as_str())
                 .unwrap_or("{}");
             let input: Value = serde_json::from_str(args_str).unwrap_or(json!({}));
 
+            has_tool_use = true;
             content.push(json!({
                 "type": "tool_use",
                 "id": id,

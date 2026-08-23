@@ -29,6 +29,7 @@ export interface CodexUnifyHistoryRestoreResult {
 
 export interface WebDavSyncResult {
   status: string;
+  warning?: string;
 }
 
 export const settingsApi = {

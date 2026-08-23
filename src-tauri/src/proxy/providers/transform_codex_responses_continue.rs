@@ -552,13 +552,43 @@ fn append_previous_hop_output(body: &mut Value, previous: &Value) -> bool {
 }
 
 fn output_item_as_input(mut item: Value) -> Value {
-    if let Some(object) = item.as_object_mut() {
-        if object.get("type").and_then(Value::as_str) == Some("message") {
-            object.entry("role").or_insert_with(|| json!("assistant"));
-            object.remove("status");
+    let item_type = item
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    match item_type.as_str() {
+        "message" => {
+            if let Some(object) = item.as_object_mut() {
+                object.entry("role").or_insert_with(|| json!("assistant"));
+                object.remove("status");
+                if let Some(content) = object.get_mut("content").and_then(Value::as_array_mut) {
+                    for part in content {
+                        if let Some(part) = part.as_object_mut() {
+                            if part.get("type").and_then(Value::as_str) == Some("output_text") {
+                                part.insert("type".to_string(), json!("input_text"));
+                            }
+                        }
+                    }
+                }
+            }
+            item
         }
+        "reasoning" => {
+            let id = item.get("id").cloned();
+            let summary = item.get("summary").cloned();
+            let mut next = serde_json::Map::new();
+            next.insert("type".to_string(), json!("reasoning"));
+            if let Some(id) = id {
+                next.insert("id".to_string(), id);
+            }
+            if let Some(summary) = summary {
+                next.insert("summary".to_string(), summary);
+            }
+            Value::Object(next)
+        }
+        _ => item,
     }
-    item
 }
 
 pub(crate) fn mark_response_incomplete(response: &mut Value) {
@@ -919,19 +949,19 @@ pub(crate) async fn inspect_native_responses_turn_timed(
                         ) {
                             return hop;
                         }
-                        return passthrough_buffered(status, headers, body, stream);
+                        // Hold until a terminal event so truncated SSE can still
+                        // be rewritten to `response.incomplete`, and so
+                        // `inject_dropped_tool_search` sees a Buffered body.
+                        return passthrough_inspected(status, headers, body);
                     }
                     SseBlockKind::TerminalOther => {
-                        return passthrough_buffered(status, headers, raw.freeze(), stream);
+                        return passthrough_inspected(status, headers, raw.freeze());
                     }
                     SseBlockKind::Ignore(event) => {
                         if !event.is_empty() {
                             last_event = Some(event);
                         }
                     }
-                }
-                if seen_productive || !text_is_under_hold_cap(&accumulated_text) {
-                    return passthrough_buffered(status, headers, raw.freeze(), stream);
                 }
             }
         }
@@ -1011,16 +1041,10 @@ pub(crate) async fn inspect_native_responses_turn_timed(
                     ) {
                         return hop;
                     }
-                    return InspectedTurn::Passthrough(ProxyResponse::buffered(
-                        status, headers, body,
-                    ));
+                    return passthrough_inspected(status, headers, body);
                 }
                 SseBlockKind::TerminalOther => {
-                    return InspectedTurn::Passthrough(ProxyResponse::buffered(
-                        status,
-                        headers,
-                        raw.freeze(),
-                    ));
+                    return passthrough_inspected(status, headers, raw.freeze());
                 }
                 SseBlockKind::Ignore(_) => {}
             }
@@ -1045,7 +1069,19 @@ pub(crate) async fn inspect_native_responses_turn_timed(
     }
 
     if eof_is_productive(seen_productive, &seen_items, &accumulated_text) {
-        return InspectedTurn::Passthrough(ProxyResponse::buffered(status, headers, raw.freeze()));
+        // Real output without `response.completed` is a truncated stream, not a
+        // finished turn. Retry once then rewrite incomplete — never tell Codex
+        // the hop completed.
+        let leftover = leftover_snapshot(&parse_buffer, &utf8_remainder, last_event.clone());
+        return InspectedTurn::StreamBroken {
+            status,
+            headers,
+            body: raw.freeze(),
+            is_sse: saw_sse || declared_sse,
+            error: "missing terminal after productive output".to_string(),
+            leftover_event: leftover.0,
+            leftover_bytes: leftover.1,
+        };
     }
 
     let completed = stub_response(last_response, &seen_items);
@@ -1349,6 +1385,14 @@ fn classify_json_turn(
             reason,
         };
     }
+    InspectedTurn::Passthrough(ProxyResponse::buffered(status, headers, body))
+}
+
+fn passthrough_inspected(
+    status: http::StatusCode,
+    headers: http::HeaderMap,
+    body: Bytes,
+) -> InspectedTurn {
     InspectedTurn::Passthrough(ProxyResponse::buffered(status, headers, body))
 }
 
@@ -1941,7 +1985,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inspect_short_real_answer_eof_without_completed_is_passthrough() {
+    async fn inspect_short_real_answer_eof_without_completed_is_stream_broken() {
         let sse = concat!(
             "event: response.output_text.delta\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n"
@@ -1951,10 +1995,69 @@ mod tests {
             sse_headers(),
             stream::iter([Ok(Bytes::from(sse))]),
         );
-        assert!(matches!(
-            inspect_native_responses_turn(response).await,
-            InspectedTurn::Passthrough(_)
-        ));
+        match inspect_native_responses_turn(response).await {
+            InspectedTurn::StreamBroken { error, .. } => {
+                assert!(error.contains("missing terminal"));
+            }
+            InspectedTurn::Passthrough(_) => {
+                panic!("productive eof without completed must retry, not passthrough")
+            }
+            InspectedTurn::ReasoningOnly { .. } => {
+                panic!("real answer is not an empty hop")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn inspect_long_answer_does_not_passthrough_before_completed() {
+        let long = "A".repeat(120);
+        let sse = format!(
+            "event: response.output_text.delta\ndata: {{\"type\":\"response.output_text.delta\",\"delta\":\"{long}\"}}\n\n"
+        );
+        let response = ProxyResponse::streamed(
+            StatusCode::OK,
+            sse_headers(),
+            stream::iter([Ok(Bytes::from(sse))]),
+        );
+        match inspect_native_responses_turn(response).await {
+            InspectedTurn::StreamBroken { error, .. } => {
+                assert!(error.contains("missing terminal"));
+            }
+            InspectedTurn::Passthrough(_) => {
+                panic!("text over 80 chars must not flush before a terminal event")
+            }
+            InspectedTurn::ReasoningOnly { .. } => {
+                panic!("long real answer is not an empty hop")
+            }
+        }
+    }
+
+    #[test]
+    fn continue_input_converts_output_text_and_strips_reasoning_extras() {
+        let mut body = json!({ "input": [] });
+        let previous = json!({
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "hi"}]
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [],
+                    "encrypted_content": "secret"
+                }
+            ]
+        });
+        append_previous_hop_output(&mut body, &previous);
+        let input = body["input"].as_array().expect("input array");
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert!(input[0].get("status").is_none());
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[1]["id"], "rs_1");
+        assert!(input[1].get("encrypted_content").is_none());
     }
 
     #[tokio::test]

@@ -1265,7 +1265,13 @@ fn remove_cc_switch_enterprise_config(path: &Path) -> Result<(), AppError> {
 }
 
 fn write_meta(path: &Path, applied_profile_id: Option<&str>) -> Result<(), AppError> {
-    let mut value = read_json_or_empty(path)?;
+    // `_meta.json` is recovered rather than fail-closed: a leftover array or
+    // truncated file must not block writing the CC Switch profile entry.
+    let mut value = match read_json_file(path) {
+        Ok(value) => value,
+        Err(_) if !path.exists() => json!({}),
+        Err(_) => json!({}),
+    };
     if !value.is_object() {
         value = json!({});
     }

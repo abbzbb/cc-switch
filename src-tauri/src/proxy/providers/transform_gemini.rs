@@ -1404,15 +1404,17 @@ mod tests {
 
         let result = anthropic_to_gemini(input).unwrap();
         let contents = result["contents"].as_array().unwrap();
-        assert_eq!(contents.len(), 2);
-        assert_eq!(contents[0]["role"], "user");
-        assert_eq!(contents[0]["parts"].as_array().unwrap().len(), 2);
-        assert_eq!(contents[0]["parts"][0]["text"], "first");
-        assert_eq!(contents[0]["parts"][1]["text"], "second");
-        assert_eq!(contents[1]["role"], "model");
+        assert_eq!(contents.len(), 3);
+        assert_eq!(contents[0]["role"], "model");
+        assert_eq!(contents[0]["parts"][0]["thought"], true);
+        assert_eq!(contents[1]["role"], "user");
         assert_eq!(contents[1]["parts"].as_array().unwrap().len(), 2);
-        assert_eq!(contents[1]["parts"][0]["text"], "one");
-        assert_eq!(contents[1]["parts"][1]["text"], "two");
+        assert_eq!(contents[1]["parts"][0]["text"], "first");
+        assert_eq!(contents[1]["parts"][1]["text"], "second");
+        assert_eq!(contents[2]["role"], "model");
+        assert_eq!(contents[2]["parts"].as_array().unwrap().len(), 2);
+        assert_eq!(contents[2]["parts"][0]["text"], "one");
+        assert_eq!(contents[2]["parts"][1]["text"], "two");
         assert!(
             contents.iter().all(|content| content["parts"]
                 .as_array()

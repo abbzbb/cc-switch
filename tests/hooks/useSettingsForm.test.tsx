@@ -287,6 +287,55 @@ describe("useSettingsForm Hook", () => {
     expect(result.current.settings?.language).toBe("zh");
   });
 
+  it("keeps dirty directory edits when only WebDAV/S3 sync credentials change", async () => {
+    const baseData = {
+      showInTray: true,
+      minimizeToTrayOnClose: true,
+      enableClaudePluginIntegration: false,
+      claudeConfigDir: "/origin",
+      language: "zh" as const,
+      webdavSync: {
+        enabled: true,
+        baseUrl: "https://dav.example.com/dav/",
+        username: "alice",
+      },
+    };
+    useSettingsQueryMock.mockReturnValue({
+      data: baseData,
+      isLoading: false,
+    });
+
+    const { result, rerender } = renderHook(() => useSettingsForm());
+
+    await waitFor(() => {
+      expect(result.current.settings).not.toBeNull();
+    });
+
+    act(() => {
+      result.current.updateSettings({ claudeConfigDir: "/edited" });
+    });
+    expect(result.current.settings?.claudeConfigDir).toBe("/edited");
+
+    useSettingsQueryMock.mockReturnValue({
+      data: {
+        ...baseData,
+        webdavSync: {
+          enabled: true,
+          baseUrl: "https://dav.example.com/dav/",
+          username: "bob",
+        },
+      },
+      isLoading: false,
+    });
+    rerender();
+
+    await waitFor(() => {
+      expect(result.current.settings?.webdavSync?.username).toBe("bob");
+    });
+    expect(result.current.settings?.claudeConfigDir).toBe("/edited");
+    expect(result.current.settings?.language).toBe("zh");
+  });
+
   it("replaces dirty local state when non-status server fields change", async () => {
     useSettingsQueryMock.mockReturnValue({
       data: {
