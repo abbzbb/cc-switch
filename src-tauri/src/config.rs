@@ -563,16 +563,26 @@ fn atomic_write_with_unix_mode(
 
 #[cfg(windows)]
 fn create_wsl_private_temp(path: &Path) -> std::io::Result<fs::File> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
     const ALREADY_EXISTS_EXIT_CODE: i32 = 73;
-    const CREATE_SCRIPT: &str =
-        "if [ -e \"$1\" ] || [ -L \"$1\" ]; then exit 73; fi\numask 077\nset -C\n: > \"$1\"";
+    const CREATE_SCRIPT: &str = "path=$(printf '%s' \"$1\" | base64 -d) || exit 74
+[ -n \"$path\" ] || exit 74
+if [ -e \"$path\" ] || [ -L \"$path\" ]; then exit 73; fi
+umask 077
+set -C
+: > \"$path\"";
+    const REMOVE_SCRIPT: &str = "path=$(printf '%s' \"$1\" | base64 -d) || exit 74
+[ -n \"$path\" ] || exit 74
+rm -f -- \"$path\"";
 
     let (distro, linux_path) = wsl_private_path_target(path)?;
+    let encoded_path = STANDARD.encode(linux_path.as_bytes());
     let output = std::process::Command::new("wsl.exe")
         .arg("-d")
         .arg(&distro)
         .args(["--", "sh", "-c", CREATE_SCRIPT, "cc-switch-private-temp"])
-        .arg(&linux_path)
+        .arg(&encoded_path)
         .output()?;
     if !output.status.success() {
         let message = format!(
@@ -595,8 +605,14 @@ fn create_wsl_private_temp(path: &Path) -> std::io::Result<fs::File> {
             let _ = std::process::Command::new("wsl.exe")
                 .arg("-d")
                 .arg(&distro)
-                .args(["--", "rm", "-f", "--"])
-                .arg(&linux_path)
+                .args([
+                    "--",
+                    "sh",
+                    "-c",
+                    REMOVE_SCRIPT,
+                    "cc-switch-private-temp-cleanup",
+                ])
+                .arg(&encoded_path)
                 .status();
             Err(source)
         }
