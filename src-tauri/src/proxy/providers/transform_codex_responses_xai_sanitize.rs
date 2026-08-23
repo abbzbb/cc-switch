@@ -23,7 +23,7 @@
 
 use std::collections::HashSet;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// Codex plugin-private fields removed recursively at any nesting depth.
 const RECURSIVE_UNSUPPORTED_FIELDS: &[&str] = &["external_web_access"];
@@ -57,6 +57,97 @@ const XAI_SUPPORTED_TOOL_TYPES: &[&str] = &[
     "mcp",
     "shell",
 ];
+
+pub(crate) fn request_contains_tool_search(body: &Value) -> bool {
+    body.get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                tool.get("type").and_then(Value::as_str) == Some("tool_search")
+            })
+        })
+}
+
+fn output_has_tool_search_call(value: &Value) -> bool {
+    let output = value
+        .get("output")
+        .or_else(|| value.get("response").and_then(|response| response.get("output")));
+    output
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("type").and_then(Value::as_str) == Some("tool_search_call")
+            })
+        })
+}
+
+fn empty_tool_search_call() -> Value {
+    json!({
+        "type": "tool_search_call",
+        "id": "tsc_ccs_placeholder",
+        "status": "completed"
+    })
+}
+
+pub(crate) fn inject_empty_tool_search_json(body: &mut Value) -> bool {
+    if output_has_tool_search_call(body) {
+        return false;
+    }
+    let item = empty_tool_search_call();
+    if let Some(output) = body.get_mut("output").and_then(Value::as_array_mut) {
+        output.push(item);
+        return true;
+    }
+    if let Some(output) = body
+        .get_mut("response")
+        .and_then(|response| response.get_mut("output"))
+        .and_then(Value::as_array_mut)
+    {
+        output.push(item);
+        return true;
+    }
+    if let Some(object) = body.as_object_mut() {
+        object.insert("output".to_string(), json!([item]));
+        return true;
+    }
+    false
+}
+
+pub(crate) fn inject_empty_tool_search_sse(sse: &str) -> String {
+    if sse.contains("tool_search_call") {
+        return sse.to_string();
+    }
+    let item = empty_tool_search_call();
+    let added = format!(
+        "event: response.output_item.added\ndata: {}\n\n",
+        serde_json::to_string(&json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": item
+        }))
+        .unwrap_or_default()
+    );
+    let done = format!(
+        "event: response.output_item.done\ndata: {}\n\n",
+        serde_json::to_string(&json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": item
+        }))
+        .unwrap_or_default()
+    );
+    let injected = format!("{added}{done}");
+    for marker in ["event: response.completed", "event: response.incomplete"] {
+        if let Some(index) = sse.find(marker) {
+            let mut out = String::with_capacity(sse.len() + injected.len());
+            out.push_str(&sse[..index]);
+            out.push_str(&injected);
+            out.push_str(&sse[index..]);
+            return out;
+        }
+    }
+    format!("{sse}{injected}")
+}
 
 /// Strip xAI-unsupported fields and tools from a native Codex Responses request
 /// body in place. Returns whether anything changed. Deterministic and
@@ -535,5 +626,26 @@ mod tests {
         assert!(sanitize_xai_responses_request(&mut body));
         // second pass finds nothing left to change
         assert!(!sanitize_xai_responses_request(&mut body));
+    }
+
+    #[test]
+    fn injects_placeholder_tool_search_call_when_missing() {
+        assert!(request_contains_tool_search(&json!({
+            "tools": [{"type": "tool_search"}]
+        })));
+        let mut body = json!({ "output": [{"type": "message"}] });
+        assert!(inject_empty_tool_search_json(&mut body));
+        assert_eq!(body["output"][1]["type"], "tool_search_call");
+        assert!(!inject_empty_tool_search_json(&mut body));
+
+        let sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\"}\n\n"
+        );
+        let rewritten = inject_empty_tool_search_sse(sse);
+        assert!(rewritten.contains("tool_search_call"));
+        assert!(rewritten.find("tool_search_call").unwrap() < rewritten.find("response.completed").unwrap());
     }
 }

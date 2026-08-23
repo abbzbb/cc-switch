@@ -503,6 +503,44 @@ pub(crate) async fn put_object_conditional(
     Err(map_put_status(resp.status(), &url_str))
 }
 
+/// Best-effort DELETE. Missing objects (404) are treated as success so a
+/// partial-upload rollback can always run.
+pub(crate) async fn delete_object(creds: &S3Credentials, key: &str) -> Result<(), AppError> {
+    let url_str = build_object_url(creds, key);
+    let url = Url::parse(&url_str).map_err(|e| {
+        AppError::localized(
+            "s3.url.invalid",
+            format!("S3 URL 无效: {e}"),
+            format!("Invalid S3 URL: {e}"),
+        )
+    })?;
+
+    let client = http_client::get();
+    let body_hash = sha256_hex(b"");
+    let mut headers = reqwest::header::HeaderMap::new();
+    sign_request(
+        "DELETE",
+        &url,
+        &mut headers,
+        &body_hash,
+        creds,
+        chrono::Utc::now(),
+    );
+
+    let resp = client
+        .delete(url.as_str())
+        .headers(headers)
+        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+        .send()
+        .await
+        .map_err(|e| s3_transport_error("s3.delete_failed", "DELETE 请求", "DELETE request", &e))?;
+
+    if resp.status().is_success() || resp.status() == StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+    Err(s3_status_error("DELETE", resp.status(), &url_str))
+}
+
 /// Download an S3 object. Returns `None` if the object does not exist (404).
 ///
 /// On success returns `(body_bytes, optional_etag)`.

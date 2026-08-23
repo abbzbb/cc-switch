@@ -443,6 +443,7 @@ fn convert_messages_to_contents(
 
         let gemini_role = if role == "assistant" { "model" } else { "user" };
 
+        let mut shadow_index = None;
         let parts = if role == "assistant" {
             let positional_shadow_index = assistant_seen_index
                 .checked_sub(shadow_start_index)
@@ -454,7 +455,8 @@ fn convert_messages_to_contents(
             )
             .filter(|index| !used_shadow_indices.contains(index));
             assistant_seen_index += 1;
-            let shadow_index = tool_use_match_index.or(positional_shadow_index);
+            shadow_index = tool_use_match_index.or(positional_shadow_index);
+            let shadow_index = shadow_index;
 
             if let Some(index) = shadow_index {
                 used_shadow_indices.insert(index);
@@ -495,8 +497,19 @@ fn convert_messages_to_contents(
             merge_tool_names_from_parts(&parts, &mut tool_name_by_id);
         }
 
-        // Gemini generateContent 400s on empty `parts` (e.g. thinking-only
-        // turns skipped above) and on consecutive same-role contents.
+        // Gemini generateContent 400s on empty `parts`. Thinking-only Anthropic
+        // turns used to be dropped entirely; keep a thoughtSignature placeholder
+        // so later functionResponse turns stay aligned.
+        let mut parts = parts;
+        if parts.is_empty() && role == "assistant" {
+            if let Some(index) = shadow_index {
+                if let Some(placeholder) =
+                    thought_placeholder_from_shadow(&effective_shadow_turns[index])
+                {
+                    parts = vec![placeholder];
+                }
+            }
+        }
         if parts.is_empty() {
             continue;
         }
@@ -631,6 +644,19 @@ fn convert_message_content_to_parts(
                 if let Some(text) = block.get("text").and_then(|value| value.as_str()) {
                     parts.push(json!({ "text": text }));
                 }
+            }
+            "thinking" | "redacted_thinking" => {
+                let mut part = json!({ "thought": true });
+                if let Some(sig) = block
+                    .get("thoughtSignature")
+                    .or_else(|| block.get("thought_signature"))
+                    .cloned()
+                {
+                    part["thoughtSignature"] = sig;
+                } else if let Some(sig) = thought_signature_by_id.get("") {
+                    part["thoughtSignature"] = json!(sig);
+                }
+                parts.push(part);
             }
             "image" => {
                 let source = block.get("source").ok_or_else(|| {
@@ -774,7 +800,6 @@ fn convert_message_content_to_parts(
                     }
                 }
             }
-            "thinking" | "redacted_thinking" => {}
             _ => {}
         }
     }
@@ -1107,6 +1132,27 @@ fn build_thought_signature_map_from_shadow_turns(
         merge_thought_signatures_from_shadow(turn, &mut thought_signature_by_id);
     }
     thought_signature_by_id
+}
+
+fn thought_placeholder_from_shadow(turn: &GeminiAssistantTurn) -> Option<Value> {
+    let parts = shadow_parts(&turn.assistant_content)?;
+    for part in parts {
+        if part.get("thought").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        if let Some(sig) = part
+            .get("thoughtSignature")
+            .or_else(|| part.get("thought_signature"))
+            .cloned()
+        {
+            return Some(json!({
+                "thought": true,
+                "thoughtSignature": sig
+            }));
+        }
+        return Some(json!({ "thought": true }));
+    }
+    None
 }
 
 fn merge_thought_signatures_from_shadow(

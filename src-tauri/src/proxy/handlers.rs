@@ -35,8 +35,8 @@ use super::{
             create_anthropic_sse_stream_from_responses_with_web_search_options,
         },
         transform, transform_codex_anthropic, transform_codex_chat,
-        transform_codex_responses_continue, transform_codex_responses_namespace, transform_gemini,
-        transform_responses,
+        transform_codex_responses_continue, transform_codex_responses_namespace,
+        transform_codex_responses_xai_sanitize, transform_gemini, transform_responses,
     },
     response_processor::{
         create_logged_passthrough_stream, create_usage_collector, process_response,
@@ -1059,6 +1059,8 @@ async fn handle_responses_for_app(
     // {namespace, name} map used to restore the native Responses upstream's
     // function-call names (see the namespace-restore dispatch below).
     let namespace_restore_map = transform_codex_responses_namespace::namespace_restore_map(&body);
+    let had_tool_search =
+        transform_codex_responses_xai_sanitize::request_contains_tool_search(&body);
 
     let mut request_body = body;
     let request_headers = headers;
@@ -1173,7 +1175,12 @@ async fn handle_responses_for_app(
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
-    let response = result.response;
+    let mut response = result.response;
+    if had_tool_search
+        && super::providers::provider_needs_responses_namespace_flatten(&ctx.provider)
+    {
+        response = inject_dropped_tool_search(response);
+    }
 
     // Native Responses passthrough to a strict gateway (xAI): the request-side
     // flatten (in the forwarder) turned Codex `namespace` tools into flat
@@ -1203,11 +1210,63 @@ async fn handle_responses_for_app(
     .await
 }
 
+fn inject_dropped_tool_search(
+    response: super::hyper_client::ProxyResponse,
+) -> super::hyper_client::ProxyResponse {
+    let super::hyper_client::ProxyResponse::Buffered {
+        status,
+        mut headers,
+        body,
+    } = response
+    else {
+        return response;
+    };
+    headers.remove(http::header::CONTENT_LENGTH);
+    if response_is_sse(&headers) {
+        let sse = String::from_utf8_lossy(&body);
+        let rewritten =
+            transform_codex_responses_xai_sanitize::inject_empty_tool_search_sse(&sse);
+        return super::hyper_client::ProxyResponse::buffered(
+            status,
+            headers,
+            Bytes::from(rewritten),
+        );
+    }
+    match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(mut value) => {
+            transform_codex_responses_xai_sanitize::inject_empty_tool_search_json(&mut value);
+            let encoded = serde_json::to_vec(&value).unwrap_or_else(|_| body.to_vec());
+            super::hyper_client::ProxyResponse::buffered(status, headers, Bytes::from(encoded))
+        }
+        Err(_) => super::hyper_client::ProxyResponse::buffered(status, headers, body),
+    }
+}
+
+fn response_is_sse(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("text/event-stream"))
+}
+
 /// Grok/xAI native Responses: empty hops (reasoning-only, missing
 /// `response.completed`, zero usage, short progress-only text) retry the same
 /// card with a developer nudge. A mid-inspect decode/truncation retries the
 /// current request once. Still empty/broken → rewrite to `response.incomplete`
 /// so Codex does not finish the turn or see a 502 (abbzbb#14, abbzbb#16).
+fn deferred_circuit_args(
+    result: &ForwardResult,
+) -> Option<(crate::provider::Provider, bool, http::HeaderMap)> {
+    if !result.defer_circuit_success {
+        return None;
+    }
+    Some((
+        result.provider.clone(),
+        result.used_half_open_permit,
+        result.response.headers().clone(),
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn apply_xai_reasoning_continue(
     forwarder: &RequestForwarder,
@@ -1250,6 +1309,17 @@ async fn apply_xai_reasoning_continue(
         match inspected {
             transform_codex_responses_continue::InspectedTurn::Passthrough(response) => {
                 result.response = response;
+                if let Some((provider, used, headers)) = deferred_circuit_args(&result) {
+                    forwarder
+                        .confirm_deferred_circuit_outcome(
+                            &provider,
+                            ctx.app_type_str,
+                            used,
+                            true,
+                            Some(&headers),
+                        )
+                        .await;
+                }
                 return Ok(result);
             }
             transform_codex_responses_continue::InspectedTurn::StreamBroken {
@@ -1279,6 +1349,17 @@ async fn apply_xai_reasoning_continue(
                                 body,
                                 is_sse,
                             );
+                        if let Some((provider, used, headers)) = deferred_circuit_args(&result) {
+                            forwarder
+                                .confirm_deferred_circuit_outcome(
+                                    &provider,
+                                    ctx.app_type_str,
+                                    used,
+                                    false,
+                                    Some(&headers),
+                                )
+                                .await;
+                        }
                         return Ok(result);
                     }
                     transform_codex_responses_continue::SameCardFollowup::ContinueEmpty => {
@@ -1293,6 +1374,17 @@ async fn apply_xai_reasoning_continue(
                                 body,
                                 is_sse,
                             );
+                        if let Some((provider, used, headers)) = deferred_circuit_args(&result) {
+                            forwarder
+                                .confirm_deferred_circuit_outcome(
+                                    &provider,
+                                    ctx.app_type_str,
+                                    used,
+                                    false,
+                                    Some(&headers),
+                                )
+                                .await;
+                        }
                         return Ok(result);
                     }
                 }
@@ -1337,6 +1429,17 @@ async fn apply_xai_reasoning_continue(
                             body,
                             is_sse,
                         );
+                        if let Some((provider, used, headers)) = deferred_circuit_args(&result) {
+                            forwarder
+                                .confirm_deferred_circuit_outcome(
+                                    &provider,
+                                    ctx.app_type_str,
+                                    used,
+                                    false,
+                                    Some(&headers),
+                                )
+                                .await;
+                        }
                         return Ok(result);
                     }
                 }
@@ -1368,6 +1471,17 @@ async fn apply_xai_reasoning_continue(
                             is_sse,
                             Some(&completed_response),
                         );
+                        if let Some((provider, used, headers)) = deferred_circuit_args(&result) {
+                            forwarder
+                                .confirm_deferred_circuit_outcome(
+                                    &provider,
+                                    ctx.app_type_str,
+                                    used,
+                                    false,
+                                    Some(&headers),
+                                )
+                                .await;
+                        }
                         return Ok(result);
                     }
                     transform_codex_responses_continue::SameCardFollowup::RetryOriginal => {
@@ -1382,6 +1496,17 @@ async fn apply_xai_reasoning_continue(
                             is_sse,
                             Some(&completed_response),
                         );
+                        if let Some((provider, used, headers)) = deferred_circuit_args(&result) {
+                            forwarder
+                                .confirm_deferred_circuit_outcome(
+                                    &provider,
+                                    ctx.app_type_str,
+                                    used,
+                                    false,
+                                    Some(&headers),
+                                )
+                                .await;
+                        }
                         return Ok(result);
                     }
                 }
@@ -1457,6 +1582,17 @@ async fn apply_xai_reasoning_continue(
                             is_sse,
                             Some(&completed_response),
                         );
+                        if let Some((provider, used, headers)) = deferred_circuit_args(&result) {
+                            forwarder
+                                .confirm_deferred_circuit_outcome(
+                                    &provider,
+                                    ctx.app_type_str,
+                                    used,
+                                    false,
+                                    Some(&headers),
+                                )
+                                .await;
+                        }
                         return Ok(result);
                     }
                 }

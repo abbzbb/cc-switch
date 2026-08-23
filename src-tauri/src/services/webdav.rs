@@ -344,6 +344,25 @@ pub async fn put_bytes(
     Err(map_put_status(resp.status(), url))
 }
 
+/// Best-effort DELETE. Missing objects (404) are treated as success.
+pub async fn delete_bytes(url: &str, auth: &WebDavAuth) -> Result<(), AppError> {
+    let client = http_client::get();
+    let resp = apply_auth(
+        client
+            .delete(url)
+            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
+        auth,
+    )
+    .send()
+    .await
+    .map_err(|e| webdav_transport_error("webdav.delete_failed", "DELETE 请求", "DELETE request", url, &e))?;
+
+    if resp.status().is_success() || resp.status() == StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+    Err(webdav_status_error("DELETE", resp.status(), url))
+}
+
 /// GET bytes from a remote WebDAV URL. Returns `None` on 404.
 ///
 /// On success returns `(body_bytes, optional_etag)`.

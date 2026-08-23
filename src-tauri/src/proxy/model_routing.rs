@@ -1382,7 +1382,9 @@ pub fn provider_rejects_remote_compact(provider: &Provider) -> bool {
 /// next Codex process (and any helper that rereads the file) stops calling
 /// Official. Official ids are never persisted here.
 pub fn persist_third_party_live_codex_model(model: &str) {
-    crate::codex_config::with_live_codex_toml_lock(|| {
+    // Takeover-owned live files must keep the catalog pointer / official model.
+    // Skip when a switch already holds the toml lock; the next request retries.
+    let Some(()) = crate::codex_config::try_with_live_codex_toml_lock(|| {
         let Some(next) = live_codex_model_persist_update(model) else {
             return;
         };
@@ -1390,7 +1392,10 @@ pub fn persist_third_party_live_codex_model(model: &str) {
             Ok(()) => log::info!("[Codex] persisted live model = {model}"),
             Err(error) => log::warn!("[Codex] failed to persist live model {model}: {error}"),
         }
-    });
+    }) else {
+        log::debug!("[Codex] skip live model persist; config.toml lock busy");
+        return;
+    };
 }
 
 pub fn current_live_codex_model() -> Option<String> {
@@ -1406,6 +1411,9 @@ fn live_codex_model_persist_update(model: &str) -> Option<String> {
     }
     let config = crate::codex_config::read_codex_config_text().ok()?;
     if config.trim().is_empty() {
+        return None;
+    }
+    if config.contains(crate::codex_config::CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME) {
         return None;
     }
     if extract_toml_string_field(&config, "model").as_deref() == Some(trimmed) {

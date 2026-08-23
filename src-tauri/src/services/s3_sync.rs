@@ -112,23 +112,32 @@ async fn upload_snapshot(
     .await?;
 
     let skills_key = s3_key(settings, REMOTE_SKILLS_ZIP);
-    put_object_for_snapshot(
+    if let Err(error) = put_object_for_snapshot(
         &creds,
         &skills_key,
         snapshot.skills_zip,
         "application/zip",
         conditional,
     )
-    .await?;
+    .await
+    {
+        let _ = s3::delete_object(&creds, &db_key).await;
+        return Err(error);
+    }
 
-    s3::put_object_conditional(
+    if let Err(error) = s3::put_object_conditional(
         &creds,
         &manifest_key,
         snapshot.manifest_bytes,
         "application/json",
         manifest_precondition,
     )
-    .await?;
+    .await
+    {
+        let _ = s3::delete_object(&creds, &skills_key).await;
+        let _ = s3::delete_object(&creds, &db_key).await;
+        return Err(error);
+    }
 
     // Fetch etag (best-effort, don't fail the upload)
     let etag = match s3::head_object(&creds, &manifest_key).await {

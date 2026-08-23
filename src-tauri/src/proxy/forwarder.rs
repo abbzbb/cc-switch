@@ -97,6 +97,10 @@ pub struct ForwardResult {
     /// 活跃连接 RAII guard：随响应一起流转到 response_processor / handle_claude_transform，
     /// 最终被 move 进流式 body future（或非流式响应作用域），覆盖整个响应生命周期。
     pub(crate) connection_guard: Option<ActiveConnectionGuard>,
+    /// Native xAI Responses inspect happens after HTTP 200. Delay circuit
+    /// success until the hop is actually productive.
+    pub(crate) defer_circuit_success: bool,
+    pub(crate) used_half_open_permit: bool,
 }
 
 pub struct ForwardError {
@@ -514,6 +518,44 @@ impl RequestForwarder {
         })
     }
 
+    fn should_defer_xai_circuit_success(
+        &self,
+        app_type: &AppType,
+        provider: &Provider,
+        endpoint: &str,
+    ) -> bool {
+        matches!(app_type, AppType::Codex | AppType::GrokBuild)
+            && super::providers::provider_is_xai_prompt_cache_upstream(provider)
+            && !super::providers::should_convert_codex_responses_to_chat(provider, endpoint)
+            && !super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint)
+    }
+
+    pub(crate) async fn confirm_deferred_circuit_outcome(
+        &self,
+        provider: &Provider,
+        app_type_str: &str,
+        used_half_open_permit: bool,
+        success: bool,
+        response_headers: Option<&http::HeaderMap>,
+    ) {
+        if success {
+            self.note_attempt_success(
+                provider,
+                app_type_str,
+                used_half_open_permit,
+                response_headers,
+            )
+            .await;
+            return;
+        }
+        if used_half_open_permit {
+            let _ = self
+                .router
+                .record_result(&provider.id, app_type_str, true, false, None)
+                .await;
+        }
+    }
+
     async fn note_attempt_success(
         &self,
         provider: &Provider,
@@ -823,15 +865,19 @@ impl RequestForwarder {
                 .await
             {
                 Ok((response, claude_api_format, outbound_model)) => {
-                    // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；
-                    // HalfOpen 探测仍同步等待，保证 permit 与熔断状态及时释放。
-                    self.note_attempt_success(
-                        provider,
-                        app_type_str,
-                        used_half_open_permit,
-                        Some(response.headers()),
-                    )
-                    .await;
+                    let defer_circuit_success =
+                        self.should_defer_xai_circuit_success(app_type, provider, endpoint);
+                    if !defer_circuit_success {
+                        // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；
+                        // HalfOpen 探测仍同步等待，保证 permit 与熔断状态及时释放。
+                        self.note_attempt_success(
+                            provider,
+                            app_type_str,
+                            used_half_open_permit,
+                            Some(response.headers()),
+                        )
+                        .await;
+                    }
 
                     return Ok(ForwardResult {
                         response,
@@ -839,6 +885,8 @@ impl RequestForwarder {
                         claude_api_format,
                         outbound_model,
                         connection_guard: None,
+                        defer_circuit_success,
+                        used_half_open_permit,
                     });
                 }
                 Err(e) => {
@@ -906,6 +954,8 @@ impl RequestForwarder {
                                         claude_api_format,
                                         outbound_model,
                                         connection_guard: None,
+                                        defer_circuit_success: false,
+                                        used_half_open_permit,
                                     });
                                 }
                                 Err(retry_err) => {
@@ -1014,6 +1064,8 @@ impl RequestForwarder {
                                             claude_api_format,
                                             outbound_model,
                                             connection_guard: None,
+                                            defer_circuit_success: false,
+                                            used_half_open_permit,
                                         });
                                     }
                                     Err(retry_err) => {
@@ -1139,6 +1191,8 @@ impl RequestForwarder {
                                         claude_api_format,
                                         outbound_model,
                                         connection_guard: None,
+                                        defer_circuit_success: false,
+                                        used_half_open_permit,
                                     });
                                 }
                                 Err(retry_err) => {

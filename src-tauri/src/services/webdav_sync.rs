@@ -10,9 +10,9 @@ use serde_json::Value;
 
 use crate::error::AppError;
 use crate::services::webdav::{
-    auth_from_credentials, build_remote_url, ensure_remote_directories, get_bytes, head_etag,
-    head_object_state, path_segments, put_bytes, test_connection, HeadState, PutPrecondition,
-    WebDavAuth,
+    auth_from_credentials, build_remote_url, delete_bytes, ensure_remote_directories, get_bytes,
+    head_etag, head_object_state, path_segments, put_bytes, test_connection, HeadState,
+    PutPrecondition, WebDavAuth,
 };
 use crate::settings::{update_webdav_sync_status, WebDavSyncSettings, WebDavSyncStatus};
 
@@ -148,23 +148,32 @@ async fn upload_snapshot(
     .await?;
 
     let skills_url = remote_file_url(settings, RemoteLayout::Current, REMOTE_SKILLS_ZIP)?;
-    put_bytes_for_snapshot(
+    if let Err(error) = put_bytes_for_snapshot(
         &skills_url,
         &auth,
         snapshot.skills_zip,
         "application/zip",
         conditional,
     )
-    .await?;
+    .await
+    {
+        let _ = delete_bytes(&db_url, &auth).await;
+        return Err(error);
+    }
 
-    put_bytes(
+    if let Err(error) = put_bytes(
         &manifest_url,
         &auth,
         snapshot.manifest_bytes,
         "application/json",
         manifest_precondition,
     )
-    .await?;
+    .await
+    {
+        let _ = delete_bytes(&skills_url, &auth).await;
+        let _ = delete_bytes(&db_url, &auth).await;
+        return Err(error);
+    }
 
     // Fetch etag (best-effort, don't fail the upload)
     let etag = match head_etag(&manifest_url, &auth).await {

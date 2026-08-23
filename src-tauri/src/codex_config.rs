@@ -890,6 +890,14 @@ pub(crate) fn with_live_codex_toml_lock<T>(update: impl FnOnce() -> T) -> T {
     update()
 }
 
+/// Skip if a provider switch already holds the live toml lock.
+pub(crate) fn try_with_live_codex_toml_lock<T>(update: impl FnOnce() -> T) -> Option<T> {
+    let Ok(_guard) = live_codex_toml_lock().try_lock() else {
+        return None;
+    };
+    Some(update())
+}
+
 /// Write only Codex `config.toml` for provider switching.
 ///
 /// Codex login state lives in `auth.json`; provider routing, endpoint, model,
