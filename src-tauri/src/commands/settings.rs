@@ -82,7 +82,7 @@ pub async fn save_settings(
             crate::services::provider::reapply_current_codex_official_live(state.inner())
         {
             log::warn!("统一 Codex 会话历史开关变更后重写 live 配置失败，回滚设置: {err}");
-            if let Err(rollback_err) = crate::settings::update_settings(existing) {
+            if let Err(rollback_err) = crate::settings::update_settings_from_frontend(existing) {
                 log::error!("回滚统一会话开关设置失败: {rollback_err}");
             }
             return Err(format!(
@@ -617,6 +617,54 @@ mod tests {
         let merged = merge_settings_for_save(incoming, &existing);
 
         assert!(merged.local_migrations.is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn unify_rollback_via_update_settings_from_frontend_keeps_current_ids() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+        std::env::set_var("HOME", dir.path());
+
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::settings::reload_settings().expect("reload settings");
+            crate::settings::set_current_provider(
+                &crate::app_config::AppType::Codex,
+                Some("live-id"),
+            )
+            .expect("seed in-memory current provider");
+
+            let mut existing = crate::settings::get_settings();
+            existing.unify_codex_session_history = false;
+            existing.current_provider_codex = Some("stale-from-disk".to_string());
+
+            crate::settings::update_settings_from_frontend(existing)
+                .expect("rollback unify flag via from_frontend");
+
+            assert_eq!(
+                crate::settings::get_current_provider(&crate::app_config::AppType::Codex)
+                    .as_deref(),
+                Some("live-id"),
+                "in-memory current ids must overlay the rolled-back unify-flag blob"
+            );
+            assert!(
+                !crate::settings::get_settings().unify_codex_session_history,
+                "unify flag must roll back"
+            );
+        }));
+
+        let _ = crate::settings::update_settings(AppSettings::default());
+        match old_test_home {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        run.expect("unify rollback test panicked");
     }
 }
 

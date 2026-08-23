@@ -1,5 +1,13 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
-import { useForm } from "react-hook-form";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  useCallback,
+  useRef,
+  type MutableRefObject,
+  type ReactNode,
+} from "react";
+import { useForm, useWatch, type Control } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
@@ -252,8 +260,217 @@ const normalizeCodexChatReasoningForSave = (
   };
 };
 
+const PROVIDER_KEY_PATTERN = /^[a-z0-9]+([_-][a-z0-9]+)*$/;
+
 const normalizeProviderKey = (value: string) =>
-  value.toLowerCase().replace(/[^a-z0-9-]/g, "");
+  value.toLowerCase().replace(/[^a-z0-9_-]/g, "");
+
+const isProviderKeyFormatValid = (key: string, locked: boolean) =>
+  locked || PROVIDER_KEY_PATTERN.test(key);
+
+type SettingsConfigSnapshot = {
+  apiKey: string;
+  baseUrl: string;
+  useCommonConfig: boolean;
+  templateValueEntriesLength: number;
+  validateTemplateValues: () => {
+    isValid: boolean;
+    missingField?: { key: string; label: string };
+  };
+};
+
+type WatchedSettingsConfigValues = {
+  settingsConfig: string;
+  apiKey: string;
+  handleApiKeyChange: (key: string) => void;
+  shouldShowApiKey: (config: string, isEditMode: boolean) => boolean;
+  baseUrl: string;
+  handleClaudeBaseUrlChange: (url: string) => void;
+  claudeModel: string;
+  defaultHaikuModel: string;
+  defaultHaikuModelName: string;
+  defaultSonnetModel: string;
+  defaultSonnetModelName: string;
+  defaultOpusModel: string;
+  defaultOpusModelName: string;
+  defaultFableModel: string;
+  defaultFableModelName: string;
+  subagentModel: string;
+  handleModelChange: ReturnType<typeof useModelState>["handleModelChange"];
+  templateValues: ReturnType<typeof useTemplateValues>["templateValues"];
+  templateValueEntries: ReturnType<
+    typeof useTemplateValues
+  >["templateValueEntries"];
+  templatePreset: ReturnType<typeof useTemplateValues>["selectedPreset"];
+  handleTemplateValueChange: ReturnType<
+    typeof useTemplateValues
+  >["handleTemplateValueChange"];
+  useCommonConfig: boolean;
+  commonConfigSnippet: string;
+  commonConfigError: string;
+  handleCommonConfigToggle: ReturnType<
+    typeof useCommonConfigSnippet
+  >["handleCommonConfigToggle"];
+  handleCommonConfigSnippetChange: ReturnType<
+    typeof useCommonConfigSnippet
+  >["handleCommonConfigSnippetChange"];
+  isClaudeExtracting: boolean;
+  handleClaudeExtract: ReturnType<
+    typeof useCommonConfigSnippet
+  >["handleExtract"];
+  speedTestEndpoints: ReturnType<typeof useSpeedTestEndpoints>;
+};
+
+function WatchedSettingsConfigFields({
+  control,
+  onConfigChange,
+  selectedPresetId,
+  category,
+  appId,
+  apiKeyField,
+  initialData,
+  presetEntries,
+  codexBaseUrl,
+  snapshotRef,
+  children,
+}: {
+  control: Control<ProviderFormData>;
+  onConfigChange: (config: string) => void;
+  selectedPresetId: string | null;
+  category: ProviderCategory | undefined;
+  appId: AppId;
+  apiKeyField?: string;
+  initialData?: ProviderFormProps["initialData"];
+  presetEntries: PresetEntry[];
+  codexBaseUrl: string;
+  snapshotRef: MutableRefObject<SettingsConfigSnapshot>;
+  children: (watched: WatchedSettingsConfigValues) => ReactNode;
+}) {
+  const settingsConfig = useWatch({ control, name: "settingsConfig" }) ?? "";
+
+  const {
+    apiKey,
+    handleApiKeyChange,
+    showApiKey: shouldShowApiKey,
+  } = useApiKeyState({
+    initialConfig: settingsConfig,
+    onConfigChange,
+    selectedPresetId,
+    category,
+    appType: appId,
+    apiKeyField,
+  });
+
+  const { baseUrl, handleClaudeBaseUrlChange } = useBaseUrlState({
+    appType: appId,
+    category,
+    settingsConfig,
+    codexConfig: "",
+    onSettingsConfigChange: onConfigChange,
+    onCodexConfigChange: () => {},
+  });
+
+  const {
+    claudeModel,
+    defaultHaikuModel,
+    defaultHaikuModelName,
+    defaultSonnetModel,
+    defaultSonnetModelName,
+    defaultOpusModel,
+    defaultOpusModelName,
+    defaultFableModel,
+    defaultFableModelName,
+    subagentModel,
+    handleModelChange,
+  } = useModelState({
+    settingsConfig,
+    onConfigChange,
+  });
+
+  const {
+    templateValues,
+    templateValueEntries,
+    selectedPreset: templatePreset,
+    handleTemplateValueChange,
+    validateTemplateValues,
+  } = useTemplateValues({
+    selectedPresetId: appId === "claude" ? selectedPresetId : null,
+    presetEntries: appId === "claude" ? presetEntries : [],
+    settingsConfig,
+    onConfigChange,
+  });
+
+  const {
+    useCommonConfig,
+    commonConfigSnippet,
+    commonConfigError,
+    handleCommonConfigToggle,
+    handleCommonConfigSnippetChange,
+    isExtracting: isClaudeExtracting,
+    handleExtract: handleClaudeExtract,
+  } = useCommonConfigSnippet({
+    settingsConfig,
+    onConfigChange,
+    initialData: appId === "claude" ? initialData : undefined,
+    initialEnabled:
+      appId === "claude" ? initialData?.meta?.commonConfigEnabled : undefined,
+    selectedPresetId: selectedPresetId ?? undefined,
+    enabled: appId === "claude",
+  });
+
+  const speedTestEndpoints = useSpeedTestEndpoints({
+    appId,
+    selectedPresetId,
+    presetEntries,
+    baseUrl,
+    codexBaseUrl,
+    initialData,
+  });
+
+  snapshotRef.current = {
+    apiKey,
+    baseUrl,
+    useCommonConfig,
+    templateValueEntriesLength: templateValueEntries.length,
+    validateTemplateValues,
+  };
+
+  return (
+    <>
+      {children({
+        settingsConfig,
+        apiKey,
+        handleApiKeyChange,
+        shouldShowApiKey,
+        baseUrl,
+        handleClaudeBaseUrlChange,
+        claudeModel,
+        defaultHaikuModel,
+        defaultHaikuModelName,
+        defaultSonnetModel,
+        defaultSonnetModelName,
+        defaultOpusModel,
+        defaultOpusModelName,
+        defaultFableModel,
+        defaultFableModelName,
+        subagentModel,
+        handleModelChange,
+        templateValues,
+        templateValueEntries,
+        templatePreset,
+        handleTemplateValueChange,
+        useCommonConfig,
+        commonConfigSnippet,
+        commonConfigError,
+        handleCommonConfigToggle,
+        handleCommonConfigSnippetChange,
+        isClaudeExtracting,
+        handleClaudeExtract,
+        speedTestEndpoints,
+      })}
+    </>
+  );
+}
 
 type LocalProxyRequestOverridesBuildResult = ReturnType<
   typeof buildLocalProxyRequestOverrides
@@ -478,7 +695,6 @@ function ProviderFormFull({
     mode: "onSubmit",
   });
   const { isSubmitting } = form.formState;
-  const settingsConfig = form.watch("settingsConfig");
 
   const handleSettingsConfigChange = useCallback(
     (config: string) => {
@@ -486,6 +702,14 @@ function ProviderFormFull({
     },
     [form],
   );
+
+  const settingsConfigSnapshotRef = useRef<SettingsConfigSnapshot>({
+    apiKey: "",
+    baseUrl: "",
+    useCommonConfig: false,
+    templateValueEntriesLength: 0,
+    validateTemplateValues: () => ({ isValid: true }),
+  });
 
   const [localApiKeyField, setLocalApiKeyField] = useState<ClaudeApiKeyField>(
     () => {
@@ -513,45 +737,6 @@ function ProviderFormFull({
   useEffect(() => {
     onSubmittingChange?.(isSubmitting || isConfirmSubmitting);
   }, [isSubmitting, isConfirmSubmitting, onSubmittingChange]);
-
-  const {
-    apiKey,
-    handleApiKeyChange,
-    showApiKey: shouldShowApiKey,
-  } = useApiKeyState({
-    initialConfig: settingsConfig,
-    onConfigChange: handleSettingsConfigChange,
-    selectedPresetId,
-    category,
-    appType: appId,
-    apiKeyField: appId === "claude" ? localApiKeyField : undefined,
-  });
-
-  const { baseUrl, handleClaudeBaseUrlChange } = useBaseUrlState({
-    appType: appId,
-    category,
-    settingsConfig,
-    codexConfig: "",
-    onSettingsConfigChange: handleSettingsConfigChange,
-    onCodexConfigChange: () => {},
-  });
-
-  const {
-    claudeModel,
-    defaultHaikuModel,
-    defaultHaikuModelName,
-    defaultSonnetModel,
-    defaultSonnetModelName,
-    defaultOpusModel,
-    defaultOpusModelName,
-    defaultFableModel,
-    defaultFableModelName,
-    subagentModel,
-    handleModelChange,
-  } = useModelState({
-    settingsConfig,
-    onConfigChange: handleSettingsConfigChange,
-  });
 
   const [localApiFormat, setLocalApiFormat] = useState<ClaudeApiFormat>(() => {
     if (appId !== "claude") return "anthropic";
@@ -824,11 +1009,11 @@ function ProviderFormFull({
   );
   const presetProviderType = getPresetProviderType(selectedPresetEntry?.preset);
   const initialProviderType = initialData?.meta?.providerType;
-  const isCopilotProvider =
+  const isCopilotProviderFromPreset =
     appId === "claude" &&
     (presetProviderType === "github_copilot" ||
-      initialProviderType === "github_copilot" ||
-      baseUrl.includes("githubcopilot.com"));
+      initialProviderType === "github_copilot");
+  const isCopilotUrl = (url: string) => url.includes("githubcopilot.com");
   const isClaudeCodexOauthProvider =
     appId === "claude" &&
     (presetProviderType === "codex_oauth" ||
@@ -845,7 +1030,7 @@ function ProviderFormFull({
     (presetProviderType === "anthropic_oauth" ||
       initialProviderType === "anthropic_oauth");
   const skipsManagedApiKey =
-    isCopilotProvider ||
+    isCopilotProviderFromPreset ||
     isClaudeCodexOauthProvider ||
     isXaiOauthProvider ||
     isKimiOauthProvider ||
@@ -867,37 +1052,6 @@ function ProviderFormFull({
     isCodexOfficialProvider && !hasValidCodexOfficialSelection;
   const requiresCodexOauthLogin =
     isClaudeCodexOauthProvider || isCodexOfficialManagedOauthBound;
-
-  const {
-    templateValues,
-    templateValueEntries,
-    selectedPreset: templatePreset,
-    handleTemplateValueChange,
-    validateTemplateValues,
-  } = useTemplateValues({
-    selectedPresetId: appId === "claude" ? selectedPresetId : null,
-    presetEntries: appId === "claude" ? presetEntries : [],
-    settingsConfig,
-    onConfigChange: handleSettingsConfigChange,
-  });
-
-  const {
-    useCommonConfig,
-    commonConfigSnippet,
-    commonConfigError,
-    handleCommonConfigToggle,
-    handleCommonConfigSnippetChange,
-    isExtracting: isClaudeExtracting,
-    handleExtract: handleClaudeExtract,
-  } = useCommonConfigSnippet({
-    settingsConfig,
-    onConfigChange: handleSettingsConfigChange,
-    initialData: appId === "claude" ? initialData : undefined,
-    initialEnabled:
-      appId === "claude" ? initialData?.meta?.commonConfigEnabled : undefined,
-    selectedPresetId: selectedPresetId ?? undefined,
-    enabled: appId === "claude",
-  });
 
   const {
     useCommonConfig: useCodexCommonConfigFlag,
@@ -1169,6 +1323,11 @@ function ProviderFormFull({
     (appId === "claude" || appId === "codex") && category !== "official";
 
   const handleSubmit = async (values: ProviderFormData) => {
+    const snapshot = settingsConfigSnapshotRef.current;
+    const isCopilotProvider =
+      isCopilotProviderFromPreset || isCopilotUrl(snapshot.baseUrl);
+    const skipsClaudeManagedApiKey = skipsManagedApiKey || isCopilotProvider;
+
     if (hasConfigParseError) {
       toast.error(
         (appId === "codex" ? codexAuthError : geminiConfigError) ||
@@ -1199,8 +1358,8 @@ function ProviderFormFull({
     const issues: string[] = [];
 
     // 模板变量未填：A 类（空值）
-    if (appId === "claude" && templateValueEntries.length > 0) {
-      const validation = validateTemplateValues();
+    if (appId === "claude" && snapshot.templateValueEntriesLength > 0) {
+      const validation = snapshot.validateTemplateValues();
       if (!validation.isValid && validation.missingField) {
         issues.push(
           t("providerForm.fillParameter", {
@@ -1236,7 +1395,7 @@ function ProviderFormFull({
 
     // opencode / openclaw / hermes: providerKey 相关
     // A 类（空）归到 issues；B 类（正则不合法 / 重复 / 状态加载中）仍硬拒绝
-    const keyPattern = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+    // Locked keys already live in config/DB, so skip the format hard-reject.
 
     if (appId === "opencode" && !isAnyOmoCategory) {
       // providerKey 是 opencode / openclaw / hermes 的主键 ID，空或格式不合法
@@ -1245,7 +1404,12 @@ function ProviderFormFull({
         toast.error(t("opencode.providerKeyRequired"));
         return;
       }
-      if (!keyPattern.test(opencodeForm.opencodeProviderKey)) {
+      if (
+        !isProviderKeyFormatValid(
+          opencodeForm.opencodeProviderKey,
+          isProviderKeyLocked,
+        )
+      ) {
         toast.error(t("opencode.providerKeyInvalid"));
         return;
       }
@@ -1274,7 +1438,12 @@ function ProviderFormFull({
         toast.error(t("openclaw.providerKeyRequired"));
         return;
       }
-      if (!keyPattern.test(openclawForm.openclawProviderKey)) {
+      if (
+        !isProviderKeyFormatValid(
+          openclawForm.openclawProviderKey,
+          isProviderKeyLocked,
+        )
+      ) {
         toast.error(t("openclaw.providerKeyInvalid"));
         return;
       }
@@ -1300,7 +1469,12 @@ function ProviderFormFull({
         toast.error(t("hermes.form.providerKeyRequired"));
         return;
       }
-      if (!keyPattern.test(hermesForm.hermesProviderKey)) {
+      if (
+        !isProviderKeyFormatValid(
+          hermesForm.hermesProviderKey,
+          isProviderKeyLocked,
+        )
+      ) {
         toast.error(t("hermes.form.providerKeyInvalid"));
         return;
       }
@@ -1529,14 +1703,14 @@ function ProviderFormFull({
     // cloud_provider（如 Bedrock）通过模板变量处理认证，跳过通用校验
     if (category !== "official" && category !== "cloud_provider") {
       if (appId === "claude") {
-        if (!skipsForcedOauthEndpoint && !baseUrl.trim()) {
+        if (!skipsForcedOauthEndpoint && !snapshot.baseUrl.trim()) {
           issues.push(
             t("providerForm.endpointRequired", {
               defaultValue: "非官方供应商请填写 API 端点",
             }),
           );
         }
-        if (!skipsManagedApiKey && !apiKey.trim()) {
+        if (!skipsClaudeManagedApiKey && !snapshot.apiKey.trim()) {
           issues.push(
             t("providerForm.apiKeyRequired", {
               defaultValue: "非官方供应商请填写 API Key",
@@ -1593,6 +1767,10 @@ function ProviderFormFull({
     values: ProviderFormData,
     overridesResult: LocalProxyRequestOverridesBuildResult,
   ) => {
+    const snapshot = settingsConfigSnapshotRef.current;
+    const isCopilotProvider =
+      isCopilotProviderFromPreset || isCopilotUrl(snapshot.baseUrl);
+
     if (overridesResult.error) {
       toast.error(
         t("providerForm.localProxyRequestOverridesInvalid", {
@@ -1846,7 +2024,7 @@ function ProviderFormFull({
       ...(baseMeta ?? {}),
       commonConfigEnabled:
         appId === "claude"
-          ? useCommonConfig
+          ? snapshot.useCommonConfig
           : appId === "codex"
             ? useCodexCommonConfigFlag
             : appId === "gemini"
@@ -2079,16 +2257,6 @@ function ProviderFormFull({
     selectedPresetId,
     presetEntries,
     formWebsiteUrl: form.watch("websiteUrl") || "",
-  });
-
-  // 使用端点测速候选 hook
-  const speedTestEndpoints = useSpeedTestEndpoints({
-    appId,
-    selectedPresetId,
-    presetEntries,
-    baseUrl,
-    codexBaseUrl,
-    initialData,
   });
 
   const handlePresetChange = (value: string) => {
@@ -2329,8 +2497,9 @@ function ProviderFormFull({
                       ) &&
                         !isProviderKeyLocked) ||
                       (opencodeForm.opencodeProviderKey.trim() !== "" &&
-                        !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(
+                        !isProviderKeyFormatValid(
                           opencodeForm.opencodeProviderKey,
+                          isProviderKeyLocked,
                         ))
                         ? "border-destructive"
                         : ""
@@ -2345,8 +2514,9 @@ function ProviderFormFull({
                       </p>
                     )}
                   {opencodeForm.opencodeProviderKey.trim() !== "" &&
-                    !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(
+                    !isProviderKeyFormatValid(
                       opencodeForm.opencodeProviderKey,
+                      isProviderKeyLocked,
                     ) && (
                       <p className="text-xs text-destructive">
                         {t("opencode.providerKeyInvalid")}
@@ -2358,8 +2528,9 @@ function ProviderFormFull({
                     ) && !isProviderKeyLocked
                   ) &&
                     (opencodeForm.opencodeProviderKey.trim() === "" ||
-                      /^[a-z0-9]+(-[a-z0-9]+)*$/.test(
+                      isProviderKeyFormatValid(
                         opencodeForm.opencodeProviderKey,
+                        isProviderKeyLocked,
                       )) && (
                       <p className="text-xs text-muted-foreground">
                         {isProviderKeyLocked
@@ -2392,8 +2563,9 @@ function ProviderFormFull({
                       ) &&
                         !isProviderKeyLocked) ||
                       (openclawForm.openclawProviderKey.trim() !== "" &&
-                        !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(
+                        !isProviderKeyFormatValid(
                           openclawForm.openclawProviderKey,
+                          isProviderKeyLocked,
                         ))
                         ? "border-destructive"
                         : ""
@@ -2408,8 +2580,9 @@ function ProviderFormFull({
                       </p>
                     )}
                   {openclawForm.openclawProviderKey.trim() !== "" &&
-                    !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(
+                    !isProviderKeyFormatValid(
                       openclawForm.openclawProviderKey,
+                      isProviderKeyLocked,
                     ) && (
                       <p className="text-xs text-destructive">
                         {t("openclaw.providerKeyInvalid")}
@@ -2421,8 +2594,9 @@ function ProviderFormFull({
                     ) && !isProviderKeyLocked
                   ) &&
                     (openclawForm.openclawProviderKey.trim() === "" ||
-                      /^[a-z0-9]+(-[a-z0-9]+)*$/.test(
+                      isProviderKeyFormatValid(
                         openclawForm.openclawProviderKey,
+                        isProviderKeyLocked,
                       )) && (
                       <p className="text-xs text-muted-foreground">
                         {isProviderKeyLocked
@@ -2459,8 +2633,9 @@ function ProviderFormFull({
                       ) &&
                         !isProviderKeyLocked) ||
                       (hermesForm.hermesProviderKey.trim() !== "" &&
-                        !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(
+                        !isProviderKeyFormatValid(
                           hermesForm.hermesProviderKey,
+                          isProviderKeyLocked,
                         ))
                         ? "border-destructive"
                         : ""
@@ -2475,8 +2650,9 @@ function ProviderFormFull({
                       </p>
                     )}
                   {hermesForm.hermesProviderKey.trim() !== "" &&
-                    !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(
+                    !isProviderKeyFormatValid(
                       hermesForm.hermesProviderKey,
+                      isProviderKeyLocked,
                     ) && (
                       <p className="text-xs text-destructive">
                         {t("hermes.form.providerKeyInvalid")}
@@ -2488,8 +2664,9 @@ function ProviderFormFull({
                     ) && !isProviderKeyLocked
                   ) &&
                     (hermesForm.hermesProviderKey.trim() === "" ||
-                      /^[a-z0-9]+(-[a-z0-9]+)*$/.test(
+                      isProviderKeyFormatValid(
                         hermesForm.hermesProviderKey,
+                        isProviderKeyLocked,
                       )) && (
                       <p className="text-xs text-muted-foreground">
                         {isProviderKeyLocked
@@ -2499,7 +2676,7 @@ function ProviderFormFull({
                             })
                           : t("hermes.form.providerKeyHint", {
                               defaultValue:
-                                "Lowercase letters, numbers, and hyphens only. Used as the provider name in config.yaml.",
+                                "Lowercase letters, numbers, hyphens, and underscores. Used as the provider name in config.yaml.",
                             })}
                       </p>
                     )}
@@ -2508,6 +2685,54 @@ function ProviderFormFull({
             }
           />
 
+          <WatchedSettingsConfigFields
+            control={form.control}
+            onConfigChange={handleSettingsConfigChange}
+            selectedPresetId={selectedPresetId}
+            category={category}
+            appId={appId}
+            apiKeyField={appId === "claude" ? localApiKeyField : undefined}
+            initialData={initialData}
+            presetEntries={presetEntries}
+            codexBaseUrl={codexBaseUrl}
+            snapshotRef={settingsConfigSnapshotRef}
+          >
+            {(w) => {
+              const {
+                settingsConfig,
+                apiKey,
+                handleApiKeyChange,
+                shouldShowApiKey,
+                baseUrl,
+                handleClaudeBaseUrlChange,
+                claudeModel,
+                defaultHaikuModel,
+                defaultHaikuModelName,
+                defaultSonnetModel,
+                defaultSonnetModelName,
+                defaultOpusModel,
+                defaultOpusModelName,
+                defaultFableModel,
+                defaultFableModelName,
+                subagentModel,
+                handleModelChange,
+                templateValues,
+                templateValueEntries,
+                templatePreset,
+                handleTemplateValueChange,
+                useCommonConfig,
+                commonConfigSnippet,
+                commonConfigError,
+                handleCommonConfigToggle,
+                handleCommonConfigSnippetChange,
+                isClaudeExtracting,
+                handleClaudeExtract,
+                speedTestEndpoints,
+              } = w;
+              const isCopilotProvider =
+                isCopilotProviderFromPreset || isCopilotUrl(baseUrl);
+              return (
+                <>
           {appId === "claude" && (
             <ClaudeFormFields
               providerId={providerId}
@@ -2962,6 +3187,10 @@ function ProviderFormFull({
               {settingsConfigErrorField}
             </>
           )}
+                </>
+              );
+            }}
+          </WatchedSettingsConfigFields>
 
           {!isAnyOmoCategory &&
             appId !== "opencode" &&

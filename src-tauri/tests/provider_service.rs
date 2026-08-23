@@ -247,6 +247,78 @@ command = "say"
 }
 
 #[test]
+fn provider_service_switch_aborts_when_live_settings_json_is_corrupt() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "old-provider".to_string();
+        manager.providers.insert(
+            "old-provider".to_string(),
+            Provider::with_id(
+                "old-provider".to_string(),
+                "Old".to_string(),
+                json!({
+                    "env": { "ANTHROPIC_API_KEY": "old-key" }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "new-provider".to_string(),
+            Provider::with_id(
+                "new-provider".to_string(),
+                "New".to_string(),
+                json!({
+                    "env": { "ANTHROPIC_API_KEY": "new-key" }
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    cc_switch_lib::update_settings(cc_switch_lib::AppSettings {
+        current_provider_claude: Some("old-provider".to_string()),
+        ..Default::default()
+    })
+    .expect("seed local current provider");
+
+    let settings_path = get_claude_settings_path();
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent).expect("create claude dir");
+    }
+    let corrupt = "}not a json file{";
+    std::fs::write(&settings_path, corrupt).expect("seed corrupt settings.json");
+
+    let result = ProviderService::switch(&state, AppType::Claude, "new-provider");
+    assert!(
+        result.is_err(),
+        "switch must fail when live settings.json is not valid JSON: {result:?}"
+    );
+
+    let current_id = state
+        .db
+        .get_current_provider(AppType::Claude.as_str())
+        .expect("read current provider after failed switch");
+    assert_eq!(
+        current_id.as_deref(),
+        Some("old-provider"),
+        "current provider must stay unchanged when capture fails"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings_path).expect("read corrupt live file"),
+        corrupt,
+        "corrupt live file must not be overwritten when capture fails"
+    );
+}
+
+#[test]
 fn provider_service_switch_codex_preserves_user_model_provider_id_after_migration() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();

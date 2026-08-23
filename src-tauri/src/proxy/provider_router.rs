@@ -731,22 +731,17 @@ impl ProviderRouter {
         pool.forget_provider(provider_id);
     }
 
-    /// 仅释放 HalfOpen permit，不影响健康统计（neutral 接口）
+    /// 整流器等路径：请求结果不计入健康度。
     ///
-    /// 用于整流器等场景：请求结果不应计入 Provider 健康度，
-    /// 但仍需释放占用的探测名额，避免 HalfOpen 状态卡死
+    /// HalfOpen 名额由 `AllowResult` Drop 释放。这里不再减计数，避免与
+    /// 仍存活的 permit 双释放、偷走后续探测。
+    #[allow(clippy::unused_async)]
     pub async fn release_permit_neutral(
         &self,
-        provider_id: &str,
-        app_type: &str,
-        used_half_open_permit: bool,
+        _provider_id: &str,
+        _app_type: &str,
+        _used_half_open_permit: bool,
     ) {
-        if !used_half_open_permit {
-            return;
-        }
-        let circuit_key = format!("{app_type}:{provider_id}");
-        let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
-        breaker.release_half_open_permit();
     }
 
     /// 更新所有熔断器的配置（热更新）
@@ -1190,10 +1185,9 @@ mod tests {
         let second = router.allow_provider_request("a", "claude").await;
         assert!(!second.allowed);
 
-        // 使用 release_permit_neutral 释放名额（不影响健康统计）
-        router
-            .release_permit_neutral("a", "claude", first.used_half_open_permit)
-            .await;
+        // 名额由 AllowResult Drop 释放；与仍存活的 first 叠用
+        // release_permit_neutral 不得再减计数。
+        drop(first);
 
         // 第三次请求应被允许（名额已释放）
         let third = router.allow_provider_request("a", "claude").await;

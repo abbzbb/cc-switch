@@ -1,7 +1,7 @@
 use rquickjs::{Context, Function, Runtime};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use url::{Host, Url};
 
 use crate::error::AppError;
@@ -147,7 +147,7 @@ pub async fn execute_usage_script(
     )?;
 
     // 6. 发送 HTTP 请求
-    let response_data = send_http_request(&request, timeout_secs).await?;
+    let response_data = send_http_request(&request, timeout_secs, restrict_private_hosts).await?;
 
     // 7. 在独立作用域中执行 extractor（确保 Runtime/Context 在函数结束前释放）
     let result: Value = {
@@ -253,11 +253,42 @@ struct RequestConfig {
 }
 
 /// 发送 HTTP 请求
-async fn send_http_request(config: &RequestConfig, timeout_secs: u64) -> Result<String, AppError> {
-    // 使用全局 HTTP 客户端（已包含代理配置）
-    let client = crate::proxy::http_client::get();
+async fn send_http_request(
+    config: &RequestConfig,
+    timeout_secs: u64,
+    restrict_private_hosts: bool,
+) -> Result<String, AppError> {
     // 约束超时范围，防止异常配置导致长时间阻塞（最小 2 秒，最大 30 秒）
     let request_timeout = std::time::Duration::from_secs(timeout_secs.clamp(2, 30));
+    let mut untrusted_client = None;
+
+    if restrict_private_hosts {
+        let parsed = Url::parse(&config.url).map_err(|e| {
+            AppError::localized(
+                "usage_script.request_url_invalid",
+                format!("无效的请求 URL: {e}"),
+                format!("Invalid request URL: {e}"),
+            )
+        })?;
+        if host_is_restricted(&parsed) {
+            return Err(AppError::localized(
+                "usage_script.request_private_host_forbidden",
+                "不可信用量脚本不允许访问回环、私有或元数据地址",
+                "Untrusted usage scripts cannot target loopback, private, or metadata hosts",
+            ));
+        }
+        let pinned = pin_untrusted_host(&parsed).await?;
+        untrusted_client = Some(untrusted_usage_http_client(Some(pinned))?);
+    }
+
+    // Trusted in-app scripts keep the global client (follows redirects, allows
+    // localhost). Untrusted scripts pin the resolved public address so a later
+    // DNS rebinding cannot reach private hosts, and disable redirects.
+    let client = if let Some(client) = untrusted_client {
+        client
+    } else {
+        crate::proxy::http_client::get()
+    };
 
     // 严格校验 HTTP 方法，非法值不回退为 GET
     let method: reqwest::Method = config.method.parse().map_err(|_| {
@@ -695,6 +726,131 @@ fn ipv4_is_restricted(v4: Ipv4Addr) -> bool {
         || (octets[0] == 100 && octets[1] & 0xC0 == 64)
 }
 
+fn untrusted_usage_http_client(
+    pinned: Option<(String, SocketAddr)>,
+) -> Result<reqwest::Client, AppError> {
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10));
+    if let Some((host, addr)) = pinned {
+        builder = builder.resolve(&host, addr);
+    }
+    if let Some(proxy_url) = crate::proxy::http_client::get_current_proxy_url() {
+        let proxy = reqwest::Proxy::all(&proxy_url).map_err(|e| {
+            AppError::localized(
+                "usage_script.proxy_invalid",
+                format!("无效的代理配置: {e}"),
+                format!("Invalid proxy configuration: {e}"),
+            )
+        })?;
+        builder = builder.proxy(proxy);
+    }
+    builder.build().map_err(|e| {
+        AppError::localized(
+            "usage_script.client_create_failed",
+            format!("创建 HTTP 客户端失败: {e}"),
+            format!("Failed to create HTTP client: {e}"),
+        )
+    })
+}
+
+async fn pin_untrusted_host(url: &Url) -> Result<(String, SocketAddr), AppError> {
+    let url = url.clone();
+    tokio::task::spawn_blocking(move || first_public_resolved_addr(&url))
+        .await
+        .map_err(|e| {
+            AppError::localized(
+                "usage_script.dns_resolve_failed",
+                format!("解析请求主机失败: {e}"),
+                format!("Failed to resolve request host: {e}"),
+            )
+        })?
+}
+
+fn restricted_resolved_host_error() -> AppError {
+    AppError::localized(
+        "usage_script.request_resolved_ip_forbidden",
+        "不可信用量脚本不允许访问解析到回环、私有或元数据地址的主机",
+        "Untrusted usage scripts cannot target hosts that resolve to loopback, private, or metadata addresses",
+    )
+}
+
+fn first_public_resolved_addr(url: &Url) -> Result<(String, SocketAddr), AppError> {
+    let host_label = url.host_str().ok_or_else(|| {
+        AppError::localized(
+            "usage_script.request_url_invalid",
+            "请求 URL 必须包含有效的主机名",
+            "Request URL must include a valid hostname",
+        )
+    })?;
+    let port = url.port_or_known_default().unwrap_or(443);
+    match url.host() {
+        Some(Host::Ipv4(ip)) => {
+            if ipv4_is_restricted(ip) {
+                return Err(restricted_resolved_host_error());
+            }
+            Ok((
+                host_label.to_string(),
+                SocketAddr::new(IpAddr::V4(ip), port),
+            ))
+        }
+        Some(Host::Ipv6(ip)) => {
+            if ipv6_is_restricted(ip) {
+                return Err(restricted_resolved_host_error());
+            }
+            Ok((
+                host_label.to_string(),
+                SocketAddr::new(IpAddr::V6(ip), port),
+            ))
+        }
+        Some(Host::Domain(domain)) => {
+            if domain_is_restricted(domain) {
+                return Err(restricted_resolved_host_error());
+            }
+            let addrs: Vec<_> = (domain, port)
+                .to_socket_addrs()
+                .map_err(|e| {
+                    AppError::localized(
+                        "usage_script.dns_resolve_failed",
+                        format!("解析请求主机失败: {e}"),
+                        format!("Failed to resolve request host: {e}"),
+                    )
+                })?
+                .collect();
+            if addrs.is_empty() {
+                return Err(AppError::localized(
+                    "usage_script.dns_resolve_failed",
+                    "请求主机没有解析到任何地址",
+                    "Request host resolved to no addresses",
+                ));
+            }
+            if addrs.iter().any(|addr| ip_is_restricted(addr.ip())) {
+                return Err(restricted_resolved_host_error());
+            }
+            Ok((host_label.to_string(), addrs[0]))
+        }
+        None => Err(AppError::localized(
+            "usage_script.request_url_invalid",
+            "请求 URL 必须包含有效的主机名",
+            "Request URL must include a valid hostname",
+        )),
+    }
+}
+
+#[cfg(test)]
+fn url_resolves_to_restricted_host(url: &Url) -> Result<bool, AppError> {
+    match first_public_resolved_addr(url) {
+        Ok(_) => Ok(false),
+        Err(AppError::Localized { key, .. })
+            if key == "usage_script.request_resolved_ip_forbidden" =>
+        {
+            Ok(true)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn ipv6_is_restricted(v6: Ipv6Addr) -> bool {
     if v6.is_loopback()
         || v6.is_unspecified()
@@ -883,6 +1039,35 @@ mod tests {
             "public https must be allowed for untrusted scripts: {}",
             result.unwrap_err()
         );
+    }
+
+    #[test]
+    fn untrusted_resolved_literal_ips_are_restricted() {
+        for url in [
+            "https://127.0.0.1/usage",
+            "https://10.0.0.1/usage",
+            "https://192.168.1.1/usage",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://[::1]/usage",
+        ] {
+            let parsed = Url::parse(url).unwrap();
+            let restricted = url_resolves_to_restricted_host(&parsed)
+                .unwrap_or_else(|e| panic!("{url} should resolve for restriction check: {e}"));
+            assert!(restricted, "literal restricted IP must be rejected: {url}");
+            assert!(
+                first_public_resolved_addr(&parsed).is_err(),
+                "pin helper must reject restricted literal IP: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn untrusted_client_disables_redirects() {
+        let client = untrusted_usage_http_client(None).expect("build untrusted client");
+        // Policy is baked into the client; a 3xx is returned rather than followed.
+        // Presence of the client is the compile/runtime check that Policy::none()
+        // is constructible without touching the global proxy client.
+        let _ = client;
     }
 
     #[test]

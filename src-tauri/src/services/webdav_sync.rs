@@ -11,17 +11,19 @@ use serde_json::Value;
 use crate::error::AppError;
 use crate::services::webdav::{
     auth_from_credentials, build_remote_url, ensure_remote_directories, get_bytes, head_etag,
-    path_segments, put_bytes, test_connection, PutPrecondition, WebDavAuth,
+    head_object_state, path_segments, put_bytes, test_connection, HeadState, PutPrecondition,
+    WebDavAuth,
 };
 use crate::settings::{update_webdav_sync_status, WebDavSyncSettings, WebDavSyncStatus};
 
 pub(crate) use super::sync_protocol::run_with_sync_lock;
 use super::sync_protocol::{
     apply_snapshot, build_local_snapshot, effective_db_compat_version, localized,
-    persist_sync_success_best_effort, sha256_hex, should_allow_auto_upload,
-    validate_artifact_size_limit, validate_manifest_compat, verify_artifact, ArtifactMeta,
-    RemoteLayout, SyncManifest, DB_COMPAT_VERSION, MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES,
-    PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
+    persist_sync_success_best_effort, require_if_match_etag, resolve_put_precondition, sha256_hex,
+    should_allow_auto_upload, validate_artifact_size_limit, validate_manifest_compat,
+    verify_artifact, ArtifactMeta, RemoteLayout, ResolvedPut, SyncManifest, DB_COMPAT_VERSION,
+    MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES, PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST,
+    REMOTE_SKILLS_ZIP,
 };
 
 #[cfg(test)]
@@ -90,18 +92,19 @@ async fn upload_snapshot(
         write_target_exists = current
             .as_ref()
             .is_some_and(|snapshot| !snapshot.manifest_bytes.is_empty());
-        let remote = if write_target_exists {
-            current
+        let legacy = if write_target_exists {
+            None
         } else {
             fetch_remote_snapshot(settings, &auth, RemoteLayout::Legacy).await?
         };
-        let remote_exists = remote
-            .as_ref()
-            .is_some_and(|snapshot| !snapshot.manifest_bytes.is_empty());
-        let remote_etag = remote
-            .as_ref()
-            .and_then(|snapshot| snapshot.manifest_etag.as_deref());
-        let remote_hash = remote.as_ref().and_then(|snapshot| {
+        let remote = if write_target_exists {
+            current.as_ref()
+        } else {
+            legacy.as_ref()
+        };
+        let remote_exists = remote.is_some_and(|snapshot| !snapshot.manifest_bytes.is_empty());
+        let remote_etag = remote.and_then(|snapshot| snapshot.manifest_etag.as_deref());
+        let remote_hash = remote.and_then(|snapshot| {
             (!snapshot.manifest_bytes.is_empty()).then(|| sha256_hex(&snapshot.manifest_bytes))
         });
 
@@ -113,40 +116,46 @@ async fn upload_snapshot(
             remote_hash.as_deref(),
         )?;
 
-        if_match_etag = settings
-            .status
-            .last_remote_etag
-            .as_deref()
+        // Prefer the ETag from this GET, not the stored cursor. Hash-only
+        // should_allow_auto_upload can succeed without last_remote_etag.
+        if_match_etag = current
+            .as_ref()
+            .filter(|snapshot| !snapshot.manifest_bytes.is_empty())
+            .and_then(|snapshot| snapshot.manifest_etag.as_deref())
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
     }
 
+    // Fail closed before any artifact PUT: existing Current without ETag
+    // must not last-write-wins.
+    let manifest_precondition =
+        put_precondition(conditional, write_target_exists, if_match_etag.as_deref())?;
+
     let snapshot = build_local_snapshot(db)?;
 
-    // Upload order: artifacts first, manifest last (best-effort consistency)
+    // Upload order: artifacts first, manifest last. Any 412 aborts remaining
+    // objects. Auto-sync HEADs each artifact and uses If-Match / If-None-Match;
+    // manual upload stays overwrite.
     let db_url = remote_file_url(settings, RemoteLayout::Current, REMOTE_DB_SQL)?;
-    put_bytes(
+    put_bytes_for_snapshot(
         &db_url,
         &auth,
         snapshot.db_sql,
         "application/sql",
-        PutPrecondition::None,
+        conditional,
     )
     .await?;
 
     let skills_url = remote_file_url(settings, RemoteLayout::Current, REMOTE_SKILLS_ZIP)?;
-    put_bytes(
+    put_bytes_for_snapshot(
         &skills_url,
         &auth,
         snapshot.skills_zip,
         "application/zip",
-        PutPrecondition::None,
+        conditional,
     )
     .await?;
-
-    let manifest_precondition =
-        manifest_put_precondition(conditional, write_target_exists, if_match_etag.as_deref());
 
     put_bytes(
         &manifest_url,
@@ -374,20 +383,56 @@ fn auth_for(settings: &WebDavSyncSettings) -> WebDavAuth {
     auth_from_credentials(&settings.username, &settings.password)
 }
 
-fn manifest_put_precondition<'a>(
+fn put_precondition<'a>(
     conditional: bool,
     remote_exists: bool,
     if_match_etag: Option<&'a str>,
-) -> PutPrecondition<'a> {
+) -> Result<PutPrecondition<'a>, AppError> {
+    Ok(
+        match resolve_put_precondition(conditional, remote_exists, if_match_etag)? {
+            ResolvedPut::Unconditional => PutPrecondition::None,
+            ResolvedPut::IfMatch(etag) => PutPrecondition::IfMatch(etag),
+            ResolvedPut::IfNoneMatchAny => PutPrecondition::IfNoneMatchAny,
+        },
+    )
+}
+
+/// PUT one snapshot object. Auto-sync HEADs first and fails closed when the
+/// object exists without an ETag. Manual upload overwrites unconditionally.
+/// A 412 aborts the caller so later objects (including the manifest) are not PUT.
+async fn put_bytes_for_snapshot(
+    url: &str,
+    auth: &WebDavAuth,
+    bytes: Vec<u8>,
+    content_type: &str,
+    conditional: bool,
+) -> Result<(), AppError> {
     if !conditional {
-        PutPrecondition::None
-    } else if remote_exists {
-        match if_match_etag {
-            Some(etag) => PutPrecondition::IfMatch(etag),
-            None => PutPrecondition::None,
+        return put_bytes(url, auth, bytes, content_type, PutPrecondition::None).await;
+    }
+
+    match head_object_state(url, auth).await? {
+        HeadState::Missing => {
+            put_bytes(
+                url,
+                auth,
+                bytes,
+                content_type,
+                PutPrecondition::IfNoneMatchAny,
+            )
+            .await
         }
-    } else {
-        PutPrecondition::IfNoneMatchAny
+        HeadState::Exists { etag } => {
+            let etag = require_if_match_etag(etag.as_deref())?.to_string();
+            put_bytes(
+                url,
+                auth,
+                bytes,
+                content_type,
+                PutPrecondition::IfMatch(&etag),
+            )
+            .await
+        }
     }
 }
 
@@ -422,7 +467,11 @@ mod tests {
     #[test]
     fn manual_upload_is_unconditional() {
         assert_eq!(
-            manifest_put_precondition(false, true, Some("etag")),
+            put_precondition(false, true, Some("etag")).unwrap(),
+            PutPrecondition::None
+        );
+        assert_eq!(
+            put_precondition(false, true, None).unwrap(),
             PutPrecondition::None
         );
     }
@@ -430,7 +479,7 @@ mod tests {
     #[test]
     fn auto_upload_sends_if_match_when_remote_exists() {
         assert_eq!(
-            manifest_put_precondition(true, true, Some("etag")),
+            put_precondition(true, true, Some("etag")).unwrap(),
             PutPrecondition::IfMatch("etag")
         );
     }
@@ -438,8 +487,74 @@ mod tests {
     #[test]
     fn auto_upload_sends_if_none_match_when_creating() {
         assert_eq!(
-            manifest_put_precondition(true, false, None),
+            put_precondition(true, false, None).unwrap(),
             PutPrecondition::IfNoneMatchAny
         );
+    }
+
+    #[test]
+    fn auto_upload_denies_when_remote_exists_without_etag() {
+        let err = put_precondition(true, true, None)
+            .expect_err("existing remote without ETag must fail closed");
+        let text = err.to_string();
+        assert!(
+            text.contains("ETag") || text.contains("omitted") || text.contains("未返回"),
+            "unexpected error: {text}"
+        );
+    }
+
+    #[test]
+    fn artifact_put_uses_if_match_when_etag_present() {
+        assert_eq!(
+            put_precondition(true, true, Some("artifact-etag")).unwrap(),
+            PutPrecondition::IfMatch("artifact-etag")
+        );
+    }
+
+    #[test]
+    fn artifact_put_uses_if_none_match_when_missing() {
+        assert_eq!(
+            put_precondition(true, false, None).unwrap(),
+            PutPrecondition::IfNoneMatchAny
+        );
+    }
+
+    #[test]
+    fn artifact_put_denies_when_remote_exists_without_etag() {
+        assert!(put_precondition(true, true, Some("  ")).is_err());
+    }
+
+    #[test]
+    fn artifact_412_does_not_proceed_to_manifest() {
+        use super::super::sync_protocol::put_in_order;
+
+        let mut attempted = Vec::new();
+        let err = put_in_order(["db.sql", "skills.zip", "manifest.json"], |name| {
+            attempted.push(name);
+            if name == "skills.zip" {
+                Err(AppError::localized(
+                    "webdav.put.precondition_failed",
+                    "远端数据已被其他设备更新（412），未覆盖远端。",
+                    "Remote data was updated by another client (412 Precondition Failed); remote was not overwritten.",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("412 on an artifact must abort remaining PUTs");
+
+        assert_eq!(attempted, vec!["db.sql", "skills.zip"]);
+        assert!(err.to_string().contains("412"));
+    }
+
+    #[test]
+    fn auto_upload_if_match_uses_fresh_get_etag_not_stored_cursor() {
+        // Production takes the ETag from the GET/HEAD just performed. A stored
+        // cursor alone is not a usable If-Match validator.
+        assert_eq!(
+            put_precondition(true, true, Some("fresh-from-get")).unwrap(),
+            PutPrecondition::IfMatch("fresh-from-get")
+        );
+        assert!(put_precondition(true, true, None).is_err());
     }
 }

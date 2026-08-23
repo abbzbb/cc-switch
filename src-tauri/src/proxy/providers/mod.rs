@@ -70,6 +70,7 @@ pub use codex::{
     resolve_prompt_cache_routing_key, should_convert_codex_responses_to_anthropic,
     should_convert_codex_responses_to_chat, should_send_xai_conv_id_header,
 };
+pub(crate) use gemini::ensure_gemini_oauth_access_token;
 pub use gemini::GeminiAdapter;
 
 /// 供应商类型枚举

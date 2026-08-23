@@ -2,17 +2,17 @@
 //!
 //! Handles reading and writing live configuration files for Claude, Codex, and Gemini.
 
-use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
 use toml_edit::{DocumentMut, Item, TableLike};
 
 use crate::app_config::AppType;
-use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
 use crate::config::{
-    delete_file, get_claude_settings_path, read_json_file, write_json_file, write_json_file_private,
+    atomic_write_private, delete_file, get_claude_settings_path, read_json_file, write_json_file,
+    write_json_file_private,
 };
 use crate::database::Database;
 use crate::error::AppError;
@@ -1173,91 +1173,93 @@ pub(crate) fn normalize_provider_common_config_for_storage(
     Ok(())
 }
 
-/// Live configuration snapshot for backup/restore
+/// Live configuration snapshot for backup/restore.
+///
+/// Exclusive-mode apps always produce a snapshot (missing files are empty
+/// inner `None`s). Unreadable or corrupt live files fail capture so the
+/// switch can abort before writing. Additive apps are not captured here.
 #[derive(Clone)]
 pub(crate) enum LiveSnapshot {
     Claude {
         settings: Option<Value>,
     },
-    Codex {
-        auth: Option<Value>,
-        config: Option<String>,
-    },
+    Codex(crate::codex_config::CodexLiveStateSnapshot),
     Gemini {
-        env: Option<HashMap<String, String>>,
+        env: Option<Vec<u8>>,
         config: Option<Value>,
     },
     Grok {
         config: Option<String>,
     },
+    ClaudeDesktop {
+        files: Vec<crate::claude_desktop_config::FileSnapshot>,
+    },
 }
 
 impl LiveSnapshot {
-    pub(crate) fn capture(app_type: &AppType) -> Option<Self> {
+    pub(crate) fn capture(app_type: &AppType) -> Result<Self, AppError> {
         match app_type {
-            AppType::Claude => Self::capture_optional_json(get_claude_settings_path())
-                .map(|settings| Self::Claude { settings }),
-            AppType::Codex => {
-                let auth = Self::capture_optional_json(get_codex_auth_path())?;
-                let config_path = get_codex_config_path();
-                let config = Self::capture_optional_text(&config_path)?;
-                Some(Self::Codex { auth, config })
+            AppType::Claude => {
+                let settings = Self::capture_optional_json(get_claude_settings_path())?;
+                Ok(Self::Claude { settings })
             }
+            AppType::Codex => Ok(Self::Codex(
+                crate::codex_config::CodexLiveStateSnapshot::capture()?,
+            )),
             AppType::Gemini => {
-                use crate::gemini_config::{
-                    get_gemini_env_path, get_gemini_settings_path, read_gemini_env,
-                };
-                let env_path = get_gemini_env_path();
-                let env = if !env_path.exists() {
-                    None
-                } else if env_path.is_file() {
-                    match read_gemini_env() {
-                        Ok(map) => Some(map),
-                        Err(_) => return None,
-                    }
-                } else {
-                    return None;
-                };
+                use crate::gemini_config::{get_gemini_env_path, get_gemini_settings_path};
+                let env = Self::capture_optional_bytes(&get_gemini_env_path())?;
                 let config = Self::capture_optional_json(get_gemini_settings_path())?;
-                Some(Self::Gemini { env, config })
+                Ok(Self::Gemini { env, config })
             }
             AppType::GrokBuild => {
                 let config =
                     Self::capture_optional_text(&crate::grok_config::get_grok_config_path())?;
-                Some(Self::Grok { config })
+                Ok(Self::Grok { config })
             }
-            AppType::ClaudeDesktop
-            | AppType::OpenCode
-            | AppType::OpenClaw
-            | AppType::Hermes
-            | AppType::Pi => None,
+            AppType::ClaudeDesktop => {
+                let files = crate::claude_desktop_config::snapshot_live_files()?;
+                Ok(Self::ClaudeDesktop { files })
+            }
+            AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::Pi => {
+                Err(AppError::Config(format!(
+                    "additive app {} does not use exclusive live snapshots",
+                    app_type.as_str()
+                )))
+            }
         }
     }
 
-    fn capture_optional_json(path: std::path::PathBuf) -> Option<Option<Value>> {
+    fn capture_optional_json(path: std::path::PathBuf) -> Result<Option<Value>, AppError> {
         if !path.exists() {
-            return Some(None);
+            return Ok(None);
         }
         if !path.is_file() {
-            return None;
+            return Err(live_path_not_file(&path));
         }
-        match read_json_file(&path) {
-            Ok(value) => Some(Some(value)),
-            Err(_) => None,
-        }
+        read_json_file(&path).map(Some)
     }
 
-    fn capture_optional_text(path: &std::path::Path) -> Option<Option<String>> {
+    fn capture_optional_text(path: &Path) -> Result<Option<String>, AppError> {
         if !path.exists() {
-            return Some(None);
+            return Ok(None);
         }
         if !path.is_file() {
-            return None;
+            return Err(live_path_not_file(path));
         }
-        match fs::read_to_string(path) {
-            Ok(text) => Some(Some(text)),
-            Err(_) => None,
+        fs::read_to_string(path)
+            .map(Some)
+            .map_err(|e| AppError::io(path, e))
+    }
+
+    fn capture_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>, AppError> {
+        if !path.exists() {
+            return Ok(None);
         }
+        if !path.is_file() {
+            return Err(live_path_not_file(path));
+        }
+        fs::read(path).map(Some).map_err(|e| AppError::io(path, e))
     }
 
     pub(crate) fn restore(&self) -> Result<(), AppError> {
@@ -1270,28 +1272,14 @@ impl LiveSnapshot {
                     delete_file(&path)?;
                 }
             }
-            LiveSnapshot::Codex { auth, config } => {
-                let auth_path = get_codex_auth_path();
-                let config_path = get_codex_config_path();
-                if let Some(value) = auth {
-                    write_json_file_private(&auth_path, value)?;
-                } else if auth_path.exists() {
-                    delete_file(&auth_path)?;
-                }
-
-                if let Some(text) = config {
-                    crate::config::write_text_file(&config_path, text)?;
-                } else if config_path.exists() {
-                    delete_file(&config_path)?;
-                }
+            LiveSnapshot::Codex(snapshot) => {
+                snapshot.restore_preserving_newer_same_account_auth()?;
             }
             LiveSnapshot::Gemini { env, config } => {
-                use crate::gemini_config::{
-                    get_gemini_env_path, get_gemini_settings_path, write_gemini_env_atomic,
-                };
+                use crate::gemini_config::{get_gemini_env_path, get_gemini_settings_path};
                 let path = get_gemini_env_path();
-                if let Some(env_map) = env {
-                    write_gemini_env_atomic(env_map)?;
+                if let Some(bytes) = env {
+                    atomic_write_private(&path, bytes)?;
                 } else if path.exists() {
                     delete_file(&path)?;
                 }
@@ -1306,14 +1294,21 @@ impl LiveSnapshot {
             LiveSnapshot::Grok { config } => {
                 let path = crate::grok_config::get_grok_config_path();
                 if let Some(text) = config {
-                    crate::grok_config::write_grok_live_settings(&json!({ "config": text }))?;
+                    crate::config::write_text_file(&path, text)?;
                 } else if path.exists() {
                     delete_file(&path)?;
                 }
             }
+            LiveSnapshot::ClaudeDesktop { files } => {
+                crate::claude_desktop_config::restore_live_files(files)?;
+            }
         }
         Ok(())
     }
+}
+
+fn live_path_not_file(path: &Path) -> AppError {
+    AppError::Config(format!("Live 配置路径不是文件: {}", path.display()))
 }
 
 /// Write live configuration snapshot for a provider

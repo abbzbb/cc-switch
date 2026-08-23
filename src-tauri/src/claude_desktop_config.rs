@@ -88,7 +88,7 @@ pub struct DirectGatewayCredentials {
 }
 
 #[derive(Debug, Clone)]
-struct FileSnapshot {
+pub(crate) struct FileSnapshot {
     path: PathBuf,
     content: Option<Vec<u8>>,
 }
@@ -1138,6 +1138,18 @@ fn read_json_or_empty(path: &Path) -> Result<Value, AppError> {
     } else {
         Ok(json!({}))
     }
+}
+
+/// Capture the Claude Desktop files `apply_provider` mutates so a later
+/// `set_current_provider` failure can restore them after `with_rollback`
+/// has already returned.
+pub(crate) fn snapshot_live_files() -> Result<Vec<FileSnapshot>, AppError> {
+    let paths = current_platform_paths()?;
+    snapshot_files(&paths)
+}
+
+pub(crate) fn restore_live_files(snapshots: &[FileSnapshot]) -> Result<(), AppError> {
+    restore_snapshots(snapshots)
 }
 
 fn snapshot_files(paths: &ClaudeDesktopPaths) -> Result<Vec<FileSnapshot>, AppError> {

@@ -186,6 +186,20 @@ vi.mock("@/components/mcp/McpPanel", () => ({
     ),
 }));
 
+vi.mock("@/components/settings/SettingsPage", () => ({
+  SettingsPage: ({
+    onImportSuccess,
+  }: {
+    onImportSuccess?: () => void | Promise<void>;
+  }) => (
+    <div data-testid="settings-page">
+      <button type="button" onClick={() => void onImportSuccess?.()}>
+        import-success
+      </button>
+    </div>
+  ),
+}));
+
 const renderApp = (AppComponent: ComponentType) => {
   const client = new QueryClient();
   return render(
@@ -453,5 +467,70 @@ describe("App integration with MSW", () => {
 
     expect(skillsPanelMocks.openDiscovery).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("unified-skills-panel")).toBeInTheDocument();
+  });
+
+  it("invalidates only import-related queries after import success", async () => {
+    const { default: App } = await import("@/App");
+    const client = new QueryClient();
+    const invalidateSpy = vi.spyOn(client, "invalidateQueries");
+
+    render(
+      <QueryClientProvider client={client}>
+        <Suspense fallback={<div data-testid="loading">loading</div>}>
+          <App />
+        </Suspense>
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() => expect(providerListText()).toContain("claude-1"));
+    const callsBefore = invalidateSpy.mock.calls.length;
+
+    fireEvent.click(screen.getByTitle("common.settings"));
+    expect(await screen.findByTestId("settings-page")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("import-success"));
+
+    await waitFor(() => {
+      expect(invalidateSpy.mock.calls.length).toBeGreaterThan(callsBefore);
+    });
+
+    const importCalls = invalidateSpy.mock.calls.slice(callsBefore);
+    expect(importCalls.length).toBeGreaterThan(0);
+    expect(
+      importCalls.every(
+        (call) =>
+          call.length > 0 &&
+          call[0] != null &&
+          typeof call[0] === "object" &&
+          "queryKey" in call[0],
+      ),
+    ).toBe(true);
+
+    const importKeys = importCalls.map(
+      (call) => (call[0] as { queryKey: unknown }).queryKey,
+    );
+    expect(importKeys).toEqual(
+      expect.arrayContaining([
+        ["providers"],
+        ["settings"],
+        ["mcp", "all"],
+        ["skills"],
+        ["profiles"],
+        ["proxyStatus"],
+        ["proxyTakeoverStatus"],
+        ["modelCombos"],
+        ["sidecarSettings"],
+        ["sessions"],
+        ["sessionMessages"],
+        ["globalProxyUrl"],
+        ["usage"],
+        ["pi"],
+        ["openclaw"],
+        ["hermes"],
+        ["opencodeLiveProviderIds"],
+        ["providers", "claude-desktop"],
+        ["omo", "current-provider-id"],
+        ["omo-slim", "current-provider-id"],
+      ]),
+    );
   });
 });

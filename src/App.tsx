@@ -32,6 +32,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Provider, VisibleApps } from "@/types";
 import type { EnvConflict } from "@/types/env";
 import { proxyKeys, useProvidersQuery, useSettingsQuery } from "@/lib/query";
+import { usageKeys } from "@/lib/query/usage";
 import {
   piApi,
   providersApi,
@@ -100,7 +101,7 @@ import {
   useDisableCurrentOmo,
   useDisableCurrentOmoSlim,
 } from "@/lib/query/omo";
-import { invalidatePiProviderCaches, usePiCurrentState } from "@/lib/query/pi";
+import { invalidatePiProviderCaches, piKeys, usePiCurrentState } from "@/lib/query/pi";
 import WorkspaceFilesPanel from "@/components/workspace/WorkspaceFilesPanel";
 import EnvPanel from "@/components/openclaw/EnvPanel";
 import ToolsPanel from "@/components/openclaw/ToolsPanel";
@@ -950,7 +951,41 @@ function App() {
 
   const handleImportSuccess = async () => {
     try {
-      await queryClient.invalidateQueries();
+      // Import mutates providers/settings/mcp/skills/profiles/proxy/sessions.
+      // Never call bare invalidateQueries() — that refetches every query and
+      // re-hydrates dirty settings forms.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["providers"] }),
+        queryClient.invalidateQueries({ queryKey: ["settings"] }),
+        queryClient.invalidateQueries({ queryKey: ["mcp", "all"] }),
+        queryClient.invalidateQueries({ queryKey: ["skills"] }),
+        queryClient.invalidateQueries({ queryKey: ["profiles"] }),
+        queryClient.invalidateQueries({ queryKey: proxyKeys.status }),
+        queryClient.invalidateQueries({
+          queryKey: proxyKeys.takeoverStatus,
+        }),
+        queryClient.invalidateQueries({ queryKey: proxyKeys.combos }),
+        queryClient.invalidateQueries({ queryKey: proxyKeys.sidecars }),
+        queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+        queryClient.invalidateQueries({ queryKey: ["sessionMessages"] }),
+        queryClient.invalidateQueries({ queryKey: ["globalProxyUrl"] }),
+        queryClient.invalidateQueries({ queryKey: usageKeys.all }),
+        queryClient.invalidateQueries({ queryKey: piKeys.all }),
+        queryClient.invalidateQueries({ queryKey: openclawKeys.all }),
+        queryClient.invalidateQueries({ queryKey: hermesKeys.all }),
+        queryClient.invalidateQueries({
+          queryKey: ["opencodeLiveProviderIds"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["providers", "claude-desktop"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["omo", "current-provider-id"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["omo-slim", "current-provider-id"],
+        }),
+      ]);
     } catch (error) {
       console.error("[App] Failed to refresh queries after import", error);
       await refetch();

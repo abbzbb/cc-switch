@@ -254,18 +254,28 @@ pub(crate) fn format_etag_header(raw: &str) -> String {
     format!("\"{trimmed}\"")
 }
 
-fn put_precondition_headers(precondition: PutPrecondition<'_>) -> Vec<(&'static str, String)> {
+fn invalid_if_match_etag_error() -> AppError {
+    AppError::localized(
+        "webdav.put.invalid_etag",
+        "条件 PUT 缺少有效的 If-Match ETag，已拒绝无条件覆盖。",
+        "Conditional PUT is missing a usable If-Match ETag; refusing an unconditional overwrite.",
+    )
+}
+
+fn put_precondition_headers(
+    precondition: PutPrecondition<'_>,
+) -> Result<Vec<(&'static str, String)>, AppError> {
     match precondition {
-        PutPrecondition::None => Vec::new(),
+        PutPrecondition::None => Ok(Vec::new()),
         PutPrecondition::IfMatch(etag) => {
             let trimmed = etag.trim();
             if trimmed.is_empty() {
-                Vec::new()
+                Err(invalid_if_match_etag_error())
             } else {
-                vec![("If-Match", format_etag_header(trimmed))]
+                Ok(vec![("If-Match", format_etag_header(trimmed))])
             }
         }
-        PutPrecondition::IfNoneMatchAny => vec![("If-None-Match", "*".to_string())],
+        PutPrecondition::IfNoneMatchAny => Ok(vec![("If-None-Match", "*".to_string())]),
     }
 }
 
@@ -305,7 +315,7 @@ pub async fn put_bytes(
         auth,
     );
 
-    for (name, value) in put_precondition_headers(precondition) {
+    for (name, value) in put_precondition_headers(precondition)? {
         let header_value = reqwest::header::HeaderValue::from_str(&value).map_err(|_| {
             AppError::localized(
                 "webdav.put.invalid_etag",
@@ -353,11 +363,7 @@ pub async fn get_bytes(
     }
     ensure_content_length_within_limit(resp.headers(), max_bytes, url)?;
 
-    let etag = resp
-        .headers()
-        .get("etag")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    let etag = etag_from_headers(resp.headers());
     let mut bytes = Vec::new();
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
@@ -376,8 +382,40 @@ pub async fn get_bytes(
     Ok(Some((bytes, etag)))
 }
 
-/// HEAD request to retrieve the ETag. Returns `None` on 404.
-pub async fn head_etag(url: &str, auth: &WebDavAuth) -> Result<Option<String>, AppError> {
+/// Result of probing a remote object for a conditional PUT.
+///
+/// Distinguishes 404 from “exists but the server omitted ETag”, which must
+/// fail closed on auto-sync instead of becoming an unconditional overwrite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadState {
+    Missing,
+    Exists { etag: Option<String> },
+}
+
+fn etag_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    headers
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn head_state_from_response(
+    status: StatusCode,
+    etag: Option<String>,
+) -> Result<HeadState, StatusCode> {
+    if status == StatusCode::NOT_FOUND {
+        return Ok(HeadState::Missing);
+    }
+    if !status.is_success() {
+        return Err(status);
+    }
+    Ok(HeadState::Exists { etag })
+}
+
+/// HEAD a remote object, distinguishing missing vs present-without-ETag.
+pub async fn head_object_state(url: &str, auth: &WebDavAuth) -> Result<HeadState, AppError> {
     let client = http_client::get();
     let resp = apply_auth(
         client
@@ -391,17 +429,18 @@ pub async fn head_etag(url: &str, auth: &WebDavAuth) -> Result<Option<String>, A
         webdav_transport_error("webdav.head_failed", "HEAD 请求", "HEAD request", url, &e)
     })?;
 
-    if resp.status() == StatusCode::NOT_FOUND {
-        return Ok(None);
+    match head_state_from_response(resp.status(), etag_from_headers(resp.headers())) {
+        Ok(state) => Ok(state),
+        Err(status) => Err(webdav_status_error("HEAD", status, url)),
     }
-    if !resp.status().is_success() {
-        return Err(webdav_status_error("HEAD", resp.status(), url));
+}
+
+/// HEAD request to retrieve the ETag. Returns `None` on 404 or when omitted.
+pub async fn head_etag(url: &str, auth: &WebDavAuth) -> Result<Option<String>, AppError> {
+    match head_object_state(url, auth).await? {
+        HeadState::Missing => Ok(None),
+        HeadState::Exists { etag } => Ok(etag),
     }
-    Ok(resp
-        .headers()
-        .get("etag")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string()))
 }
 
 // ─── Internal helpers ────────────────────────────────────────
@@ -620,15 +659,17 @@ mod tests {
     #[test]
     fn put_precondition_headers_if_match_and_create_only() {
         assert_eq!(
-            put_precondition_headers(PutPrecondition::IfMatch("abc")),
+            put_precondition_headers(PutPrecondition::IfMatch("abc")).expect("etag"),
             vec![("If-Match", "\"abc\"".to_string())]
         );
         assert_eq!(
-            put_precondition_headers(PutPrecondition::IfNoneMatchAny),
+            put_precondition_headers(PutPrecondition::IfNoneMatchAny).expect("create-only"),
             vec![("If-None-Match", "*".to_string())]
         );
-        assert!(put_precondition_headers(PutPrecondition::IfMatch("  ")).is_empty());
-        assert!(put_precondition_headers(PutPrecondition::None).is_empty());
+        assert!(put_precondition_headers(PutPrecondition::IfMatch("  ")).is_err());
+        assert!(put_precondition_headers(PutPrecondition::None)
+            .expect("none")
+            .is_empty());
     }
 
     #[test]
@@ -652,5 +693,39 @@ mod tests {
             "https://dav.example.com/m",
         );
         assert!(generic.to_string().contains("500"));
+    }
+
+    #[test]
+    fn etag_from_headers_trims_and_drops_blank() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(etag_from_headers(&headers), None);
+
+        headers.insert("etag", HeaderValue::from_static("  "));
+        assert_eq!(etag_from_headers(&headers), None);
+
+        headers.insert("etag", HeaderValue::from_static("\"abc\""));
+        assert_eq!(etag_from_headers(&headers).as_deref(), Some("\"abc\""));
+    }
+
+    #[test]
+    fn head_state_distinguishes_missing_from_omitted_etag() {
+        assert_eq!(
+            head_state_from_response(StatusCode::NOT_FOUND, None).unwrap(),
+            HeadState::Missing
+        );
+        assert_eq!(
+            head_state_from_response(StatusCode::OK, None).unwrap(),
+            HeadState::Exists { etag: None }
+        );
+        assert_eq!(
+            head_state_from_response(StatusCode::OK, Some("\"abc\"".to_string())).unwrap(),
+            HeadState::Exists {
+                etag: Some("\"abc\"".to_string())
+            }
+        );
+        assert_eq!(
+            head_state_from_response(StatusCode::INTERNAL_SERVER_ERROR, None).unwrap_err(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

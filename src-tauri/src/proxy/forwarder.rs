@@ -740,19 +740,24 @@ impl RequestForwarder {
 
             // 发起请求前先获取熔断器放行许可（HalfOpen 会占用探测名额）
             // 单 Provider 场景下跳过此检查，避免熔断器阻塞所有请求
-            let (allowed, used_half_open_permit) = if bypass_circuit_breaker {
-                (true, false)
+            let allow = if bypass_circuit_breaker {
+                None
             } else {
-                let permit = self
-                    .router
-                    .allow_provider_request(&provider.id, app_type_str)
-                    .await;
-                (permit.allowed, permit.used_half_open_permit)
+                Some(
+                    self.router
+                        .allow_provider_request(&provider.id, app_type_str)
+                        .await,
+                )
+            };
+            let (allowed, used_half_open_permit) = match &allow {
+                None => (true, false),
+                Some(permit) => (permit.allowed, permit.used_half_open_permit),
             };
 
             if !allowed {
                 continue;
             }
+            let _half_open_guard = allow;
 
             // PRE-SEND 优化器：每个 provider 独立决定是否优化
             // clone body 以避免 Bedrock 优化字段泄漏到非 Bedrock provider（failover 场景）
@@ -1618,12 +1623,6 @@ impl RequestForwarder {
         // Gemini SDKs put the API key in `?key=`. Inbound values are the live
         // PROXY_MANAGED placeholder or a stale client key; never forward them.
         // Header injection already sets `x-goog-api-key` / Authorization.
-        let strip_gemini_key = matches!(app_type, AppType::Gemini)
-            || adapter.name() == "Gemini"
-            || matches!(resolved_claude_api_format.as_deref(), Some("gemini_native"));
-        if strip_gemini_key {
-            url = strip_named_query_params(&url, &["key"]);
-        }
         url = strip_proxy_placeholder_query_values(&url);
 
         // 记录映射后的出站模型名（此时 mapped_body 已完成接管映射 / [1m] 剥离 /
@@ -2055,6 +2054,10 @@ impl RequestForwarder {
                         "xAI OAuth 认证不可用（无 AppHandle）".to_string(),
                     ));
                 }
+            }
+
+            if auth.strategy == AuthStrategy::GoogleOAuth {
+                super::providers::ensure_gemini_oauth_access_token(&mut auth).await?;
             }
 
             for secret in std::iter::once(&auth.api_key).chain(auth.access_token.iter()) {

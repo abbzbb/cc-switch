@@ -989,7 +989,7 @@ const GEMINI_OAUTH_CLIENT_SECRET: &str = "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";
 ///
 /// Google OAuth access_token 仅有 ~1h 有效期，需要定期用 refresh_token 刷新。
 /// refresh_token 本身不过期（除非用户撤销授权）。
-async fn refresh_gemini_token(refresh_token: &str) -> Option<String> {
+pub(crate) async fn refresh_gemini_token(refresh_token: &str) -> Option<String> {
     let client = crate::proxy::http_client::get();
 
     let resp = client

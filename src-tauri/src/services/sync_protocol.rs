@@ -506,6 +506,65 @@ fn auto_upload_conflict_error() -> AppError {
     )
 }
 
+pub(crate) fn auto_upload_missing_etag_error() -> AppError {
+    localized(
+        "sync.auto_upload.missing_etag",
+        "远端已有数据但服务器未返回 ETag，自动上传已取消，以免覆盖远端。",
+        "Remote already has data but the server omitted ETag; auto-upload aborted to avoid overwriting the remote.",
+    )
+}
+
+/// Fail-closed PUT decision for a single auto-sync object (artifact or manifest).
+///
+/// Manual upload is [`ResolvedPut::Unconditional`] and may overwrite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResolvedPut<'a> {
+    Unconditional,
+    IfMatch(&'a str),
+    IfNoneMatchAny,
+}
+
+/// Resolve If-Match / If-None-Match / abort for one PUT.
+///
+/// Auto-sync never returns [`ResolvedPut::Unconditional`]. If the remote object
+/// exists but HEAD/GET omitted a usable ETag, this is a conflict.
+pub(crate) fn resolve_put_precondition<'a>(
+    conditional: bool,
+    remote_exists: bool,
+    fresh_etag: Option<&'a str>,
+) -> Result<ResolvedPut<'a>, AppError> {
+    if !conditional {
+        return Ok(ResolvedPut::Unconditional);
+    }
+    if !remote_exists {
+        return Ok(ResolvedPut::IfNoneMatchAny);
+    }
+    match nonempty_cursor(fresh_etag) {
+        Some(etag) => Ok(ResolvedPut::IfMatch(etag)),
+        None => Err(auto_upload_missing_etag_error()),
+    }
+}
+
+/// Require a usable ETag from the HEAD/GET just performed (never the stored cursor).
+pub(crate) fn require_if_match_etag(fresh_etag: Option<&str>) -> Result<&str, AppError> {
+    nonempty_cursor(fresh_etag).ok_or_else(auto_upload_missing_etag_error)
+}
+
+/// Run snapshot PUTs in order (artifacts then manifest). Stop on the first error
+/// so a 412 cannot proceed to remaining objects.
+pub(crate) fn put_in_order<T, F>(
+    names: impl IntoIterator<Item = T>,
+    mut put: F,
+) -> Result<(), AppError>
+where
+    F: FnMut(T) -> Result<(), AppError>,
+{
+    for name in names {
+        put(name)?;
+    }
+    Ok(())
+}
+
 /// Decide whether auto-sync may upload the local snapshot.
 ///
 /// - Empty remote: allow (first seed).
@@ -910,5 +969,82 @@ mod tests {
         assert_eq!(normalize_etag("abc"), "abc");
         assert_eq!(normalize_etag("W/\"abc\""), "abc");
         assert_eq!(normalize_etag("  \"abc\"  "), "abc");
+    }
+
+    #[test]
+    fn resolve_put_precondition_manual_is_unconditional() {
+        assert_eq!(
+            resolve_put_precondition(false, true, Some("etag")).unwrap(),
+            ResolvedPut::Unconditional
+        );
+        assert_eq!(
+            resolve_put_precondition(false, true, None).unwrap(),
+            ResolvedPut::Unconditional
+        );
+    }
+
+    #[test]
+    fn resolve_put_precondition_auto_if_match_when_etag_present() {
+        assert_eq!(
+            resolve_put_precondition(true, true, Some("  artifact-etag  ")).unwrap(),
+            ResolvedPut::IfMatch("artifact-etag")
+        );
+    }
+
+    #[test]
+    fn resolve_put_precondition_auto_if_none_match_when_missing() {
+        assert_eq!(
+            resolve_put_precondition(true, false, None).unwrap(),
+            ResolvedPut::IfNoneMatchAny
+        );
+        // A leftover etag must not be used as If-Match when the object is gone.
+        assert_eq!(
+            resolve_put_precondition(true, false, Some("stale")).unwrap(),
+            ResolvedPut::IfNoneMatchAny
+        );
+    }
+
+    #[test]
+    fn resolve_put_precondition_auto_denies_when_exists_without_etag() {
+        let err = resolve_put_precondition(true, true, None)
+            .expect_err("existing object without ETag must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ETag") || msg.contains("omitted") || msg.contains("未返回"),
+            "unexpected error: {msg}"
+        );
+
+        let err =
+            resolve_put_precondition(true, true, Some("  ")).expect_err("blank ETag is not usable");
+        let msg = err.to_string();
+        assert!(msg.contains("ETag") || msg.contains("omitted") || msg.contains("未返回"));
+    }
+
+    #[test]
+    fn require_if_match_etag_uses_fresh_value_only() {
+        assert_eq!(require_if_match_etag(Some("\"abc\"")).unwrap(), "\"abc\"");
+        assert!(require_if_match_etag(None).is_err());
+        assert!(require_if_match_etag(Some("")).is_err());
+    }
+
+    #[test]
+    fn put_in_order_stops_on_first_error_and_skips_remaining() {
+        let mut attempted = Vec::new();
+        let err = put_in_order(["db.sql", "skills.zip", "manifest.json"], |name| {
+            attempted.push(name);
+            if name == "skills.zip" {
+                Err(AppError::localized(
+                    "webdav.put.precondition_failed",
+                    "远端数据已被其他设备更新（412），未覆盖远端。",
+                    "Remote data was updated by another client (412 Precondition Failed); remote was not overwritten.",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("412 on an artifact must abort");
+
+        assert_eq!(attempted, vec!["db.sql", "skills.zip"]);
+        assert!(err.to_string().contains("412"));
     }
 }

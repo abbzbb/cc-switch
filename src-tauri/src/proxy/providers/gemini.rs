@@ -278,6 +278,41 @@ impl ProviderAdapter for GeminiAdapter {
     }
 }
 
+pub(crate) async fn ensure_gemini_oauth_access_token(
+    auth: &mut AuthInfo,
+) -> Result<(), ProxyError> {
+    if oauth_bearer_token(auth).is_ok() {
+        return Ok(());
+    }
+
+    let creds = GeminiAdapter::new()
+        .parse_oauth_credentials(&auth.api_key)
+        .ok_or_else(|| {
+            ProxyError::AuthError(
+                "Gemini OAuth access_token is empty; refresh ~/.gemini/oauth_creds.json via the gemini CLI"
+                    .to_string(),
+            )
+        })?;
+    let refresh = creds
+        .refresh_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| {
+            ProxyError::AuthError(
+                "Gemini OAuth access_token is empty and no refresh_token is available".to_string(),
+            )
+        })?;
+
+    let Some(token) = crate::services::subscription::refresh_gemini_token(refresh).await else {
+        return Err(ProxyError::AuthError(
+            "Gemini OAuth access_token is empty and refresh failed".to_string(),
+        ));
+    };
+    auth.access_token = Some(token);
+    Ok(())
+}
+
 fn oauth_bearer_token(auth: &AuthInfo) -> Result<&str, ProxyError> {
     if let Some(token) = auth
         .access_token

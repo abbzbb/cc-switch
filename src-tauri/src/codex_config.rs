@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use toml_edit::DocumentMut;
 
 pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
@@ -781,6 +782,13 @@ pub fn write_codex_live_atomic(
     auth: &Value,
     config_text_opt: Option<&str>,
 ) -> Result<(), AppError> {
+    with_live_codex_toml_lock(|| write_codex_live_atomic_unlocked(auth, config_text_opt))
+}
+
+fn write_codex_live_atomic_unlocked(
+    auth: &Value,
+    config_text_opt: Option<&str>,
+) -> Result<(), AppError> {
     let auth_path = get_codex_auth_path();
     let config_path = get_codex_config_path();
 
@@ -812,8 +820,9 @@ pub fn write_codex_live_atomic(
     // 第一步：写 auth.json
     write_json_file_private(&auth_path, auth)?;
 
-    // 第二步：写 config.toml（失败则回滚 auth.json）
-    if let Err(e) = write_text_file(&config_path, &cfg_text) {
+    // 第二步：写 config.toml（失败则回滚 auth.json）。Caller already holds
+    // the live-toml lock via `write_codex_live_atomic`.
+    if let Err(e) = write_codex_live_config_atomic_unlocked(Some(&cfg_text)) {
         // 回滚 auth.json
         if let Some(bytes) = old_auth {
             let _ = atomic_write_private(&auth_path, &bytes);
@@ -869,12 +878,36 @@ pub(crate) fn is_custom_codex_model_provider_id(id: &str) -> bool {
             .any(|reserved| reserved.eq_ignore_ascii_case(id))
 }
 
+fn live_codex_toml_lock() -> &'static Mutex<()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    &LOCK
+}
+
+pub(crate) fn with_live_codex_toml_lock<T>(update: impl FnOnce() -> T) -> T {
+    let _guard = live_codex_toml_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    update()
+}
+
 /// Write only Codex `config.toml` for provider switching.
 ///
 /// Codex login state lives in `auth.json`; provider routing, endpoint, model,
 /// and provider-scoped bearer tokens live in `config.toml`. Provider switches
 /// should not overwrite the user's ChatGPT login cache.
+///
+/// Takes the live-toml lock around the file write. Callers that already hold
+/// the lock (read+write in one critical section) must use
+/// `write_codex_live_config_atomic_unlocked`.
 pub fn write_codex_live_config_atomic(config_text_opt: Option<&str>) -> Result<(), AppError> {
+    with_live_codex_toml_lock(|| write_codex_live_config_atomic_unlocked(config_text_opt))
+}
+
+/// Write live `config.toml` without taking the lock. The caller must already
+/// hold `with_live_codex_toml_lock`.
+pub(crate) fn write_codex_live_config_atomic_unlocked(
+    config_text_opt: Option<&str>,
+) -> Result<(), AppError> {
     let config_path = get_codex_config_path();
     let cfg_text = match config_text_opt {
         Some(config_text) => config_text.to_string(),

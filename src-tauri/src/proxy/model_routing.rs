@@ -913,7 +913,7 @@ pub fn rewrite_live_codex_toml_for_shared_catalog(
     providers: &[Provider],
     current_provider_id: Option<&str>,
 ) -> Result<(), AppError> {
-    with_live_codex_toml_lock(|| {
+    crate::codex_config::with_live_codex_toml_lock(|| {
         let config = crate::codex_config::read_codex_config_text()?;
         if config.trim().is_empty() {
             return Ok(());
@@ -923,7 +923,7 @@ pub fn rewrite_live_codex_toml_for_shared_catalog(
         if next == config {
             return Ok(());
         }
-        crate::codex_config::write_codex_live_config_atomic(Some(&next))
+        crate::codex_config::write_codex_live_config_atomic_unlocked(Some(&next))
     })
 }
 
@@ -1381,24 +1381,12 @@ pub fn provider_rejects_remote_compact(provider: &Provider) -> bool {
 /// Write a third-party session pick into live `config.toml` `model` so the
 /// next Codex process (and any helper that rereads the file) stops calling
 /// Official. Official ids are never persisted here.
-fn live_codex_toml_lock() -> &'static Mutex<()> {
-    static LOCK: Mutex<()> = Mutex::new(());
-    &LOCK
-}
-
-pub(crate) fn with_live_codex_toml_lock<T>(update: impl FnOnce() -> T) -> T {
-    let _guard = live_codex_toml_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    update()
-}
-
 pub fn persist_third_party_live_codex_model(model: &str) {
-    with_live_codex_toml_lock(|| {
+    crate::codex_config::with_live_codex_toml_lock(|| {
         let Some(next) = live_codex_model_persist_update(model) else {
             return;
         };
-        match crate::codex_config::write_codex_live_config_atomic(Some(&next)) {
+        match crate::codex_config::write_codex_live_config_atomic_unlocked(Some(&next)) {
             Ok(()) => log::info!("[Codex] persisted live model = {model}"),
             Err(error) => log::warn!("[Codex] failed to persist live model {model}: {error}"),
         }

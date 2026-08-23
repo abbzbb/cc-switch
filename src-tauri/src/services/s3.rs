@@ -391,18 +391,28 @@ pub(crate) fn format_etag_header(raw: &str) -> String {
     format!("\"{trimmed}\"")
 }
 
-fn put_precondition_headers(precondition: PutPrecondition<'_>) -> Vec<(&'static str, String)> {
+fn invalid_if_match_etag_error() -> AppError {
+    AppError::localized(
+        "s3.put.invalid_etag",
+        "条件 PUT 缺少有效的 If-Match ETag，已拒绝无条件覆盖。",
+        "Conditional PUT is missing a usable If-Match ETag; refusing an unconditional overwrite.",
+    )
+}
+
+fn put_precondition_headers(
+    precondition: PutPrecondition<'_>,
+) -> Result<Vec<(&'static str, String)>, AppError> {
     match precondition {
-        PutPrecondition::None => Vec::new(),
+        PutPrecondition::None => Ok(Vec::new()),
         PutPrecondition::IfMatch(etag) => {
             let trimmed = etag.trim();
             if trimmed.is_empty() {
-                Vec::new()
+                Err(invalid_if_match_etag_error())
             } else {
-                vec![("if-match", format_etag_header(trimmed))]
+                Ok(vec![("if-match", format_etag_header(trimmed))])
             }
         }
-        PutPrecondition::IfNoneMatchAny => vec![("if-none-match", "*".to_string())],
+        PutPrecondition::IfNoneMatchAny => Ok(vec![("if-none-match", "*".to_string())]),
     }
 }
 
@@ -454,7 +464,7 @@ pub(crate) async fn put_object_conditional(
     let body_hash = sha256_hex(&bytes);
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("content-type", content_type.parse().unwrap());
-    for (name, value) in put_precondition_headers(precondition) {
+    for (name, value) in put_precondition_headers(precondition)? {
         let header_value = reqwest::header::HeaderValue::from_str(&value).map_err(|_| {
             AppError::localized(
                 "s3.put.invalid_etag",
@@ -533,11 +543,7 @@ pub(crate) async fn get_object(
     }
     ensure_content_length_within_limit(resp.headers(), max_bytes, &url_str)?;
 
-    let etag = resp
-        .headers()
-        .get("etag")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    let etag = etag_from_headers(resp.headers());
 
     let mut bytes = Vec::new();
     let mut stream = resp.bytes_stream();
@@ -557,11 +563,43 @@ pub(crate) async fn get_object(
     Ok(Some((bytes, etag)))
 }
 
-/// Retrieve the ETag of an S3 object via HEAD. Returns `None` on 404.
-pub(crate) async fn head_object(
+/// Result of probing an S3 object for a conditional PUT.
+///
+/// Distinguishes 404 from “exists but the server omitted ETag”, which must
+/// fail closed on auto-sync instead of becoming an unconditional overwrite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HeadState {
+    Missing,
+    Exists { etag: Option<String> },
+}
+
+fn etag_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    headers
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn head_state_from_response(
+    status: StatusCode,
+    etag: Option<String>,
+) -> Result<HeadState, StatusCode> {
+    if status == StatusCode::NOT_FOUND {
+        return Ok(HeadState::Missing);
+    }
+    if !status.is_success() {
+        return Err(status);
+    }
+    Ok(HeadState::Exists { etag })
+}
+
+/// HEAD an S3 object, distinguishing missing vs present-without-ETag.
+pub(crate) async fn head_object_state(
     creds: &S3Credentials,
     key: &str,
-) -> Result<Option<String>, AppError> {
+) -> Result<HeadState, AppError> {
     let url_str = build_object_url(creds, key);
     let url = Url::parse(&url_str).map_err(|e| {
         AppError::localized(
@@ -591,17 +629,21 @@ pub(crate) async fn head_object(
         .await
         .map_err(|e| s3_transport_error("s3.head_failed", "HEAD 请求", "HEAD request", &e))?;
 
-    if resp.status() == StatusCode::NOT_FOUND {
-        return Ok(None);
+    match head_state_from_response(resp.status(), etag_from_headers(resp.headers())) {
+        Ok(state) => Ok(state),
+        Err(status) => Err(s3_status_error("HEAD", status, &url_str)),
     }
-    if !resp.status().is_success() {
-        return Err(s3_status_error("HEAD", resp.status(), &url_str));
+}
+
+/// Retrieve the ETag of an S3 object via HEAD. Returns `None` on 404 or when omitted.
+pub(crate) async fn head_object(
+    creds: &S3Credentials,
+    key: &str,
+) -> Result<Option<String>, AppError> {
+    match head_object_state(creds, key).await? {
+        HeadState::Missing => Ok(None),
+        HeadState::Exists { etag } => Ok(etag),
     }
-    Ok(resp
-        .headers()
-        .get("etag")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string()))
 }
 
 // ─── Tests ───────────────────────────────────────────────────
@@ -888,7 +930,9 @@ mod tests {
 
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("content-type", "application/json".parse().unwrap());
-        for (name, value) in put_precondition_headers(PutPrecondition::IfMatch("abc")) {
+        for (name, value) in
+            put_precondition_headers(PutPrecondition::IfMatch("abc")).expect("etag")
+        {
             headers.insert(name, value.parse().unwrap());
         }
         sign_request("PUT", &url, &mut headers, &body_hash, &creds, now);
@@ -976,15 +1020,17 @@ mod tests {
     #[test]
     fn put_precondition_headers_if_match_and_create_only() {
         assert_eq!(
-            put_precondition_headers(PutPrecondition::IfMatch("abc")),
+            put_precondition_headers(PutPrecondition::IfMatch("abc")).expect("etag"),
             vec![("if-match", "\"abc\"".to_string())]
         );
         assert_eq!(
-            put_precondition_headers(PutPrecondition::IfNoneMatchAny),
+            put_precondition_headers(PutPrecondition::IfNoneMatchAny).expect("create-only"),
             vec![("if-none-match", "*".to_string())]
         );
-        assert!(put_precondition_headers(PutPrecondition::IfMatch("  ")).is_empty());
-        assert!(put_precondition_headers(PutPrecondition::None).is_empty());
+        assert!(put_precondition_headers(PutPrecondition::IfMatch("  ")).is_err());
+        assert!(put_precondition_headers(PutPrecondition::None)
+            .expect("none")
+            .is_empty());
     }
 
     #[test]
@@ -1004,6 +1050,41 @@ mod tests {
             "https://bucket.s3.us-east-1.amazonaws.com/manifest.json",
         );
         assert!(generic.to_string().contains("500"));
+    }
+
+    #[test]
+    fn etag_from_headers_trims_and_drops_blank() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+        let mut headers = HeaderMap::new();
+        assert_eq!(etag_from_headers(&headers), None);
+
+        headers.insert("etag", HeaderValue::from_static("  "));
+        assert_eq!(etag_from_headers(&headers), None);
+
+        headers.insert("etag", HeaderValue::from_static("\"abc\""));
+        assert_eq!(etag_from_headers(&headers).as_deref(), Some("\"abc\""));
+    }
+
+    #[test]
+    fn head_state_distinguishes_missing_from_omitted_etag() {
+        assert_eq!(
+            head_state_from_response(StatusCode::NOT_FOUND, None).unwrap(),
+            HeadState::Missing
+        );
+        assert_eq!(
+            head_state_from_response(StatusCode::OK, None).unwrap(),
+            HeadState::Exists { etag: None }
+        );
+        assert_eq!(
+            head_state_from_response(StatusCode::OK, Some("\"abc\"".to_string())).unwrap(),
+            HeadState::Exists {
+                etag: Some("\"abc\"".to_string())
+            }
+        );
+        assert_eq!(
+            head_state_from_response(StatusCode::FORBIDDEN, None).unwrap_err(),
+            StatusCode::FORBIDDEN
+        );
     }
 
     // ── Helper ──

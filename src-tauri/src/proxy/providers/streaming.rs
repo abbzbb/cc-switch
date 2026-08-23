@@ -22,9 +22,16 @@ struct OpenAIStreamChunk {
     usage: Option<Usage>,
 }
 
+fn deserialize_delta_null_as_default<'de, D>(deserializer: D) -> Result<Delta, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Delta>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Debug, Deserialize)]
 struct StreamChoice {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_delta_null_as_default")]
     delta: Delta,
     #[serde(default)]
     finish_reason: Option<String>,
@@ -402,7 +409,8 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                                     continue;
                                 }
 
-                                if let Ok(chunk) = serde_json::from_str::<OpenAIStreamChunk>(data) {
+                                match serde_json::from_str::<OpenAIStreamChunk>(data) {
+                                    Ok(chunk) => {
                                     log::debug!("[Claude/OpenRouter] <<< SSE chunk received");
 
                                     if message_id.is_none() && !chunk.id.is_empty() {
@@ -737,6 +745,12 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                                             // 缓存 message_delta，等到 [DONE] 时发送（以便收集完整的 usage）
                                             pending_message_delta = Some((stop_reason, usage_json));
                                         }
+                                    }
+                                    }
+                                    Err(error) => {
+                                        log::debug!(
+                                            "[Claude/OpenRouter] skipped malformed SSE JSON: {error}"
+                                        );
                                     }
                                 }
                             }
@@ -1413,6 +1427,11 @@ mod tests {
             missing_delta.choices[0].finish_reason.as_deref(),
             Some("stop")
         );
+        let null_delta: OpenAIStreamChunk =
+            serde_json::from_str(r#"{"id":"x","choices":[{"delta":null,"finish_reason":"stop"}]}"#)
+                .unwrap();
+        assert_eq!(null_delta.choices[0].finish_reason.as_deref(), Some("stop"));
+        assert!(null_delta.choices[0].delta.content.is_none());
         assert!(missing_delta.choices[0].delta.content.is_none());
 
         let array_content: OpenAIStreamChunk = serde_json::from_str(

@@ -14,11 +14,11 @@ use crate::settings::{update_s3_sync_status, S3SyncSettings, WebDavSyncStatus};
 
 pub(crate) use super::sync_protocol::run_with_sync_lock;
 use super::sync_protocol::{
-    apply_snapshot, build_local_snapshot, localized, persist_sync_success_best_effort, sha256_hex,
-    should_allow_auto_upload, validate_artifact_size_limit, validate_manifest_compat,
-    verify_artifact, ArtifactMeta, RemoteLayout, SyncManifest, DB_COMPAT_VERSION,
-    MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES, PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST,
-    REMOTE_SKILLS_ZIP,
+    apply_snapshot, build_local_snapshot, localized, persist_sync_success_best_effort,
+    require_if_match_etag, resolve_put_precondition, sha256_hex, should_allow_auto_upload,
+    validate_artifact_size_limit, validate_manifest_compat, verify_artifact, ArtifactMeta,
+    RemoteLayout, ResolvedPut, SyncManifest, DB_COMPAT_VERSION, MAX_MANIFEST_BYTES,
+    MAX_SYNC_ARTIFACT_BYTES, PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
 };
 
 #[cfg(test)]
@@ -67,9 +67,7 @@ async fn upload_snapshot(
 
     if conditional {
         let remote = s3::get_object(&creds, &manifest_key, MAX_MANIFEST_BYTES).await?;
-        remote_exists = remote
-            .as_ref()
-            .is_some_and(|(bytes, _etag)| !bytes.is_empty());
+        remote_exists = remote.is_some();
         let remote_etag = remote.as_ref().and_then(|(_, etag)| etag.as_deref());
         let remote_hash = remote
             .as_ref()
@@ -83,26 +81,45 @@ async fn upload_snapshot(
             remote_hash.as_deref(),
         )?;
 
-        if_match_etag = settings
-            .status
-            .last_remote_etag
-            .as_deref()
+        // Prefer the ETag from this GET, not the stored cursor. Hash-only
+        // should_allow_auto_upload can succeed without last_remote_etag.
+        if_match_etag = remote
+            .as_ref()
+            .and_then(|(_bytes, etag)| etag.as_deref())
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
     }
 
+    // Fail closed before any artifact PUT: existing object without ETag
+    // must not last-write-wins.
+    let manifest_precondition =
+        put_precondition(conditional, remote_exists, if_match_etag.as_deref())?;
+
     let snapshot = build_local_snapshot(db)?;
 
-    // Upload order: artifacts first, manifest last (best-effort consistency)
+    // Upload order: artifacts first, manifest last. Any 412 aborts remaining
+    // objects. Auto-sync HEADs each artifact and uses If-Match / If-None-Match;
+    // manual upload stays overwrite.
     let db_key = s3_key(settings, REMOTE_DB_SQL);
-    s3::put_object(&creds, &db_key, snapshot.db_sql, "application/sql").await?;
+    put_object_for_snapshot(
+        &creds,
+        &db_key,
+        snapshot.db_sql,
+        "application/sql",
+        conditional,
+    )
+    .await?;
 
     let skills_key = s3_key(settings, REMOTE_SKILLS_ZIP);
-    s3::put_object(&creds, &skills_key, snapshot.skills_zip, "application/zip").await?;
-
-    let manifest_precondition =
-        manifest_put_precondition(conditional, remote_exists, if_match_etag.as_deref());
+    put_object_for_snapshot(
+        &creds,
+        &skills_key,
+        snapshot.skills_zip,
+        "application/zip",
+        conditional,
+    )
+    .await?;
 
     s3::put_object_conditional(
         &creds,
@@ -286,20 +303,56 @@ fn creds_for(settings: &S3SyncSettings) -> S3Credentials {
     }
 }
 
-fn manifest_put_precondition<'a>(
+fn put_precondition<'a>(
     conditional: bool,
     remote_exists: bool,
     if_match_etag: Option<&'a str>,
-) -> s3::PutPrecondition<'a> {
+) -> Result<s3::PutPrecondition<'a>, AppError> {
+    Ok(
+        match resolve_put_precondition(conditional, remote_exists, if_match_etag)? {
+            ResolvedPut::Unconditional => s3::PutPrecondition::None,
+            ResolvedPut::IfMatch(etag) => s3::PutPrecondition::IfMatch(etag),
+            ResolvedPut::IfNoneMatchAny => s3::PutPrecondition::IfNoneMatchAny,
+        },
+    )
+}
+
+/// PUT one snapshot object. Auto-sync HEADs first and fails closed when the
+/// object exists without an ETag. Manual upload overwrites unconditionally.
+/// A 412 aborts the caller so later objects (including the manifest) are not PUT.
+async fn put_object_for_snapshot(
+    creds: &s3::S3Credentials,
+    key: &str,
+    bytes: Vec<u8>,
+    content_type: &str,
+    conditional: bool,
+) -> Result<(), AppError> {
     if !conditional {
-        s3::PutPrecondition::None
-    } else if remote_exists {
-        match if_match_etag {
-            Some(etag) => s3::PutPrecondition::IfMatch(etag),
-            None => s3::PutPrecondition::None,
+        return s3::put_object(creds, key, bytes, content_type).await;
+    }
+
+    match s3::head_object_state(creds, key).await? {
+        s3::HeadState::Missing => {
+            s3::put_object_conditional(
+                creds,
+                key,
+                bytes,
+                content_type,
+                s3::PutPrecondition::IfNoneMatchAny,
+            )
+            .await
         }
-    } else {
-        s3::PutPrecondition::IfNoneMatchAny
+        s3::HeadState::Exists { etag } => {
+            let etag = require_if_match_etag(etag.as_deref())?.to_string();
+            s3::put_object_conditional(
+                creds,
+                key,
+                bytes,
+                content_type,
+                s3::PutPrecondition::IfMatch(&etag),
+            )
+            .await
+        }
     }
 }
 
@@ -379,7 +432,11 @@ mod tests {
     #[test]
     fn manual_upload_is_unconditional() {
         assert_eq!(
-            manifest_put_precondition(false, true, Some("etag")),
+            put_precondition(false, true, Some("etag")).unwrap(),
+            s3::PutPrecondition::None
+        );
+        assert_eq!(
+            put_precondition(false, true, None).unwrap(),
             s3::PutPrecondition::None
         );
     }
@@ -387,7 +444,7 @@ mod tests {
     #[test]
     fn auto_upload_sends_if_match_when_remote_exists() {
         assert_eq!(
-            manifest_put_precondition(true, true, Some("etag")),
+            put_precondition(true, true, Some("etag")).unwrap(),
             s3::PutPrecondition::IfMatch("etag")
         );
     }
@@ -395,8 +452,74 @@ mod tests {
     #[test]
     fn auto_upload_sends_if_none_match_when_creating() {
         assert_eq!(
-            manifest_put_precondition(true, false, None),
+            put_precondition(true, false, None).unwrap(),
             s3::PutPrecondition::IfNoneMatchAny
         );
+    }
+
+    #[test]
+    fn auto_upload_denies_when_remote_exists_without_etag() {
+        let err = put_precondition(true, true, None)
+            .expect_err("existing remote without ETag must fail closed");
+        let text = err.to_string();
+        assert!(
+            text.contains("ETag") || text.contains("omitted") || text.contains("未返回"),
+            "unexpected error: {text}"
+        );
+    }
+
+    #[test]
+    fn artifact_put_uses_if_match_when_etag_present() {
+        assert_eq!(
+            put_precondition(true, true, Some("artifact-etag")).unwrap(),
+            s3::PutPrecondition::IfMatch("artifact-etag")
+        );
+    }
+
+    #[test]
+    fn artifact_put_uses_if_none_match_when_missing() {
+        assert_eq!(
+            put_precondition(true, false, None).unwrap(),
+            s3::PutPrecondition::IfNoneMatchAny
+        );
+    }
+
+    #[test]
+    fn artifact_put_denies_when_remote_exists_without_etag() {
+        assert!(put_precondition(true, true, Some("  ")).is_err());
+    }
+
+    #[test]
+    fn artifact_412_does_not_proceed_to_manifest() {
+        use super::super::sync_protocol::put_in_order;
+
+        let mut attempted = Vec::new();
+        let err = put_in_order(["db.sql", "skills.zip", "manifest.json"], |name| {
+            attempted.push(name);
+            if name == "skills.zip" {
+                Err(AppError::localized(
+                    "s3.put.precondition_failed",
+                    "远端数据已被其他设备更新（412），未覆盖远端。",
+                    "Remote data was updated by another client (412 Precondition Failed); remote was not overwritten.",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("412 on an artifact must abort remaining PUTs");
+
+        assert_eq!(attempted, vec!["db.sql", "skills.zip"]);
+        assert!(err.to_string().contains("412"));
+    }
+
+    #[test]
+    fn auto_upload_if_match_uses_fresh_get_etag_not_stored_cursor() {
+        // Production takes the ETag from the GET/HEAD just performed. A stored
+        // cursor alone is not a usable If-Match validator.
+        assert_eq!(
+            put_precondition(true, true, Some("fresh-from-get")).unwrap(),
+            s3::PutPrecondition::IfMatch("fresh-from-get")
+        );
+        assert!(put_precondition(true, true, None).is_err());
     }
 }

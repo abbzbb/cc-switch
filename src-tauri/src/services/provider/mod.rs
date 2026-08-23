@@ -3993,6 +3993,270 @@ wire_api = "responses"
             );
         });
     }
+
+    #[test]
+    #[serial]
+    fn switch_aborts_when_live_settings_json_is_corrupt() {
+        with_test_home(|state, _home| {
+            crate::settings::reload_settings().expect("reload settings");
+
+            let old = Provider::with_id(
+                "old-provider".to_string(),
+                "Old".to_string(),
+                json!({ "env": { "ANTHROPIC_API_KEY": "old-key" } }),
+                None,
+            );
+            let new = Provider::with_id(
+                "new-provider".to_string(),
+                "New".to_string(),
+                json!({ "env": { "ANTHROPIC_API_KEY": "new-key" } }),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Claude.as_str(), &old)
+                .expect("save old");
+            state
+                .db
+                .save_provider(AppType::Claude.as_str(), &new)
+                .expect("save new");
+            state
+                .db
+                .set_current_provider(AppType::Claude.as_str(), "old-provider")
+                .expect("set db current");
+            crate::settings::set_current_provider(&AppType::Claude, Some("old-provider"))
+                .expect("set local current");
+
+            let settings_path = get_claude_settings_path();
+            if let Some(parent) = settings_path.parent() {
+                fs::create_dir_all(parent).expect("create claude dir");
+            }
+            let corrupt = "}not a json file{";
+            fs::write(&settings_path, corrupt).expect("seed corrupt settings.json");
+
+            let result = ProviderService::switch(state, AppType::Claude, "new-provider");
+            assert!(
+                result.is_err(),
+                "switch must fail when live settings.json is not valid JSON: {result:?}"
+            );
+            assert_eq!(
+                crate::settings::get_current_provider(&AppType::Claude).as_deref(),
+                Some("old-provider"),
+                "local current must stay unchanged when capture fails"
+            );
+            assert_eq!(
+                state
+                    .db
+                    .get_current_provider(AppType::Claude.as_str())
+                    .expect("read db current")
+                    .as_deref(),
+                Some("old-provider"),
+                "db current must stay unchanged when capture fails"
+            );
+            assert_eq!(
+                fs::read_to_string(&settings_path).expect("read corrupt live file"),
+                corrupt,
+                "corrupt live file must not be overwritten when capture fails"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn live_snapshot_codex_restores_catalog_bytes() {
+        with_test_home(|_, _home| {
+            crate::settings::reload_settings().expect("reload settings");
+            let catalog_path = crate::codex_config::get_codex_model_catalog_path();
+            fs::create_dir_all(catalog_path.parent().expect("catalog parent"))
+                .expect("create codex dir");
+            let original = b"{\"catalog\":\"original-bytes\"}";
+            fs::write(&catalog_path, original).expect("seed catalog");
+
+            let snapshot =
+                LiveSnapshot::capture(&AppType::Codex).expect("capture Codex live snapshot");
+            fs::write(&catalog_path, b"{\"catalog\":\"mutated\"}").expect("mutate catalog");
+            snapshot.restore().expect("restore Codex live snapshot");
+
+            assert_eq!(
+                fs::read(&catalog_path).expect("read restored catalog"),
+                original,
+                "Codex LiveSnapshot must restore catalog file bytes"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn live_snapshot_gemini_restores_env_bytes() {
+        with_test_home(|_, _home| {
+            crate::settings::reload_settings().expect("reload settings");
+            let env_path = crate::gemini_config::get_gemini_env_path();
+            fs::create_dir_all(env_path.parent().expect("gemini dir")).expect("create gemini dir");
+            let original = "# keep comments and order\nGOOGLE_API_KEY=abc\n\n# trailing\n";
+            fs::write(&env_path, original).expect("seed gemini env");
+
+            let snapshot =
+                LiveSnapshot::capture(&AppType::Gemini).expect("capture Gemini live snapshot");
+            fs::write(&env_path, "GOOGLE_API_KEY=mutated\n").expect("mutate gemini env");
+            snapshot.restore().expect("restore Gemini live snapshot");
+
+            assert_eq!(
+                fs::read_to_string(&env_path).expect("read restored env"),
+                original,
+                "Gemini LiveSnapshot must restore raw .env bytes"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn switch_codex_current_commit_failure_restores_catalog() {
+        with_test_home(|state, _home| {
+            crate::settings::reload_settings().expect("reload settings");
+
+            let old = Provider::with_id(
+                "old-provider".to_string(),
+                "Old".to_string(),
+                codex_settings("https://old.example/v1", "old-key"),
+                None,
+            );
+            let new = Provider::with_id(
+                "new-provider".to_string(),
+                "New".to_string(),
+                codex_settings("https://new.example/v1", "new-key"),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &old)
+                .expect("save old");
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &new)
+                .expect("save new");
+            state
+                .db
+                .set_current_provider(AppType::Codex.as_str(), "old-provider")
+                .expect("set db current");
+            crate::settings::set_current_provider(&AppType::Codex, Some("old-provider"))
+                .expect("set local current");
+
+            let catalog_path = crate::codex_config::get_codex_model_catalog_path();
+            fs::create_dir_all(catalog_path.parent().expect("catalog parent"))
+                .expect("create codex dir");
+            let original_catalog = b"{\"catalog\":\"pre-switch\"}";
+            fs::write(&catalog_path, original_catalog).expect("seed catalog");
+            crate::codex_config::write_codex_live_atomic(
+                &json!({ "OPENAI_API_KEY": "old-key" }),
+                Some("model = \"old\"\n"),
+            )
+            .expect("seed codex live auth/config");
+
+            {
+                let conn = state.db.conn.lock().expect("lock database");
+                conn.execute_batch(
+                    "CREATE TRIGGER reject_codex_current_update
+                     BEFORE UPDATE OF is_current ON providers
+                     WHEN NEW.app_type = 'codex'
+                       AND NEW.id = 'new-provider'
+                       AND NEW.is_current = 1
+                     BEGIN
+                       SELECT RAISE(ABORT, 'forced Codex current failure');
+                     END;",
+                )
+                .expect("install current failure trigger");
+            }
+
+            let result = ProviderService::switch(state, AppType::Codex, "new-provider");
+            assert!(
+                result.is_err(),
+                "switch must fail when current commit is aborted: {result:?}"
+            );
+            assert_eq!(
+                crate::settings::get_current_provider(&AppType::Codex).as_deref(),
+                Some("old-provider"),
+                "local current must stay unchanged when current commit fails"
+            );
+            assert_eq!(
+                state
+                    .db
+                    .get_current_provider(AppType::Codex.as_str())
+                    .expect("read db current")
+                    .as_deref(),
+                Some("old-provider"),
+                "db current must stay unchanged when current commit fails"
+            );
+            assert_eq!(
+                fs::read(&catalog_path).expect("read restored catalog"),
+                original_catalog,
+                "catalog must be restored when current commit fails"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn switch_omo_current_commit_failure_restores_previous_bytes() {
+        with_test_home(|state, home| {
+            crate::settings::reload_settings().expect("reload settings");
+
+            let previous = opencode_omo_provider("omo-old", "omo");
+            let next = opencode_omo_provider("omo-new", "omo");
+            state
+                .db
+                .save_provider(AppType::OpenCode.as_str(), &previous)
+                .expect("save previous omo");
+            state
+                .db
+                .save_provider(AppType::OpenCode.as_str(), &next)
+                .expect("save next omo");
+            state
+                .db
+                .set_omo_provider_current(AppType::OpenCode.as_str(), &previous.id, "omo")
+                .expect("set previous omo current");
+
+            let config_path = omo_config_path(home, "omo");
+            fs::create_dir_all(config_path.parent().expect("omo config parent"))
+                .expect("create omo config dir");
+            let previous_content = "{\n  \"theme\": \"legacy-live-theme\"\n}\n";
+            fs::write(&config_path, previous_content).expect("seed previous omo config");
+
+            {
+                let conn = state.db.conn.lock().expect("lock database");
+                conn.execute_batch(
+                    "CREATE TRIGGER reject_omo_current_update
+                     BEFORE UPDATE OF is_current ON providers
+                     WHEN NEW.app_type = 'opencode'
+                       AND NEW.id = 'omo-new'
+                       AND NEW.is_current = 1
+                     BEGIN
+                       SELECT RAISE(ABORT, 'forced omo current failure');
+                     END;",
+                )
+                .expect("install omo current failure trigger");
+            }
+
+            let result = ProviderService::switch(state, AppType::OpenCode, "omo-new");
+            assert!(
+                result.is_err(),
+                "switch must fail when OMO current commit is aborted: {result:?}"
+            );
+            assert_eq!(
+                fs::read_to_string(&config_path).expect("read restored omo config"),
+                previous_content,
+                "OMO enable-variant file must be restored to pre-write bytes"
+            );
+            let current = state
+                .db
+                .get_current_omo_provider(AppType::OpenCode.as_str(), "omo")
+                .expect("read current omo");
+            assert_eq!(
+                current.as_ref().map(|provider| provider.id.as_str()),
+                Some("omo-old"),
+                "OMO current must stay unchanged when current commit fails"
+            );
+        });
+    }
 }
 
 impl ProviderService {
@@ -4077,6 +4341,89 @@ impl ProviderService {
                 AppError::Message(format!("{error}; 回滚 live 同时失败: {rollback_error}"))
             }
             _ => error,
+        }
+    }
+
+    /// Resolve the same path `OmoService::write_profile_config` will mutate
+    /// (unified `~/.omo/omo.jsonc|json` first, else an existing legacy file,
+    /// else the preferred legacy filename) and snapshot its bytes before write.
+    fn snapshot_omo_variant_config_file(
+        variant: &crate::services::omo::OmoVariant,
+    ) -> Result<(std::path::PathBuf, Option<Vec<u8>>), AppError> {
+        let home = crate::config::get_home_dir();
+        let legacy_dir = crate::opencode_config::get_opencode_dir();
+        let path = if variant.category == crate::services::omo::STANDARD.category {
+            ["omo.jsonc", "omo.json"]
+                .into_iter()
+                .map(|name| home.join(".omo").join(name))
+                .find(|candidate| candidate.exists())
+        } else {
+            None
+        }
+        .or_else(|| {
+            variant
+                .config_candidates
+                .iter()
+                .map(|name| legacy_dir.join(name))
+                .find(|candidate| candidate.exists())
+        })
+        .unwrap_or_else(|| legacy_dir.join(variant.preferred_filename));
+
+        let contents = match std::fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => return Err(AppError::io(&path, err)),
+        };
+        Ok((path, contents))
+    }
+
+    fn snapshot_omo_plugin_file() -> Result<(std::path::PathBuf, Option<Vec<u8>>), AppError> {
+        let path = crate::opencode_config::get_opencode_config_path();
+        let contents = match std::fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => return Err(AppError::io(&path, err)),
+        };
+        Ok((path, contents))
+    }
+
+    fn restore_omo_variant_config_file(
+        path: &std::path::Path,
+        snapshot: Option<&[u8]>,
+    ) -> Result<(), AppError> {
+        match snapshot {
+            Some(bytes) => crate::config::atomic_write(path, bytes),
+            None => match std::fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(err) => Err(AppError::io(path, err)),
+            },
+        }
+    }
+
+    fn restore_omo_after_current_commit_failure(
+        path: &std::path::Path,
+        snapshot: Option<&[u8]>,
+        plugin_path: &std::path::Path,
+        plugin_snapshot: Option<&[u8]>,
+        error: AppError,
+    ) -> AppError {
+        let mut failures = Vec::new();
+        if let Err(rollback_error) = Self::restore_omo_variant_config_file(path, snapshot) {
+            failures.push(format!("配置: {rollback_error}"));
+        }
+        if let Err(rollback_error) =
+            Self::restore_omo_variant_config_file(plugin_path, plugin_snapshot)
+        {
+            failures.push(format!("插件: {rollback_error}"));
+        }
+        if failures.is_empty() {
+            error
+        } else {
+            AppError::Message(format!(
+                "{error}; 回滚 OMO 同时失败: {}",
+                failures.join("; ")
+            ))
         }
     }
 
@@ -4641,20 +4988,31 @@ impl ProviderService {
                     &provider.id,
                     variant.category,
                 )?;
-                if is_current {
-                    crate::services::OmoService::write_provider_config_to_file(&provider, variant)?;
-                }
+                let (config_path, previous_bytes, plugin_path, previous_plugin) = if is_current {
+                    let (config_path, previous_bytes) =
+                        Self::snapshot_omo_variant_config_file(variant)?;
+                    let (plugin_path, previous_plugin) = Self::snapshot_omo_plugin_file()?;
+                    crate::services::OmoService::write_provider_config_to_file(
+                        &provider, variant,
+                    )?;
+                    (
+                        Some(config_path),
+                        previous_bytes,
+                        Some(plugin_path),
+                        previous_plugin,
+                    )
+                } else {
+                    (None, None, None, None)
+                };
                 if let Err(err) = state.db.save_provider(app_type.as_str(), &provider) {
-                    if is_current {
-                        if let Err(rollback_err) =
-                            crate::services::OmoService::write_config_to_file(state, variant)
-                        {
-                            log::warn!(
-                                "Failed to roll back {} config after DB save error: {}",
-                                variant.label,
-                                rollback_err
-                            );
-                        }
+                    if let (Some(config_path), Some(plugin_path)) = (config_path, plugin_path) {
+                        return Err(Self::restore_omo_after_current_commit_failure(
+                            &config_path,
+                            previous_bytes.as_deref(),
+                            &plugin_path,
+                            previous_plugin.as_deref(),
+                            err,
+                        ));
                     }
                     return Err(err);
                 }
@@ -5184,26 +5542,39 @@ impl ProviderService {
                 _ => None,
             };
             if let Some((enable, disable)) = omo_pair {
-                let previous = state
-                    .db
-                    .get_current_omo_provider(app_type.as_str(), enable.category)?;
-                crate::services::OmoService::write_provider_config_to_file(provider, enable)?;
+                let (config_path, previous_bytes) = Self::snapshot_omo_variant_config_file(enable)?;
+                let (plugin_path, previous_plugin) = Self::snapshot_omo_plugin_file()?;
+                if let Err(error) =
+                    crate::services::OmoService::write_provider_config_to_file(provider, enable)
+                {
+                    return Err(Self::restore_omo_after_current_commit_failure(
+                        &config_path,
+                        previous_bytes.as_deref(),
+                        &plugin_path,
+                        previous_plugin.as_deref(),
+                        error,
+                    ));
+                }
                 if let Err(error) =
                     state
                         .db
                         .set_omo_provider_current(app_type.as_str(), id, enable.category)
                 {
-                    if let Some(previous) = previous {
-                        let _ = crate::services::OmoService::write_provider_config_to_file(
-                            &previous, enable,
-                        );
-                    } else {
-                        let _ = crate::services::OmoService::delete_config_file(enable);
-                    }
-                    return Err(error);
+                    return Err(Self::restore_omo_after_current_commit_failure(
+                        &config_path,
+                        previous_bytes.as_deref(),
+                        &plugin_path,
+                        previous_plugin.as_deref(),
+                        error,
+                    ));
                 }
-                let _ = crate::services::OmoService::delete_config_file(disable);
-                return Ok(SwitchResult::default());
+                let mut result = SwitchResult::default();
+                if let Err(error) = crate::services::OmoService::delete_config_file(disable) {
+                    result
+                        .warnings
+                        .push(format!("delete_opposite_omo_variant:{error}"));
+                }
+                return Ok(result);
             }
         }
 
@@ -5328,10 +5699,10 @@ impl ProviderService {
             // Write live first. Committing current before the live write leaves
             // UI/DB pointing at B while disk is still A; a later switch then
             // backfills A's live into B's row.
-            let live_snapshot = if !app_type.is_additive_mode() {
-                LiveSnapshot::capture(&app_type)
-            } else {
+            let live_snapshot = if app_type.is_additive_mode() {
                 None
+            } else {
+                Some(LiveSnapshot::capture(&app_type)?)
             };
 
             // Sync to live (write_gemini_live handles security flag internally for Gemini).
@@ -5341,10 +5712,10 @@ impl ProviderService {
                 provider,
                 preflighted_provider.as_ref(),
             ) {
-                if let Some(snapshot) = live_snapshot.as_ref() {
-                    let _ = snapshot.restore();
-                }
-                return Err(error);
+                return Err(Self::restore_live_after_current_commit_failure(
+                    live_snapshot.as_ref(),
+                    error,
+                ));
             }
 
             // Additive mode apps skip setting is_current (no such concept).
@@ -5357,14 +5728,20 @@ impl ProviderService {
                     ));
                 }
                 if let Err(error) = state.db.set_current_provider(app_type.as_str(), id) {
-                    let _ = crate::settings::set_current_provider(
+                    let settings_rollback = crate::settings::set_current_provider(
                         &app_type,
                         previous_local_current.as_deref(),
                     );
-                    return Err(Self::restore_live_after_current_commit_failure(
+                    let live_error = Self::restore_live_after_current_commit_failure(
                         live_snapshot.as_ref(),
                         error,
-                    ));
+                    );
+                    return Err(match settings_rollback {
+                        Ok(()) => live_error,
+                        Err(settings_error) => AppError::Message(format!(
+                            "{live_error}; 回滚本地 current 同时失败: {settings_error}"
+                        )),
+                    });
                 }
             }
         }
