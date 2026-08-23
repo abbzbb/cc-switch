@@ -75,6 +75,7 @@ fn get_backup_dir() -> Result<PathBuf, String> {
 /// Parse `path:line` without splitting on every colon (paths may contain `:`).
 ///
 /// The line number is the trailing `:` + digits segment. Restore may omit it.
+#[cfg(any(not(target_os = "windows"), test))]
 fn parse_path_and_line(source_path: &str) -> Result<(PathBuf, Option<usize>), String> {
     if source_path.is_empty() {
         return Err("无效的文件路径格式".to_string());
@@ -92,6 +93,7 @@ fn parse_path_and_line(source_path: &str) -> Result<(PathBuf, Option<usize>), St
     Ok((PathBuf::from(source_path), None))
 }
 
+#[cfg(not(target_os = "windows"))]
 fn is_safe_env_var_name(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
@@ -102,6 +104,7 @@ fn is_safe_env_var_name(name: &str) -> bool {
 }
 
 /// POSIX single-quote so spaces / metacharacters cannot break the rc file.
+#[cfg(any(not(target_os = "windows"), test))]
 fn quote_shell_value(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
@@ -166,6 +169,7 @@ fn confine_user_rc_path_in(path: &Path, home: &Path) -> Result<PathBuf, String> 
     Ok(canon)
 }
 
+#[cfg(not(target_os = "windows"))]
 fn atomic_write_text(path: &Path, contents: &str) -> Result<(), String> {
     crate::config::atomic_write(path, contents.as_bytes())
         .map_err(|e| format!("写入文件失败 {}: {e}", path.display()))

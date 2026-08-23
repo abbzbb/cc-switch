@@ -3461,8 +3461,8 @@ fn run_wsl_tool_command(
         .spawn()
         .map_err(|e| AppError::from(format!("[WSL:{distro}] failed to run {tool}: {e}")))?;
     let output = wait_child_output(child, deadline).map_err(|e| {
-        if e.starts_with("Command timed out") {
-            format!("[WSL:{distro}] {e}")
+        if e.to_string().starts_with("Command timed out") {
+            AppError::from(format!("[WSL:{distro}] {e}"))
         } else {
             e
         }

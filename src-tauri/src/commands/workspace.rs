@@ -67,7 +67,7 @@ fn is_link_or_reparse_point(meta: &Metadata) -> bool {
     {
         use std::os::windows::fs::MetadataExt;
         use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-        return meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+        meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
     #[cfg(not(windows))]
     false
@@ -111,7 +111,10 @@ fn stable_windows_directory_path(handle: &File) -> io::Result<PathBuf> {
 }
 
 struct OpenedMemoryDirectory {
+    #[cfg(unix)]
     handle: File,
+    #[cfg(not(unix))]
+    _handle: File,
     #[cfg(not(unix))]
     path: PathBuf,
 }
@@ -172,7 +175,10 @@ fn open_memory_directory(memory_dir: &Path) -> Result<Option<OpenedMemoryDirecto
         ))
     })?;
     Ok(Some(OpenedMemoryDirectory {
+        #[cfg(unix)]
         handle,
+        #[cfg(not(unix))]
+        _handle: handle,
         #[cfg(not(unix))]
         path: {
             #[cfg(windows)]
