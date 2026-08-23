@@ -1,4 +1,5 @@
 #![allow(non_snake_case)]
+use crate::error::AppError;
 
 use indexmap::IndexMap;
 use std::collections::HashMap;
@@ -13,32 +14,35 @@ use crate::store::AppState;
 
 /// 获取 Claude MCP 状态
 #[tauri::command]
-pub async fn get_claude_mcp_status() -> Result<claude_mcp::McpStatus, String> {
-    claude_mcp::get_mcp_status().map_err(|e| e.to_string())
+pub async fn get_claude_mcp_status() -> Result<claude_mcp::McpStatus, AppError> {
+    claude_mcp::get_mcp_status()
 }
 
 /// 读取 mcp.json 文本内容
 #[tauri::command]
-pub async fn read_claude_mcp_config() -> Result<Option<String>, String> {
-    claude_mcp::read_mcp_json().map_err(|e| e.to_string())
+pub async fn read_claude_mcp_config() -> Result<Option<String>, AppError> {
+    claude_mcp::read_mcp_json()
 }
 
 /// 新增或更新一个 MCP 服务器条目
 #[tauri::command]
-pub async fn upsert_claude_mcp_server(id: String, spec: serde_json::Value) -> Result<bool, String> {
-    claude_mcp::upsert_mcp_server(&id, spec).map_err(|e| e.to_string())
+pub async fn upsert_claude_mcp_server(
+    id: String,
+    spec: serde_json::Value,
+) -> Result<bool, AppError> {
+    claude_mcp::upsert_mcp_server(&id, spec)
 }
 
 /// 删除一个 MCP 服务器条目
 #[tauri::command]
-pub async fn delete_claude_mcp_server(id: String) -> Result<bool, String> {
-    claude_mcp::delete_mcp_server(&id).map_err(|e| e.to_string())
+pub async fn delete_claude_mcp_server(id: String) -> Result<bool, AppError> {
+    claude_mcp::delete_mcp_server(&id)
 }
 
 /// 校验命令是否在 PATH 中可用（不执行）
 #[tauri::command]
-pub async fn validate_mcp_command(cmd: String) -> Result<bool, String> {
-    claude_mcp::validate_command_in_path(&cmd).map_err(|e| e.to_string())
+pub async fn validate_mcp_command(cmd: String) -> Result<bool, AppError> {
+    claude_mcp::validate_command_in_path(&cmd)
 }
 
 #[derive(Serialize)]
@@ -55,12 +59,12 @@ use std::str::FromStr;
 pub async fn get_mcp_config(
     state: State<'_, AppState>,
     app: String,
-) -> Result<McpConfigResponse, String> {
+) -> Result<McpConfigResponse, AppError> {
     let config_path = crate::config::get_app_config_path()
         .to_string_lossy()
         .to_string();
-    let app_ty = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    let servers = McpService::get_servers(&state, app_ty).map_err(|e| e.to_string())?;
+    let app_ty = AppType::from_str(&app)?;
+    let servers = McpService::get_servers(&state, app_ty)?;
     Ok(McpConfigResponse {
         config_path,
         servers,
@@ -76,14 +80,14 @@ pub async fn upsert_mcp_server_in_config(
     id: String,
     spec: serde_json::Value,
     sync_other_side: Option<bool>,
-) -> Result<bool, String> {
+) -> Result<bool, AppError> {
     use crate::app_config::McpServer;
 
-    let app_ty = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    let app_ty = AppType::from_str(&app)?;
 
     // 读取现有的服务器（如果存在）
     let existing_server = {
-        let servers = state.db.get_all_mcp_servers().map_err(|e| e.to_string())?;
+        let servers = state.db.get_all_mcp_servers()?;
         servers.get(&id).cloned()
     };
 
@@ -125,9 +129,7 @@ pub async fn upsert_mcp_server_in_config(
         new_server.apps.opencode = true;
     }
 
-    McpService::upsert_server(&state, new_server)
-        .map(|_| true)
-        .map_err(|e| e.to_string())
+    McpService::upsert_server(&state, new_server).map(|_| true)
 }
 
 /// 在 config.json 中删除一个 MCP 服务器定义
@@ -136,8 +138,8 @@ pub async fn delete_mcp_server_in_config(
     state: State<'_, AppState>,
     _app: String, // 参数保留用于向后兼容，但在统一结构中不再需要
     id: String,
-) -> Result<bool, String> {
-    McpService::delete_server(&state, &id).map_err(|e| e.to_string())
+) -> Result<bool, AppError> {
+    McpService::delete_server(&state, &id)
 }
 
 /// 设置启用状态并同步到客户端配置
@@ -148,9 +150,9 @@ pub async fn set_mcp_enabled(
     app: String,
     id: String,
     enabled: bool,
-) -> Result<bool, String> {
-    let app_ty = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    McpService::set_enabled(&state, app_ty, &id, enabled).map_err(|e| e.to_string())
+) -> Result<bool, AppError> {
+    let app_ty = AppType::from_str(&app)?;
+    McpService::set_enabled(&state, app_ty, &id, enabled)
 }
 
 // ============================================================================
@@ -163,8 +165,8 @@ use crate::app_config::McpServer;
 #[tauri::command]
 pub async fn get_mcp_servers(
     state: State<'_, AppState>,
-) -> Result<IndexMap<String, McpServer>, String> {
-    McpService::get_all_servers(&state).map_err(|e| e.to_string())
+) -> Result<IndexMap<String, McpServer>, AppError> {
+    McpService::get_all_servers(&state)
 }
 
 /// 添加或更新 MCP 服务器
@@ -172,14 +174,14 @@ pub async fn get_mcp_servers(
 pub async fn upsert_mcp_server(
     state: State<'_, AppState>,
     server: McpServer,
-) -> Result<(), String> {
-    McpService::upsert_server(&state, server).map_err(|e| e.to_string())
+) -> Result<(), AppError> {
+    McpService::upsert_server(&state, server)
 }
 
 /// 删除 MCP 服务器
 #[tauri::command]
-pub async fn delete_mcp_server(state: State<'_, AppState>, id: String) -> Result<bool, String> {
-    McpService::delete_server(&state, &id).map_err(|e| e.to_string())
+pub async fn delete_mcp_server(state: State<'_, AppState>, id: String) -> Result<bool, AppError> {
+    McpService::delete_server(&state, &id)
 }
 
 /// 切换 MCP 服务器在指定应用的启用状态
@@ -189,13 +191,13 @@ pub async fn toggle_mcp_app(
     server_id: String,
     app: String,
     enabled: bool,
-) -> Result<(), String> {
-    let app_ty = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    McpService::toggle_app(&state, &server_id, app_ty, enabled).map_err(|e| e.to_string())
+) -> Result<(), AppError> {
+    let app_ty = AppType::from_str(&app)?;
+    McpService::toggle_app(&state, &server_id, app_ty, enabled)
 }
 
 /// 从所有应用导入 MCP 服务器（复用已有的导入逻辑）
 #[tauri::command]
-pub async fn import_mcp_from_apps(state: State<'_, AppState>) -> Result<usize, String> {
-    McpService::import_from_all_apps(&state).map_err(|e| e.to_string())
+pub async fn import_mcp_from_apps(state: State<'_, AppState>) -> Result<usize, AppError> {
+    McpService::import_from_all_apps(&state)
 }

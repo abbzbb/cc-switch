@@ -108,6 +108,12 @@ impl From<std::io::Error> for CodexOAuthError {
     }
 }
 
+impl From<CodexOAuthError> for crate::error::AppError {
+    fn from(err: CodexOAuthError) -> Self {
+        crate::error::AppError::Message(err.to_string())
+    }
+}
+
 /// OpenAI Device Code 响应
 #[derive(Debug, Clone, Deserialize)]
 struct DeviceCodeResponse {

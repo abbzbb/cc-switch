@@ -3,16 +3,17 @@
 //! 管理代理模式下的故障转移队列（基于 providers 表的 in_failover_queue 字段）
 
 use crate::database::FailoverQueueItem;
+use crate::error::AppError;
 use crate::provider::Provider;
 use crate::store::AppState;
 use std::str::FromStr;
 use tauri::Emitter;
 
-fn require_failover_app(app_type: &str) -> Result<(), String> {
+fn require_failover_app(app_type: &str) -> Result<(), AppError> {
     let app = crate::app_config::AppType::from_str(app_type)
-        .map_err(|error| format!("无效的应用类型: {error}"))?;
+        .map_err(|error| AppError::from(format!("无效的应用类型: {error}")))?;
     if !app.supports_local_proxy() {
-        return Err(format!("{} 不支持故障转移", app.as_str()));
+        return Err(AppError::from(format!("{} 不支持故障转移", app.as_str())));
     }
     Ok(())
 }
@@ -21,13 +22,14 @@ fn require_failover_provider(
     db: &crate::database::Database,
     app_type: &str,
     provider_id: &str,
-) -> Result<Provider, String> {
+) -> Result<Provider, AppError> {
     let provider = db
-        .get_provider_by_id(provider_id, app_type)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("供应商不存在: {provider_id}"))?;
+        .get_provider_by_id(provider_id, app_type)?
+        .ok_or_else(|| AppError::from(format!("供应商不存在: {provider_id}")))?;
     if !crate::proxy::provider_router::provider_supports_failover(app_type, &provider) {
-        return Err("Codex Official 账号卡不支持自动故障转移".to_string());
+        return Err(AppError::from(
+            "Codex Official 账号卡不支持自动故障转移".to_string(),
+        ));
     }
     Ok(provider)
 }
@@ -74,19 +76,13 @@ mod tests {
 pub async fn get_failover_queue(
     state: tauri::State<'_, AppState>,
     app_type: String,
-) -> Result<Vec<FailoverQueueItem>, String> {
+) -> Result<Vec<FailoverQueueItem>, AppError> {
     require_failover_app(&app_type)?;
-    let queue = state
-        .db
-        .get_failover_queue(&app_type)
-        .map_err(|e| e.to_string())?;
+    let queue = state.db.get_failover_queue(&app_type)?;
     if app_type != "codex" {
         return Ok(queue);
     }
-    let providers = state
-        .db
-        .get_all_providers(&app_type)
-        .map_err(|e| e.to_string())?;
+    let providers = state.db.get_all_providers(&app_type)?;
     Ok(queue
         .into_iter()
         .filter(|item| {
@@ -102,12 +98,9 @@ pub async fn get_failover_queue(
 pub async fn get_available_providers_for_failover(
     state: tauri::State<'_, AppState>,
     app_type: String,
-) -> Result<Vec<Provider>, String> {
+) -> Result<Vec<Provider>, AppError> {
     require_failover_app(&app_type)?;
-    let providers = state
-        .db
-        .get_available_providers_for_failover(&app_type)
-        .map_err(|e| e.to_string())?;
+    let providers = state.db.get_available_providers_for_failover(&app_type)?;
     Ok(providers
         .into_iter()
         .filter(|provider| {
@@ -122,13 +115,10 @@ pub async fn add_to_failover_queue(
     state: tauri::State<'_, AppState>,
     app_type: String,
     provider_id: String,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     require_failover_app(&app_type)?;
     require_failover_provider(&state.db, &app_type, &provider_id)?;
-    state
-        .db
-        .add_to_failover_queue(&app_type, &provider_id)
-        .map_err(|e| e.to_string())
+    state.db.add_to_failover_queue(&app_type, &provider_id)
 }
 
 /// 从故障转移队列移除供应商
@@ -137,12 +127,9 @@ pub async fn remove_from_failover_queue(
     state: tauri::State<'_, AppState>,
     app_type: String,
     provider_id: String,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     require_failover_app(&app_type)?;
-    state
-        .db
-        .remove_from_failover_queue(&app_type, &provider_id)
-        .map_err(|e| e.to_string())
+    state.db.remove_from_failover_queue(&app_type, &provider_id)
 }
 
 /// 获取指定应用的自动故障转移开关状态（从 proxy_config 表读取）
@@ -150,14 +137,13 @@ pub async fn remove_from_failover_queue(
 pub async fn get_auto_failover_enabled(
     state: tauri::State<'_, AppState>,
     app_type: String,
-) -> Result<bool, String> {
+) -> Result<bool, AppError> {
     require_failover_app(&app_type)?;
     state
         .db
         .get_proxy_config_for_app(&app_type)
         .await
         .map(|config| config.auto_failover_enabled)
-        .map_err(|e| e.to_string())
 }
 
 /// 设置指定应用的自动故障转移开关状态（写入 proxy_config 表）
@@ -169,34 +155,28 @@ pub async fn set_auto_failover_enabled(
     state: tauri::State<'_, AppState>,
     app_type: String,
     enabled: bool,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     require_failover_app(&app_type)?;
     log::info!(
         "[Failover] Setting auto_failover_enabled: app_type='{app_type}', enabled={enabled}"
     );
 
     // 读取当前配置
-    let mut config = state
-        .db
-        .get_proxy_config_for_app(&app_type)
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut config = state.db.get_proxy_config_for_app(&app_type).await?;
 
     if enabled && !config.enabled {
-        return Err("需要先启用该应用的代理接管，再开启故障转移".to_string());
+        return Err(AppError::from(
+            "需要先启用该应用的代理接管，再开启故障转移".to_string(),
+        ));
     }
 
     // 队列为空时把当前供应商自动加入作为 P1，避免用户陷入"必须先加队列才能开启"的死锁
     let mut auto_added_provider_id: Option<String> = None;
     let p1_provider_id = if enabled {
-        let all_providers = state
-            .db
-            .get_all_providers(&app_type)
-            .map_err(|e| e.to_string())?;
+        let all_providers = state.db.get_all_providers(&app_type)?;
         let mut queue = state
             .db
-            .get_failover_queue(&app_type)
-            .map_err(|e| e.to_string())?
+            .get_failover_queue(&app_type)?
             .into_iter()
             .filter(|item| {
                 all_providers
@@ -211,27 +191,24 @@ pub async fn set_auto_failover_enabled(
 
         if queue.is_empty() {
             let app_enum = crate::app_config::AppType::from_str(&app_type)
-                .map_err(|_| format!("无效的应用类型: {app_type}"))?;
+                .map_err(|_| AppError::from(format!("无效的应用类型: {app_type}")))?;
 
-            let current_id = crate::settings::get_effective_current_provider(&state.db, &app_enum)
-                .map_err(|e| e.to_string())?;
+            let current_id = crate::settings::get_effective_current_provider(&state.db, &app_enum)?;
 
             let Some(current_id) = current_id else {
-                return Err("故障转移队列为空，且未设置当前供应商，无法开启故障转移".to_string());
+                return Err(AppError::from(
+                    "故障转移队列为空，且未设置当前供应商，无法开启故障转移".to_string(),
+                ));
             };
 
             require_failover_provider(&state.db, &app_type, &current_id)?;
 
-            state
-                .db
-                .add_to_failover_queue(&app_type, &current_id)
-                .map_err(|e| e.to_string())?;
+            state.db.add_to_failover_queue(&app_type, &current_id)?;
             auto_added_provider_id = Some(current_id);
 
             queue = state
                 .db
-                .get_failover_queue(&app_type)
-                .map_err(|e| e.to_string())?
+                .get_failover_queue(&app_type)?
                 .into_iter()
                 .filter(|item| {
                     all_providers
@@ -248,7 +225,7 @@ pub async fn set_auto_failover_enabled(
         queue
             .first()
             .map(|item| item.provider_id.clone())
-            .ok_or_else(|| "故障转移队列为空，无法开启故障转移".to_string())?
+            .ok_or_else(|| AppError::from("故障转移队列为空，无法开启故障转移".to_string()))?
     } else {
         String::new()
     };
@@ -264,7 +241,7 @@ pub async fn set_auto_failover_enabled(
             if let Some(provider_id) = auto_added_provider_id {
                 let _ = state.db.remove_from_failover_queue(&app_type, &provider_id);
             }
-            return Err(e);
+            return Err(AppError::from(e));
         }
     }
 
@@ -272,11 +249,7 @@ pub async fn set_auto_failover_enabled(
     config.auto_failover_enabled = enabled;
 
     // 写回数据库
-    state
-        .db
-        .update_proxy_config_for_app(config)
-        .await
-        .map_err(|e| e.to_string())?;
+    state.db.update_proxy_config_for_app(config).await?;
 
     if enabled {
         // 发射 provider-switched 事件（让前端刷新当前供应商）

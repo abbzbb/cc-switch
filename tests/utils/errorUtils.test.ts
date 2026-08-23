@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import i18n from "i18next";
+import en from "@/i18n/locales/en.json";
+import ja from "@/i18n/locales/ja.json";
+import zh from "@/i18n/locales/zh.json";
 import {
   extractErrorMessage,
   translatePiProviderMutationError,
@@ -20,6 +24,26 @@ describe("error utilities", () => {
     expect(extractErrorMessage(err)).toBe("中文");
     window.localStorage.setItem("language", "en");
     expect(extractErrorMessage(err)).toBe("English");
+    window.localStorage.removeItem("language");
+  });
+
+  it("uses i18n.t(key) when locale entries exist", () => {
+    i18n.addResourceBundle("zh", "translation", zh, true, true);
+    i18n.addResourceBundle("en", "translation", en, true, true);
+    i18n.addResourceBundle("ja", "translation", ja, true, true);
+
+    window.localStorage.setItem("language", "zh");
+    expect(extractErrorMessage({ key: "s3.sync.disabled" })).toBe(
+      "S3 同步未启用",
+    );
+    window.localStorage.setItem("language", "en");
+    expect(extractErrorMessage({ key: "s3.sync.disabled" })).toBe(
+      "S3 sync is disabled.",
+    );
+    window.localStorage.setItem("language", "ja");
+    expect(extractErrorMessage({ key: "s3.sync.disabled" })).toBe(
+      "S3 sync is disabled.",
+    );
     window.localStorage.removeItem("language");
   });
 

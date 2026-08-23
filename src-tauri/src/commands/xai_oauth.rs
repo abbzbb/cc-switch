@@ -1,5 +1,6 @@
 //! xAI OAuth state and xAI-specific commands.
 
+use crate::error::AppError;
 use crate::proxy::providers::xai_oauth_auth::XaiOAuthManager;
 use crate::proxy::providers::XAI_API_BASE_URL;
 use crate::services::model_fetch::FetchedModel;
@@ -29,7 +30,7 @@ pub struct XaiOAuthState(pub Arc<RwLock<XaiOAuthManager>>);
 pub(crate) async fn query_xai_oauth_quota_for(
     state: &XaiOAuthState,
     account_id: Option<String>,
-) -> Result<SubscriptionQuota, String> {
+) -> Result<SubscriptionQuota, AppError> {
     let manager = state.0.read().await;
 
     // 解析最终使用的账号 ID：显式 > 默认账号 > 无账号 (not_found)
@@ -63,6 +64,7 @@ pub(crate) async fn query_xai_oauth_quota_for(
         "Please re-login via cc-switch.",
     )
     .await
+    .map_err(AppError::from)
 }
 
 /// 查询 xAI OAuth (SuperGrok 反代) 订阅额度
@@ -70,7 +72,7 @@ pub(crate) async fn query_xai_oauth_quota_for(
 pub async fn get_xai_oauth_quota(
     account_id: Option<String>,
     state: State<'_, XaiOAuthState>,
-) -> Result<SubscriptionQuota, String> {
+) -> Result<SubscriptionQuota, AppError> {
     query_xai_oauth_quota_for(&state, account_id).await
 }
 
@@ -91,7 +93,7 @@ struct ModelEntry {
 pub async fn get_xai_oauth_models(
     account_id: Option<String>,
     state: State<'_, XaiOAuthState>,
-) -> Result<Vec<FetchedModel>, String> {
+) -> Result<Vec<FetchedModel>, AppError> {
     let manager = state.0.read().await;
     let resolved = match account_id
         .as_deref()
@@ -101,11 +103,12 @@ pub async fn get_xai_oauth_models(
         Some(id) => Some(id.to_string()),
         None => manager.default_account_id().await,
     };
-    let account_id = resolved.ok_or_else(|| "No usable xAI account available".to_string())?;
+    let account_id =
+        resolved.ok_or_else(|| AppError::from("No usable xAI account available".to_string()))?;
     let token = manager
         .get_valid_token_for_account(&account_id)
         .await
-        .map_err(|error| format!("xAI OAuth token unavailable: {error}"))?;
+        .map_err(|error| AppError::from(format!("xAI OAuth token unavailable: {error}")))?;
 
     let response = crate::proxy::http_client::get()
         .get(format!("{XAI_API_BASE_URL}/models"))
@@ -113,15 +116,17 @@ pub async fn get_xai_oauth_models(
         .timeout(Duration::from_secs(15))
         .send()
         .await
-        .map_err(|error| format!("xAI models request failed: {error}"))?;
+        .map_err(|error| AppError::from(format!("xAI models request failed: {error}")))?;
     let status = response.status();
     if !status.is_success() {
-        return Err(format!("xAI models request failed: HTTP {status}"));
+        return Err(AppError::from(format!(
+            "xAI models request failed: HTTP {status}"
+        )));
     }
     let payload: ModelsResponse = response
         .json()
         .await
-        .map_err(|_| "xAI models response was not valid JSON".to_string())?;
+        .map_err(|_| AppError::from("xAI models response was not valid JSON".to_string()))?;
     let mut models: Vec<FetchedModel> = payload
         .data
         .into_iter()

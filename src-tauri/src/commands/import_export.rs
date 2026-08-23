@@ -78,7 +78,7 @@ pub async fn import_config_from_file(
 }
 
 #[tauri::command]
-pub async fn sync_current_providers_live(state: State<'_, AppState>) -> Result<Value, String> {
+pub async fn sync_current_providers_live(state: State<'_, AppState>) -> Result<Value, AppError> {
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let app_state = AppState::new(db);
@@ -89,8 +89,7 @@ pub async fn sync_current_providers_live(state: State<'_, AppState>) -> Result<V
         }))
     })
     .await
-    .map_err(|e| format!("同步当前供应商失败: {e}"))?
-    .map_err(|e: AppError| e.to_string())
+    .map_err(|e| AppError::from(format!("同步当前供应商失败: {e}")))?
 }
 
 // ─── File dialogs ────────────────────────────────────────────
@@ -100,7 +99,7 @@ pub async fn sync_current_providers_live(state: State<'_, AppState>) -> Result<V
 pub async fn save_file_dialog<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     #[allow(non_snake_case)] defaultName: String,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, AppError> {
     let dialog = app.dialog();
     let result = dialog
         .file()
@@ -115,7 +114,7 @@ pub async fn save_file_dialog<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn open_file_dialog<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, AppError> {
     let dialog = app.dialog();
     let result = dialog
         .file()
@@ -129,7 +128,7 @@ pub async fn open_file_dialog<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn open_zip_file_dialog<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, AppError> {
     let dialog = app.dialog();
     let result = dialog
         .file()
@@ -143,7 +142,7 @@ pub async fn open_zip_file_dialog<R: tauri::Runtime>(
 
 /// Manually create a database backup
 #[tauri::command]
-pub async fn create_db_backup(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn create_db_backup(state: State<'_, AppState>) -> Result<String, AppError> {
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || match db.backup_database_file()? {
         Some(path) => Ok(path
@@ -155,8 +154,7 @@ pub async fn create_db_backup(state: State<'_, AppState>) -> Result<String, Stri
         )),
     })
     .await
-    .map_err(|e| format!("Backup failed: {e}"))?
-    .map_err(|e: AppError| e.to_string())
+    .map_err(|e| AppError::from(format!("Backup failed: {e}")))?
 }
 
 /// List all database backup files
@@ -203,14 +201,14 @@ pub async fn restore_db_backup(
 pub fn rename_db_backup(
     #[allow(non_snake_case)] oldFilename: String,
     #[allow(non_snake_case)] newName: String,
-) -> Result<String, String> {
-    Database::rename_backup(&oldFilename, &newName).map_err(|e| e.to_string())
+) -> Result<String, AppError> {
+    Database::rename_backup(&oldFilename, &newName)
 }
 
 /// Delete a database backup file
 #[tauri::command]
-pub fn delete_db_backup(filename: String) -> Result<(), String> {
-    Database::delete_backup(&filename).map_err(|e| e.to_string())
+pub fn delete_db_backup(filename: String) -> Result<(), AppError> {
+    Database::delete_backup(&filename)
 }
 
 #[cfg(test)]

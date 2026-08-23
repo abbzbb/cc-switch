@@ -63,6 +63,12 @@ impl From<std::io::Error> for KimiOAuthError {
     }
 }
 
+impl From<KimiOAuthError> for crate::error::AppError {
+    fn from(err: KimiOAuthError) -> Self {
+        crate::error::AppError::Message(err.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct DeviceCodeResponse {
     device_code: String,

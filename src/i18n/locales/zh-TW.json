@@ -3393,5 +3393,264 @@
     "expiredHint": "請執行 {{tool}} 命令重新整理登入",
     "queryFailed": "查詢失敗",
     "refresh": "重新整理"
+  },
+  "backend": {
+    "app": {
+      "prompts_unsupported": "当前应用暂不支持 Prompts"
+    },
+    "backup": {
+      "sql": {
+        "incomplete_transaction": "SQL 备份事务未完成，文件可能已截断。",
+        "invalid_format": "仅支持导入由 CC Switch 导出的 SQL 备份文件。"
+      }
+    },
+    "claude": {
+      "live": {
+        "missing": "Claude Code 配置文件不存在"
+      }
+    },
+    "claude_desktop": {
+      "import_unsupported": "Claude Desktop 3P 配置不能通过通用导入读取，请使用“从 Claude 导入兼容供应商”。",
+      "live": {
+        "read_unsupported": "Claude Desktop 3P 配置不支持作为通用 live 配置导入，请使用“从 Claude 导入兼容供应商”。",
+        "requires_db_context": "Claude Desktop 配置写入需要通过供应商切换流程执行"
+      },
+      "provider": {
+        "api_format_unsupported": "Claude Desktop 第一阶段只支持原生 Anthropic Messages API",
+        "auth_token_missing": "Claude Desktop 直连供应商缺少 ANTHROPIC_AUTH_TOKEN（Bearer Token）",
+        "base_url_missing": "Claude Desktop 直连供应商缺少 ANTHROPIC_BASE_URL",
+        "credentials_missing": "Claude Desktop 本地路由供应商缺少 Base URL 或 API Key",
+        "env_missing": "Claude Desktop 直连供应商缺少 env 配置",
+        "full_url_unsupported": "Claude Desktop 直连模式不支持完整 URL 端点配置",
+        "missing": "Claude Desktop 没有可用的供应商",
+        "mode_unsupported": "该供应商是 Claude Desktop 本地路由模式，不能按直连模式写入",
+        "model_missing": "Claude Desktop 请求缺少 model 字段",
+        "routes_missing": "Claude Desktop 本地路由模式至少需要一个模型路由映射",
+        "settings_not_object": "Claude Desktop 本地路由供应商配置必须是 JSON 对象",
+        "type_unsupported": "Claude Desktop 直连模式不支持需要本地代理转换的供应商"
+      },
+      "unsupported_platform": "当前平台暂不支持 Claude Desktop 3P 配置。第一阶段仅支持 macOS 和 Windows。"
+    },
+    "codex": {
+      "live": {
+        "missing": "Codex 配置文件不存在"
+      }
+    },
+    "config": {
+      "unsupported_v1": "检测到旧版 v1 配置格式。当前版本已不再支持运行时自动迁移。\\n\\n解决方案：\\n1. 安装 v3.2.x 版本进行一次性自动迁移\\n2. 或手动编辑 ~/.cc-switch/config.json，将顶层结构调整为：\\n   {\\\"version\\\": 2, \\\"claude\\\": {...}, \\\"codex\\\": {...}, \\\"mcp\\\": {...}}\\n\\n"
+    },
+    "error": {
+      "multiplierEmpty": "倍率不能为空"
+    },
+    "gemini": {
+      "env": {
+        "missing": "Gemini .env 文件不存在"
+      },
+      "live": {
+        "missing": "Gemini 配置文件不存在"
+      },
+      "missing_api_key": "缺少 GEMINI_API_KEY",
+      "validation": {
+        "invalid_config": "Gemini 配置格式错误: config 必须是对象或 null",
+        "invalid_env": "Gemini 配置格式错误: env 必须是对象",
+        "missing_api_key": "Gemini 配置缺少必需字段: GEMINI_API_KEY"
+      }
+    },
+    "grokbuild": {
+      "config": {
+        "missing": "Grok Build 配置文件不存在"
+      }
+    },
+    "hermes": {
+      "config": {
+        "missing": "Hermes 配置文件不存在"
+      }
+    },
+    "hermes_base_url_missing": "Hermes 供应商缺少 base_url",
+
+    "openclaw": {
+      "config": {
+        "missing": "OpenClaw 配置文件不存在"
+      }
+    },
+    "openclaw_base_url_missing": "OpenClaw 供应商缺少 baseUrl",
+    "opencode": {
+      "config": {
+        "missing": "OpenCode 配置文件不存在"
+      }
+    },
+    "opencode_base_url_missing": "OpenCode 供应商缺少 options.baseURL，且当前 SDK 包没有默认端点",
+    "provider": {
+      "claude": {
+        "api_key": {
+          "missing": "缺少 API Key"
+        },
+        "base_url": {
+          "missing": "缺少 ANTHROPIC_BASE_URL 配置"
+        },
+        "env": {
+          "missing": "配置格式错误: 缺少 env"
+        },
+        "settings": {
+          "not_object": "Claude 配置必须是 JSON 对象"
+        }
+      },
+      "codex": {
+        "api_key": {
+          "missing": "缺少 API Key"
+        },
+        "auth": {
+          "missing": "配置格式错误: 缺少 auth"
+        },
+        "base_url": {
+          "invalid": "config.toml 中 base_url 格式错误",
+          "missing": "config.toml 中缺少 base_url 配置"
+        },
+        "config": {
+          "invalid_type": "Codex config 字段必须是字符串",
+          "missing": "Codex 第三方供应商缺少 config.toml 配置，无法写入 bearer token"
+        },
+        "settings": {
+          "not_object": "Codex 配置必须是 JSON 对象"
+        }
+      },
+      "endpoint": {
+        "url_required": "URL 不能为空"
+      },
+      "grokbuild": {
+        "config": {
+          "missing": "Grok Build 配置缺少 config 字段",
+          "not_table": "Grok Build 配置必须是 TOML 表结构"
+        },
+        "context_window": {
+          "invalid": "Grok Build context_window 必须是正整数"
+        },
+        "credentials": {
+          "missing": "Grok Build 配置缺少 Base URL 或 API Key"
+        },
+        "default_model": {
+          "missing": "Grok Build 配置缺少 models.default"
+        },
+        "model": {
+          "missing": "Grok Build 配置缺少 [model.<name>]"
+        },
+        "models": {
+          "missing": "Grok Build 配置缺少 [models]"
+        },
+        "settings": {
+          "not_object": "Grok Build 配置必须是 JSON 对象"
+        }
+      },
+      "hermes": {
+        "settings": {
+          "not_object": "Hermes 配置必须是 JSON 对象"
+        }
+      },
+      "import": {
+        "live_taken_over": "Live 配置当前处于代理接管状态（包含占位符），不能导入为供应商。请先关闭代理接管或恢复 Live 配置后重试。"
+      },
+      "openclaw": {
+        "api_key": {
+          "missing": "缺少 API Key"
+        },
+        "settings": {
+          "not_object": "OpenClaw 配置必须是 JSON 对象"
+        }
+      },
+      "opencode": {
+        "api_key": {
+          "missing": "缺少 API Key"
+        },
+        "options": {
+          "missing": "配置格式错误: 缺少 options"
+        },
+        "settings": {
+          "not_object": "OpenCode 配置必须是 JSON 对象"
+        }
+      },
+      "usage": {
+        "disabled": "用量查询未启用",
+        "script": {
+          "missing": "未配置用量查询脚本"
+        }
+      }
+    },
+    "s3": {
+      "access_key_id": {
+        "required": "S3 Access Key ID 不能为空"
+      },
+      "bucket": {
+        "required": "S3 存储桶不能为空"
+      },
+      "endpoint": {
+        "insecure": "S3 自定义端点仅支持 https；明文 http 需显式开启 allowInsecure，且不会启用自动同步。"
+      },
+      "put": {
+        "invalid_etag": "无效的 ETag 值，无法设置条件 PUT 头",
+        "precondition_failed": "远端数据已被其他设备更新（412），未覆盖远端。"
+      },
+      "region": {
+        "required": "S3 区域不能为空"
+      },
+      "secret_access_key": {
+        "required": "S3 Secret Access Key 不能为空"
+      },
+      "sync": {
+        "disabled": "S3 同步未启用",
+        "not_configured": "未配置 S3 同步"
+      }
+    },
+    "switch": {
+      "official_blocked_by_proxy": "代理接管模式下不能切换到官方供应商，使用代理访问官方 API 可能导致账号被封禁。请先关闭代理接管，或选择第三方供应商。"
+    },
+    "usage": {
+      "displayNameRequired": "显示名称不能为空",
+      "modelIdRequired": "模型 ID 不能为空"
+    },
+    "usage_script": {
+      "base_url_empty": "base_url 不能为空",
+      "base_url_hostname_empty": "base_url 主机名不能为空",
+      "base_url_hostname_missing": "base_url 必须包含有效的主机名",
+      "base_url_https_required": "base_url 必须使用 HTTPS 协议（localhost 除外）",
+      "base_url_private_host_forbidden": "不可信用量脚本不允许使用回环、私有或元数据地址",
+      "dns_resolve_failed": "请求主机没有解析到任何地址",
+      "empty_array": "脚本返回的数组不能为空",
+      "extra_type_error": "extra 必须是字符串或 null",
+      "invalid_timeout": "无法计算脚本执行截止时间",
+      "invalidmessage_type_error": "invalidMessage 必须是字符串或 null",
+      "isvalid_type_error": "isValid 必须是布尔值或 null",
+      "must_return_object": "脚本必须返回对象或对象数组",
+      "planname_type_error": "planName 必须是字符串或 null",
+      "remaining_type_error": "remaining 必须是数字或 null",
+      "request_failed": "中文",
+      "request_https_required": "请求 URL 必须使用 HTTPS 协议（localhost 除外）",
+      "request_port_unknown": "无法确定端口号",
+      "request_private_host_forbidden": "不可信用量脚本不允许访问回环、私有或元数据地址",
+      "request_resolved_ip_forbidden": "不可信用量脚本不允许访问解析到回环、私有或元数据地址的主机",
+      "request_url_invalid": "请求 URL 必须包含有效的主机名",
+      "serialize_none": "序列化返回 None",
+      "total_type_error": "total 必须是数字或 null",
+      "unit_type_error": "unit 必须是字符串或 null",
+      "used_type_error": "used 必须是数字或 null"
+    },
+    "webdav": {
+      "base_url": {
+        "insecure": "WebDAV 仅支持 https 地址；明文 http 需显式开启 allowInsecure，且不会启用自动同步。",
+        "required": "WebDAV 地址不能为空",
+        "scheme_invalid": "WebDAV 仅支持 http/https 地址",
+        "unusable": "WebDAV 地址格式不支持追加路径"
+      },
+      "put": {
+        "invalid_etag": "无效的 ETag 值，无法设置条件 PUT 头",
+        "precondition_failed": "远端数据已被其他设备更新（412），未覆盖远端。"
+      },
+      "sync": {
+        "disabled": "WebDAV 同步未启用",
+        "not_configured": "未配置 WebDAV 同步"
+      },
+      "username": {
+        "required": "WebDAV 用户名不能为空"
+      }
+    }
   }
 }

@@ -1,11 +1,12 @@
+use crate::error::AppError;
 #[tauri::command]
-pub fn enter_lightweight_mode(app: tauri::AppHandle) -> Result<(), String> {
-    crate::lightweight::enter_lightweight_mode(&app)
+pub fn enter_lightweight_mode(app: tauri::AppHandle) -> Result<(), AppError> {
+    crate::lightweight::enter_lightweight_mode(&app).map_err(AppError::from)
 }
 
 #[tauri::command]
-pub fn exit_lightweight_mode(app: tauri::AppHandle) -> Result<(), String> {
-    crate::lightweight::exit_lightweight_mode(&app)
+pub fn exit_lightweight_mode(app: tauri::AppHandle) -> Result<(), AppError> {
+    crate::lightweight::exit_lightweight_mode(&app).map_err(AppError::from)
 }
 
 #[tauri::command]

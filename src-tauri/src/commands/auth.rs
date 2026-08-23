@@ -6,6 +6,7 @@ use crate::commands::codex_oauth::CodexOAuthState;
 use crate::commands::copilot::CopilotAuthState;
 use crate::commands::kimi_oauth::KimiOAuthState;
 use crate::commands::xai_oauth::XaiOAuthState;
+use crate::error::AppError;
 use crate::proxy::providers::anthropic_oauth_auth::{AnthropicOAuthAccount, AnthropicOAuthError};
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
 use crate::proxy::providers::copilot_auth::{
@@ -55,14 +56,16 @@ pub struct ManagedAuthDeviceCodeResponse {
     pub interval: u64,
 }
 
-fn ensure_auth_provider(auth_provider: &str) -> Result<&'static str, String> {
+fn ensure_auth_provider(auth_provider: &str) -> Result<&'static str, AppError> {
     match auth_provider {
         AUTH_PROVIDER_GITHUB_COPILOT => Ok(AUTH_PROVIDER_GITHUB_COPILOT),
         AUTH_PROVIDER_CODEX_OAUTH => Ok(AUTH_PROVIDER_CODEX_OAUTH),
         AUTH_PROVIDER_XAI_OAUTH => Ok(AUTH_PROVIDER_XAI_OAUTH),
         AUTH_PROVIDER_KIMI_OAUTH => Ok(AUTH_PROVIDER_KIMI_OAUTH),
         AUTH_PROVIDER_ANTHROPIC_OAUTH => Ok(AUTH_PROVIDER_ANTHROPIC_OAUTH),
-        _ => Err(format!("Unsupported auth provider: {auth_provider}")),
+        _ => Err(AppError::from(format!(
+            "Unsupported auth provider: {auth_provider}"
+        ))),
     }
 }
 
@@ -174,47 +177,32 @@ pub async fn auth_start_login(
     xai_state: State<'_, XaiOAuthState>,
     kimi_state: State<'_, KimiOAuthState>,
     anthropic_state: State<'_, AnthropicOAuthState>,
-) -> Result<ManagedAuthDeviceCodeResponse, String> {
+) -> Result<ManagedAuthDeviceCodeResponse, AppError> {
     let auth_provider = ensure_auth_provider(&auth_provider)?;
     match auth_provider {
         AUTH_PROVIDER_GITHUB_COPILOT => {
             let auth_manager = copilot_state.0.read().await;
             let response = auth_manager
                 .start_device_flow(github_domain.as_deref())
-                .await
-                .map_err(|e| e.to_string())?;
+                .await?;
             Ok(map_device_code_response(auth_provider, response))
         }
         AUTH_PROVIDER_CODEX_OAUTH => {
             let auth_manager = &codex_state.0;
-            let response = auth_manager
-                .start_device_flow()
-                .await
-                .map_err(|e| e.to_string())?;
+            let response = auth_manager.start_device_flow().await?;
             Ok(map_device_code_response(auth_provider, response))
         }
         AUTH_PROVIDER_XAI_OAUTH => {
             let auth_manager = xai_state.0.read().await;
-            let response = auth_manager
-                .start_device_flow()
-                .await
-                .map_err(|e| e.to_string())?;
+            let response = auth_manager.start_device_flow().await?;
             Ok(map_device_code_response(auth_provider, response))
         }
         AUTH_PROVIDER_KIMI_OAUTH => {
-            let response = kimi_state
-                .0
-                .start_device_flow()
-                .await
-                .map_err(|e| e.to_string())?;
+            let response = kimi_state.0.start_device_flow().await?;
             Ok(map_device_code_response(auth_provider, response))
         }
         AUTH_PROVIDER_ANTHROPIC_OAUTH => {
-            let response = anthropic_state
-                .0
-                .start_pkce_flow()
-                .await
-                .map_err(|e| e.to_string())?;
+            let response = anthropic_state.0.start_pkce_flow().await?;
             Ok(map_device_code_response(auth_provider, response))
         }
         _ => unreachable!(),
@@ -232,7 +220,7 @@ pub async fn auth_poll_for_account(
     xai_state: State<'_, XaiOAuthState>,
     kimi_state: State<'_, KimiOAuthState>,
     anthropic_state: State<'_, AnthropicOAuthState>,
-) -> Result<Option<ManagedAuthAccount>, String> {
+) -> Result<Option<ManagedAuthAccount>, AppError> {
     let auth_provider = ensure_auth_provider(&auth_provider)?;
     match auth_provider {
         AUTH_PROVIDER_GITHUB_COPILOT => {
@@ -248,7 +236,7 @@ pub async fn auth_poll_for_account(
                     }))
                 }
                 Err(CopilotAuthError::AuthorizationPending) => Ok(None),
-                Err(e) => Err(e.to_string()),
+                Err(e) => Err(AppError::from(e.to_string())),
             }
         }
         AUTH_PROVIDER_CODEX_OAUTH => {
@@ -261,7 +249,7 @@ pub async fn auth_poll_for_account(
                     }))
                 }
                 Err(CodexOAuthError::AuthorizationPending) => Ok(None),
-                Err(e) => Err(e.to_string()),
+                Err(e) => Err(AppError::from(e.to_string())),
             }
         }
         AUTH_PROVIDER_XAI_OAUTH => {
@@ -273,7 +261,7 @@ pub async fn auth_poll_for_account(
                         .map(|account| map_xai_account(account, default_account_id.as_deref())))
                 }
                 Err(XaiOAuthError::AuthorizationPending) => Ok(None),
-                Err(e) => Err(e.to_string()),
+                Err(e) => Err(AppError::from(e.to_string())),
             }
         }
         AUTH_PROVIDER_KIMI_OAUTH => match kimi_state.0.poll_for_token(&device_code).await {
@@ -282,7 +270,7 @@ pub async fn auth_poll_for_account(
                 Ok(account.map(|account| map_kimi_account(account, default_account_id.as_deref())))
             }
             Err(KimiOAuthError::AuthorizationPending) => Ok(None),
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err(AppError::from(e.to_string())),
         },
         AUTH_PROVIDER_ANTHROPIC_OAUTH => match anthropic_state.0.poll_pkce(&device_code).await {
             Ok(account) => {
@@ -291,7 +279,7 @@ pub async fn auth_poll_for_account(
                     .map(|account| map_anthropic_account(account, default_account_id.as_deref())))
             }
             Err(AnthropicOAuthError::AuthorizationPending) => Ok(None),
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err(AppError::from(e.to_string())),
         },
         _ => unreachable!(),
     }
@@ -305,7 +293,7 @@ pub async fn auth_list_accounts(
     xai_state: State<'_, XaiOAuthState>,
     kimi_state: State<'_, KimiOAuthState>,
     anthropic_state: State<'_, AnthropicOAuthState>,
-) -> Result<Vec<ManagedAuthAccount>, String> {
+) -> Result<Vec<ManagedAuthAccount>, AppError> {
     let auth_provider = ensure_auth_provider(&auth_provider)?;
     match auth_provider {
         AUTH_PROVIDER_GITHUB_COPILOT => {
@@ -368,7 +356,7 @@ pub async fn auth_get_status(
     xai_state: State<'_, XaiOAuthState>,
     kimi_state: State<'_, KimiOAuthState>,
     anthropic_state: State<'_, AnthropicOAuthState>,
-) -> Result<ManagedAuthStatus, String> {
+) -> Result<ManagedAuthStatus, AppError> {
     let auth_provider = ensure_auth_provider(&auth_provider)?;
     match auth_provider {
         AUTH_PROVIDER_GITHUB_COPILOT => {
@@ -466,7 +454,7 @@ pub async fn auth_remove_account(
     xai_state: State<'_, XaiOAuthState>,
     kimi_state: State<'_, KimiOAuthState>,
     anthropic_state: State<'_, AnthropicOAuthState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let auth_provider = ensure_auth_provider(&auth_provider)?;
     match auth_provider {
         AUTH_PROVIDER_GITHUB_COPILOT => {
@@ -474,7 +462,7 @@ pub async fn auth_remove_account(
             auth_manager
                 .remove_account(&account_id)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(AppError::from)
         }
         AUTH_PROVIDER_CODEX_OAUTH => {
             remove_codex_oauth_account_with_switch_lock(app_state.inner(), &account_id).await
@@ -484,18 +472,18 @@ pub async fn auth_remove_account(
             auth_manager
                 .remove_account(&account_id)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(AppError::from)
         }
         AUTH_PROVIDER_KIMI_OAUTH => kimi_state
             .0
             .remove_account(&account_id)
             .await
-            .map_err(|e| e.to_string()),
+            .map_err(AppError::from),
         AUTH_PROVIDER_ANTHROPIC_OAUTH => anthropic_state
             .0
             .remove_account(&account_id)
             .await
-            .map_err(|e| e.to_string()),
+            .map_err(AppError::from),
         _ => unreachable!(),
     }
 }
@@ -503,7 +491,7 @@ pub async fn auth_remove_account(
 pub(crate) async fn remove_codex_oauth_account_with_switch_lock(
     app_state: &AppState,
     account_id: &str,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     // Serialize Auth Center credential deletion with managed provider
     // add/update/switch/hot-switch. Otherwise a switch that already preflighted
     // a bundle could recreate auth.json after removal.
@@ -515,7 +503,7 @@ pub(crate) async fn remove_codex_oauth_account_with_switch_lock(
         .codex_oauth_manager
         .remove_account(account_id)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(AppError::from)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -527,7 +515,7 @@ pub async fn auth_set_default_account(
     xai_state: State<'_, XaiOAuthState>,
     kimi_state: State<'_, KimiOAuthState>,
     anthropic_state: State<'_, AnthropicOAuthState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let auth_provider = ensure_auth_provider(&auth_provider)?;
     match auth_provider {
         AUTH_PROVIDER_GITHUB_COPILOT => {
@@ -535,32 +523,32 @@ pub async fn auth_set_default_account(
             auth_manager
                 .set_default_account(&account_id)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(AppError::from)
         }
         AUTH_PROVIDER_CODEX_OAUTH => {
             let auth_manager = &codex_state.0;
             auth_manager
                 .set_default_account(&account_id)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(AppError::from)
         }
         AUTH_PROVIDER_XAI_OAUTH => {
             let auth_manager = xai_state.0.write().await;
             auth_manager
                 .set_default_account(&account_id)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(AppError::from)
         }
         AUTH_PROVIDER_KIMI_OAUTH => kimi_state
             .0
             .set_default_account(&account_id)
             .await
-            .map_err(|e| e.to_string()),
+            .map_err(AppError::from),
         AUTH_PROVIDER_ANTHROPIC_OAUTH => anthropic_state
             .0
             .set_default_account(&account_id)
             .await
-            .map_err(|e| e.to_string()),
+            .map_err(AppError::from),
         _ => unreachable!(),
     }
 }
@@ -573,31 +561,29 @@ pub async fn auth_logout(
     xai_state: State<'_, XaiOAuthState>,
     kimi_state: State<'_, KimiOAuthState>,
     anthropic_state: State<'_, AnthropicOAuthState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let auth_provider = ensure_auth_provider(&auth_provider)?;
     match auth_provider {
         AUTH_PROVIDER_GITHUB_COPILOT => {
             let auth_manager = copilot_state.0.write().await;
-            auth_manager.clear_auth().await.map_err(|e| e.to_string())
+            auth_manager.clear_auth().await.map_err(AppError::from)
         }
         AUTH_PROVIDER_CODEX_OAUTH => logout_codex_oauth_with_switch_lock(app_state.inner()).await,
         AUTH_PROVIDER_XAI_OAUTH => {
             let auth_manager = xai_state.0.write().await;
-            auth_manager.clear_auth().await.map_err(|e| e.to_string())
+            auth_manager.clear_auth().await.map_err(AppError::from)
         }
-        AUTH_PROVIDER_KIMI_OAUTH => kimi_state.0.clear_auth().await.map_err(|e| e.to_string()),
-        AUTH_PROVIDER_ANTHROPIC_OAUTH => anthropic_state
-            .0
-            .clear_auth()
-            .await
-            .map_err(|e| e.to_string()),
+        AUTH_PROVIDER_KIMI_OAUTH => kimi_state.0.clear_auth().await.map_err(AppError::from),
+        AUTH_PROVIDER_ANTHROPIC_OAUTH => {
+            anthropic_state.0.clear_auth().await.map_err(AppError::from)
+        }
         _ => unreachable!(),
     }
 }
 
 pub(crate) async fn logout_codex_oauth_with_switch_lock(
     app_state: &AppState,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let _switch_guard = app_state
         .proxy_service
         .lock_switch_for_app(AppType::Codex.as_str())
@@ -606,14 +592,14 @@ pub(crate) async fn logout_codex_oauth_with_switch_lock(
         .codex_oauth_manager
         .clear_auth()
         .await
-        .map_err(|error| error.to_string())
+        .map_err(AppError::from)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn auth_cancel_login(
     auth_provider: String,
     anthropic_state: State<'_, AnthropicOAuthState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let auth_provider = ensure_auth_provider(&auth_provider)?;
     if auth_provider == AUTH_PROVIDER_ANTHROPIC_OAUTH {
         anthropic_state.0.cancel_pkce_flow().await;
@@ -625,7 +611,7 @@ pub async fn auth_cancel_login(
 pub async fn auth_import_local(
     auth_provider: String,
     anthropic_state: State<'_, AnthropicOAuthState>,
-) -> Result<ManagedAuthAccount, String> {
+) -> Result<ManagedAuthAccount, AppError> {
     let auth_provider = ensure_auth_provider(&auth_provider)?;
     match auth_provider {
         AUTH_PROVIDER_ANTHROPIC_OAUTH => {
@@ -640,8 +626,8 @@ pub async fn auth_import_local(
                 default_account_id.as_deref(),
             ))
         }
-        _ => Err(format!(
+        _ => Err(AppError::from(format!(
             "Auth provider {auth_provider} does not support local credential import"
-        )),
+        ))),
     }
 }

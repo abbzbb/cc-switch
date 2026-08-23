@@ -63,6 +63,12 @@ impl From<std::io::Error> for XaiOAuthError {
     }
 }
 
+impl From<XaiOAuthError> for crate::error::AppError {
+    fn from(err: XaiOAuthError) -> Self {
+        crate::error::AppError::Message(err.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct DiscoveryDocument {
     issuer: String,

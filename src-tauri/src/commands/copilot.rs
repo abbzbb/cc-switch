@@ -2,6 +2,7 @@
 //!
 //! 提供 Copilot OAuth 认证相关的 Tauri 命令，支持多账号管理。
 
+use crate::error::AppError;
 use crate::proxy::providers::copilot_auth::{
     CopilotAuthManager, CopilotAuthStatus, CopilotModel, CopilotUsageResponse, GitHubAccount,
     GitHubDeviceCodeResponse,
@@ -22,12 +23,12 @@ pub struct CopilotAuthState(pub Arc<RwLock<CopilotAuthManager>>);
 pub async fn copilot_start_device_flow(
     github_domain: Option<String>,
     state: State<'_, CopilotAuthState>,
-) -> Result<GitHubDeviceCodeResponse, String> {
+) -> Result<GitHubDeviceCodeResponse, AppError> {
     let auth_manager = state.0.read().await;
     auth_manager
         .start_device_flow(github_domain.as_deref())
         .await
-        .map_err(|e| e.to_string())
+        .map_err(AppError::from)
 }
 
 /// 轮询 OAuth Token（向后兼容）
@@ -39,7 +40,7 @@ pub async fn copilot_poll_for_auth(
     device_code: String,
     github_domain: Option<String>,
     state: State<'_, CopilotAuthState>,
-) -> Result<bool, String> {
+) -> Result<bool, AppError> {
     let auth_manager = state.0.write().await;
     match auth_manager
         .poll_for_token(&device_code, github_domain.as_deref())
@@ -55,7 +56,7 @@ pub async fn copilot_poll_for_auth(
         }
         Err(e) => {
             log::error!("[CopilotAuth] 轮询失败: {e}");
-            Err(e.to_string())
+            Err(AppError::from(e.to_string()))
         }
     }
 }
@@ -68,7 +69,7 @@ pub async fn copilot_poll_for_account(
     device_code: String,
     github_domain: Option<String>,
     state: State<'_, CopilotAuthState>,
-) -> Result<Option<GitHubAccount>, String> {
+) -> Result<Option<GitHubAccount>, AppError> {
     let auth_manager = state.0.write().await;
     match auth_manager
         .poll_for_token(&device_code, github_domain.as_deref())
@@ -80,7 +81,7 @@ pub async fn copilot_poll_for_account(
         }
         Err(e) => {
             log::error!("[CopilotAuth] 轮询失败: {e}");
-            Err(e.to_string())
+            Err(AppError::from(e.to_string()))
         }
     }
 }
@@ -91,7 +92,7 @@ pub async fn copilot_poll_for_account(
 #[tauri::command]
 pub async fn copilot_list_accounts(
     state: State<'_, CopilotAuthState>,
-) -> Result<Vec<GitHubAccount>, String> {
+) -> Result<Vec<GitHubAccount>, AppError> {
     let auth_manager = state.0.read().await;
     Ok(auth_manager.list_accounts().await)
 }
@@ -101,12 +102,12 @@ pub async fn copilot_list_accounts(
 pub async fn copilot_remove_account(
     account_id: String,
     state: State<'_, CopilotAuthState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let auth_manager = state.0.write().await;
     auth_manager
         .remove_account(&account_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(AppError::from)
 }
 
 /// 设置默认账号
@@ -114,12 +115,12 @@ pub async fn copilot_remove_account(
 pub async fn copilot_set_default_account(
     account_id: String,
     state: State<'_, CopilotAuthState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let auth_manager = state.0.write().await;
     auth_manager
         .set_default_account(&account_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(AppError::from)
 }
 
 // ==================== 状态查询 ====================
@@ -128,23 +129,25 @@ pub async fn copilot_set_default_account(
 #[tauri::command]
 pub async fn copilot_get_auth_status(
     state: State<'_, CopilotAuthState>,
-) -> Result<CopilotAuthStatus, String> {
+) -> Result<CopilotAuthStatus, AppError> {
     let auth_manager = state.0.read().await;
     Ok(auth_manager.get_status().await)
 }
 
 /// 检查是否已认证（有任意账号）
 #[tauri::command]
-pub async fn copilot_is_authenticated(state: State<'_, CopilotAuthState>) -> Result<bool, String> {
+pub async fn copilot_is_authenticated(
+    state: State<'_, CopilotAuthState>,
+) -> Result<bool, AppError> {
     let auth_manager = state.0.read().await;
     Ok(auth_manager.is_authenticated().await)
 }
 
 /// 注销所有 Copilot 认证
 #[tauri::command]
-pub async fn copilot_logout(state: State<'_, CopilotAuthState>) -> Result<(), String> {
+pub async fn copilot_logout(state: State<'_, CopilotAuthState>) -> Result<(), AppError> {
     let auth_manager = state.0.write().await;
-    auth_manager.clear_auth().await.map_err(|e| e.to_string())
+    auth_manager.clear_auth().await.map_err(AppError::from)
 }
 
 // ==================== 模型和使用量 ====================
@@ -153,9 +156,9 @@ pub async fn copilot_logout(state: State<'_, CopilotAuthState>) -> Result<(), St
 #[tauri::command]
 pub async fn copilot_get_models(
     state: State<'_, CopilotAuthState>,
-) -> Result<Vec<CopilotModel>, String> {
+) -> Result<Vec<CopilotModel>, AppError> {
     let auth_manager = state.0.read().await;
-    auth_manager.fetch_models().await.map_err(|e| e.to_string())
+    auth_manager.fetch_models().await.map_err(AppError::from)
 }
 
 /// 获取指定账号的 Copilot 可用模型列表
@@ -163,21 +166,21 @@ pub async fn copilot_get_models(
 pub async fn copilot_get_models_for_account(
     account_id: String,
     state: State<'_, CopilotAuthState>,
-) -> Result<Vec<CopilotModel>, String> {
+) -> Result<Vec<CopilotModel>, AppError> {
     let auth_manager = state.0.read().await;
     auth_manager
         .fetch_models_for_account(&account_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(AppError::from)
 }
 
 /// 获取 Copilot 使用量信息（向后兼容：使用第一个账号）
 #[tauri::command]
 pub async fn copilot_get_usage(
     state: State<'_, CopilotAuthState>,
-) -> Result<CopilotUsageResponse, String> {
+) -> Result<CopilotUsageResponse, AppError> {
     let auth_manager = state.0.read().await;
-    auth_manager.fetch_usage().await.map_err(|e| e.to_string())
+    auth_manager.fetch_usage().await.map_err(AppError::from)
 }
 
 /// 获取指定账号的 Copilot 使用量信息
@@ -185,10 +188,10 @@ pub async fn copilot_get_usage(
 pub async fn copilot_get_usage_for_account(
     account_id: String,
     state: State<'_, CopilotAuthState>,
-) -> Result<CopilotUsageResponse, String> {
+) -> Result<CopilotUsageResponse, AppError> {
     let auth_manager = state.0.read().await;
     auth_manager
         .fetch_usage_for_account(&account_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(AppError::from)
 }

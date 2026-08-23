@@ -62,8 +62,9 @@ fn sqlite_related_paths(db_path: &Path) -> [PathBuf; 3] {
     ]
 }
 
-/// Create a brand-new SQLite file with 0600 so the first `Connection::open`
-/// does not leave a world-readable window under a loose umask.
+/// Create a brand-new SQLite file with owner-only access so the first
+/// `Connection::open` does not leave a world-readable window under a loose umask
+/// (Unix) or inherited ACL (Windows).
 fn create_private_sqlite_file_if_needed(db_path: &Path, db_exists: bool) -> Result<(), AppError> {
     if db_exists {
         return Ok(());
@@ -82,29 +83,40 @@ fn create_private_sqlite_file_if_needed(db_path: &Path, db_exists: bool) -> Resu
             Err(e) => return Err(AppError::io(db_path, e)),
         }
     }
+    #[cfg(windows)]
+    {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(db_path)
+        {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(AppError::io(db_path, e)),
+        }
+        if let Err(e) = crate::config::restrict_path_private(db_path) {
+            log::warn!(
+                "Failed to restrict ACL on new SQLite file {}: {e}",
+                db_path.display()
+            );
+        }
+    }
     Ok(())
 }
 
-/// Restrict the SQLite main file and WAL/SHM sidecars to 0600 on Unix.
-/// Windows ACL tightening is skipped: there is no existing helper, and a
-/// best-effort homemade DACL would be easy to get wrong.
+/// Restrict the SQLite main file and WAL/SHM sidecars to owner-only access
+/// (Unix 0600 / Windows protected DACL).
 fn restrict_sqlite_file_permissions(db_path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        for path in sqlite_related_paths(db_path) {
-            if !path.exists() {
-                continue;
-            }
-            if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            {
-                log::warn!("Failed to set 0600 permissions on {}: {e}", path.display());
-            }
+    for path in sqlite_related_paths(db_path) {
+        if !path.exists() {
+            continue;
         }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = db_path;
+        if let Err(e) = crate::config::restrict_path_private(&path) {
+            log::warn!(
+                "Failed to set private permissions on {}: {e}",
+                path.display()
+            );
+        }
     }
 }
 

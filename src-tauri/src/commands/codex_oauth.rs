@@ -5,6 +5,7 @@
 //! 大部分认证命令通过通用 `auth_*` 命令（参见 `commands::auth`）暴露给前端，
 //! 此处定义 State wrapper 以及 Codex OAuth 专属的订阅额度和模型列表查询命令。
 
+use crate::error::AppError;
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
 use crate::services::model_fetch::FetchedModel;
 use crate::services::subscription::{query_codex_quota, CredentialStatus, SubscriptionQuota};
@@ -30,7 +31,7 @@ pub async fn get_codex_oauth_quota(
     account_id: Option<String>,
     state: State<'_, CodexOAuthState>,
     app_state: State<'_, AppState>,
-) -> Result<SubscriptionQuota, String> {
+) -> Result<SubscriptionQuota, AppError> {
     let manager = &state.0;
 
     // 解析最终使用的账号 ID：显式 > 默认账号 > 无账号 (not_found)
@@ -78,7 +79,7 @@ pub async fn get_codex_oauth_quota(
 pub async fn get_codex_oauth_models(
     account_id: Option<String>,
     state: State<'_, CodexOAuthState>,
-) -> Result<Vec<FetchedModel>, String> {
+) -> Result<Vec<FetchedModel>, AppError> {
     let manager = &state.0;
     let resolved = match account_id
         .as_deref()
@@ -89,13 +90,15 @@ pub async fn get_codex_oauth_models(
         None => manager.default_account_id().await,
     };
     let Some(id) = resolved else {
-        return Err("No ChatGPT account available".to_string());
+        return Err(AppError::from("No ChatGPT account available".to_string()));
     };
 
     let token = manager
         .get_valid_token_for_account(&id)
         .await
-        .map_err(|e| format!("Codex OAuth token unavailable: {e}"))?;
+        .map_err(|e| AppError::from(format!("Codex OAuth token unavailable: {e}")))?;
 
-    crate::services::codex_oauth_models::fetch_models_with_token(&token, &id).await
+    crate::services::codex_oauth_models::fetch_models_with_token(&token, &id)
+        .await
+        .map_err(AppError::from)
 }

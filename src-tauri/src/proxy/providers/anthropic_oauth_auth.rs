@@ -74,6 +74,12 @@ impl From<std::io::Error> for AnthropicOAuthError {
     }
 }
 
+impl From<AnthropicOAuthError> for crate::error::AppError {
+    fn from(err: AnthropicOAuthError) -> Self {
+        crate::error::AppError::Message(err.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct OAuthTokenResponse {
     access_token: String,

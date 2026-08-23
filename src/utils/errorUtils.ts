@@ -1,3 +1,5 @@
+import i18n from "@/i18n";
+
 const readPreferredLanguage = (): string => {
   if (typeof window === "undefined") {
     return "zh";
@@ -7,6 +9,32 @@ const readPreferredLanguage = (): string => {
   } catch {
     return "zh";
   }
+};
+
+const resolveI18nLanguage = (lang: string): "zh" | "zh-TW" | "en" | "ja" => {
+  if (
+    lang.startsWith("zh-tw") ||
+    lang.startsWith("zh-hant") ||
+    lang === "zh-tw"
+  ) {
+    return "zh-TW";
+  }
+  if (lang.startsWith("zh")) return "zh";
+  if (lang.startsWith("ja")) return "ja";
+  return "en";
+};
+
+const translateBackendKey = (key: string, lng: string): string => {
+  const fullKey = `backend.${key}`;
+  const translated = i18n.t(fullKey, { lng, defaultValue: "" });
+  if (typeof translated !== "string") {
+    return "";
+  }
+  const trimmed = translated.trim();
+  if (!trimmed || trimmed === fullKey || trimmed.includes("{{")) {
+    return "";
+  }
+  return trimmed;
 };
 
 const pickLocalizedMessage = (errObject: Record<string, unknown>): string => {
@@ -19,8 +47,16 @@ const pickLocalizedMessage = (errObject: Record<string, unknown>): string => {
     return "";
   }
   const lang = readPreferredLanguage();
-  if (lang.startsWith("zh") && zh) return zh;
-  if (lang.startsWith("en") && en) return en;
+  const lng = resolveI18nLanguage(lang);
+  const fromI18n = key ? translateBackendKey(key, lng) : "";
+
+  // ja / zh-TW have no backend payload strings; prefer t(key) when present.
+  if ((lng === "ja" || lng === "zh-TW") && fromI18n) {
+    return fromI18n;
+  }
+  if (lng === "zh" && zh) return zh;
+  if (lng === "en" && en) return en;
+  if (fromI18n) return fromI18n;
   if (zh) return zh;
   if (en) return en;
   return message;

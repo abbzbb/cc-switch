@@ -1,4 +1,5 @@
 #![allow(non_snake_case)]
+use crate::error::AppError;
 
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
@@ -11,7 +12,7 @@ use crate::settings;
 use crate::store::AppState;
 
 #[tauri::command]
-pub async fn get_claude_config_status() -> Result<ConfigStatus, String> {
+pub async fn get_claude_config_status() -> Result<ConfigStatus, AppError> {
     Ok(config::get_claude_config_status())
 }
 
@@ -41,7 +42,7 @@ fn invalid_toml_format_error(error: toml_edit::TomlError) -> String {
     }
 }
 
-fn validate_common_config_snippet(app_type: &str, snippet: &str) -> Result<(), String> {
+fn validate_common_config_snippet(app_type: &str, snippet: &str) -> Result<(), AppError> {
     if snippet.trim().is_empty() {
         return Ok(());
     }
@@ -66,15 +67,14 @@ fn validate_common_config_snippet(app_type: &str, snippet: &str) -> Result<(), S
 pub async fn get_config_status(
     state: State<'_, AppState>,
     app: String,
-) -> Result<ConfigStatus, String> {
-    match AppType::from_str(&app).map_err(|e| e.to_string())? {
+) -> Result<ConfigStatus, AppError> {
+    match AppType::from_str(&app)? {
         AppType::Claude => Ok(config::get_claude_config_status()),
         AppType::ClaudeDesktop => {
             let status = crate::claude_desktop_config::get_status(
                 state.db.as_ref(),
                 state.proxy_service.is_running().await,
-            )
-            .map_err(|e| e.to_string())?;
+            )?;
             Ok(ConfigStatus {
                 exists: status.configured,
                 path: status.config_library_path.unwrap_or_default(),
@@ -136,9 +136,8 @@ pub async fn get_config_status(
             Ok(ConfigStatus { exists, path })
         }
         AppType::Pi => {
-            let config_path = crate::pi_config::get_pi_models_path().map_err(|e| e.to_string())?;
-            let path = crate::pi_config::get_pi_agent_dir()
-                .map_err(|e| e.to_string())?
+            let config_path = crate::pi_config::get_pi_models_path()?;
+            let path = crate::pi_config::get_pi_agent_dir()?
                 .to_string_lossy()
                 .to_string();
             Ok(ConfigStatus {
@@ -150,53 +149,50 @@ pub async fn get_config_status(
 }
 
 #[tauri::command]
-pub async fn get_claude_code_config_path() -> Result<String, String> {
+pub async fn get_claude_code_config_path() -> Result<String, AppError> {
     Ok(get_claude_settings_path().to_string_lossy().to_string())
 }
 
 #[tauri::command]
-pub async fn get_config_dir(app: String) -> Result<String, String> {
-    let dir = match AppType::from_str(&app).map_err(|e| e.to_string())? {
+pub async fn get_config_dir(app: String) -> Result<String, AppError> {
+    let dir = match AppType::from_str(&app)? {
         AppType::Claude => config::get_claude_config_dir(),
-        AppType::ClaudeDesktop => {
-            crate::claude_desktop_config::get_config_library_path().map_err(|e| e.to_string())?
-        }
+        AppType::ClaudeDesktop => crate::claude_desktop_config::get_config_library_path()?,
         AppType::Codex => codex_config::get_codex_config_dir(),
         AppType::Gemini => crate::gemini_config::get_gemini_dir(),
         AppType::GrokBuild => crate::grok_config::get_grok_config_dir(),
         AppType::OpenCode => crate::opencode_config::get_opencode_dir(),
         AppType::OpenClaw => crate::openclaw_config::get_openclaw_dir(),
         AppType::Hermes => crate::hermes_config::get_hermes_dir(),
-        AppType::Pi => crate::pi_config::get_pi_agent_dir().map_err(|e| e.to_string())?,
+        AppType::Pi => crate::pi_config::get_pi_agent_dir()?,
     };
 
     Ok(dir.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-pub async fn open_config_folder(handle: AppHandle, app: String) -> Result<bool, String> {
-    let config_dir = match AppType::from_str(&app).map_err(|e| e.to_string())? {
+pub async fn open_config_folder(handle: AppHandle, app: String) -> Result<bool, AppError> {
+    let config_dir = match AppType::from_str(&app)? {
         AppType::Claude => config::get_claude_config_dir(),
-        AppType::ClaudeDesktop => {
-            crate::claude_desktop_config::get_config_library_path().map_err(|e| e.to_string())?
-        }
+        AppType::ClaudeDesktop => crate::claude_desktop_config::get_config_library_path()?,
         AppType::Codex => codex_config::get_codex_config_dir(),
         AppType::Gemini => crate::gemini_config::get_gemini_dir(),
         AppType::GrokBuild => crate::grok_config::get_grok_config_dir(),
         AppType::OpenCode => crate::opencode_config::get_opencode_dir(),
         AppType::OpenClaw => crate::openclaw_config::get_openclaw_dir(),
         AppType::Hermes => crate::hermes_config::get_hermes_dir(),
-        AppType::Pi => crate::pi_config::get_pi_agent_dir().map_err(|e| e.to_string())?,
+        AppType::Pi => crate::pi_config::get_pi_agent_dir()?,
     };
 
     if !config_dir.exists() {
-        std::fs::create_dir_all(&config_dir).map_err(|e| format!("创建目录失败: {e}"))?;
+        std::fs::create_dir_all(&config_dir)
+            .map_err(|e| AppError::from(format!("创建目录失败: {e}")))?;
     }
 
     handle
         .opener()
         .open_path(config_dir.to_string_lossy().to_string(), None::<String>)
-        .map_err(|e| format!("打开文件夹失败: {e}"))?;
+        .map_err(|e| AppError::from(format!("打开文件夹失败: {e}")))?;
 
     Ok(true)
 }
@@ -205,7 +201,7 @@ pub async fn open_config_folder(handle: AppHandle, app: String) -> Result<bool, 
 pub async fn pick_directory(
     app: AppHandle,
     #[allow(non_snake_case)] defaultPath: Option<String>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, AppError> {
     let initial = defaultPath
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty());
@@ -218,14 +214,14 @@ pub async fn pick_directory(
         builder.blocking_pick_folder()
     })
     .await
-    .map_err(|e| format!("弹出目录选择器失败: {e}"))?;
+    .map_err(|e| AppError::from(format!("弹出目录选择器失败: {e}")))?;
 
     match result {
         Some(file_path) => {
             let resolved = file_path
                 .simplified()
                 .into_path()
-                .map_err(|e| format!("解析选择的目录失败: {e}"))?;
+                .map_err(|e| AppError::from(format!("解析选择的目录失败: {e}")))?;
             Ok(Some(resolved.to_string_lossy().to_string()))
         }
         None => Ok(None),
@@ -233,23 +229,24 @@ pub async fn pick_directory(
 }
 
 #[tauri::command]
-pub async fn get_app_config_path() -> Result<String, String> {
+pub async fn get_app_config_path() -> Result<String, AppError> {
     let config_path = config::get_app_config_path();
     Ok(config_path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-pub async fn open_app_config_folder(handle: AppHandle) -> Result<bool, String> {
+pub async fn open_app_config_folder(handle: AppHandle) -> Result<bool, AppError> {
     let config_dir = config::get_app_config_dir();
 
     if !config_dir.exists() {
-        std::fs::create_dir_all(&config_dir).map_err(|e| format!("创建目录失败: {e}"))?;
+        std::fs::create_dir_all(&config_dir)
+            .map_err(|e| AppError::from(format!("创建目录失败: {e}")))?;
     }
 
     handle
         .opener()
         .open_path(config_dir.to_string_lossy().to_string(), None::<String>)
-        .map_err(|e| format!("打开文件夹失败: {e}"))?;
+        .map_err(|e| AppError::from(format!("打开文件夹失败: {e}")))?;
 
     Ok(true)
 }
@@ -257,18 +254,15 @@ pub async fn open_app_config_folder(handle: AppHandle) -> Result<bool, String> {
 #[tauri::command]
 pub async fn get_claude_common_config_snippet(
     state: tauri::State<'_, crate::store::AppState>,
-) -> Result<Option<String>, String> {
-    state
-        .db
-        .get_config_snippet("claude")
-        .map_err(|e| e.to_string())
+) -> Result<Option<String>, AppError> {
+    state.db.get_config_snippet("claude")
 }
 
 #[tauri::command]
 pub async fn set_claude_common_config_snippet(
     snippet: String,
     state: tauri::State<'_, crate::store::AppState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let is_cleared = snippet.trim().is_empty();
 
     if !snippet.trim().is_empty() {
@@ -277,14 +271,8 @@ pub async fn set_claude_common_config_snippet(
 
     let value = if is_cleared { None } else { Some(snippet) };
 
-    state
-        .db
-        .set_config_snippet("claude", value)
-        .map_err(|e| e.to_string())?;
-    state
-        .db
-        .set_config_snippet_cleared("claude", is_cleared)
-        .map_err(|e| e.to_string())?;
+    state.db.set_config_snippet("claude", value)?;
+    state.db.set_config_snippet_cleared("claude", is_cleared)?;
     Ok(())
 }
 
@@ -292,11 +280,8 @@ pub async fn set_claude_common_config_snippet(
 pub async fn get_common_config_snippet(
     app_type: String,
     state: tauri::State<'_, crate::store::AppState>,
-) -> Result<Option<String>, String> {
-    state
-        .db
-        .get_config_snippet(&app_type)
-        .map_err(|e| e.to_string())
+) -> Result<Option<String>, AppError> {
+    state.db.get_config_snippet(&app_type)
 }
 
 /// 对前端编辑器里的 config.toml 文本做通用配置片段的合并/剥离。
@@ -307,13 +292,12 @@ pub async fn update_toml_common_config_snippet(
     config_toml: String,
     snippet_toml: String,
     enabled: bool,
-) -> Result<String, String> {
+) -> Result<String, AppError> {
     crate::services::provider::update_toml_common_config_snippet(
         &config_toml,
         &snippet_toml,
         enabled,
     )
-    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -321,12 +305,9 @@ pub async fn set_common_config_snippet(
     app_type: String,
     snippet: String,
     state: tauri::State<'_, crate::store::AppState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let is_cleared = snippet.trim().is_empty();
-    let old_snippet = state
-        .db
-        .get_config_snippet(&app_type)
-        .map_err(|e| e.to_string())?;
+    let old_snippet = state.db.get_config_snippet(&app_type)?;
 
     validate_common_config_snippet(&app_type, &snippet)?;
 
@@ -337,59 +318,47 @@ pub async fn set_common_config_snippet(
             .as_deref()
             .filter(|value| !value.trim().is_empty())
         {
-            let app = AppType::from_str(&app_type).map_err(|e| e.to_string())?;
+            let app = AppType::from_str(&app_type)?;
             crate::services::provider::ProviderService::migrate_legacy_common_config_usage(
                 state.inner(),
                 app,
                 legacy_snippet,
-            )
-            .map_err(|e| e.to_string())?;
+            )?;
         }
     }
 
-    state
-        .db
-        .set_config_snippet(&app_type, value)
-        .map_err(|e| e.to_string())?;
-    state
-        .db
-        .set_config_snippet_cleared(&app_type, is_cleared)
-        .map_err(|e| e.to_string())?;
+    state.db.set_config_snippet(&app_type, value)?;
+    state.db.set_config_snippet_cleared(&app_type, is_cleared)?;
 
     if matches!(app_type.as_str(), "claude" | "codex" | "gemini") {
-        let app = AppType::from_str(&app_type).map_err(|e| e.to_string())?;
+        let app = AppType::from_str(&app_type)?;
         crate::services::provider::ProviderService::sync_current_provider_for_app(
             state.inner(),
             app,
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
     }
 
     if app_type == "omo"
         && state
             .db
-            .get_current_omo_provider("opencode", "omo")
-            .map_err(|e| e.to_string())?
+            .get_current_omo_provider("opencode", "omo")?
             .is_some()
     {
         crate::services::OmoService::write_config_to_file(
             state.inner(),
             &crate::services::omo::STANDARD,
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
     }
     if app_type == "omo-slim"
         && state
             .db
-            .get_current_omo_provider("opencode", "omo-slim")
-            .map_err(|e| e.to_string())?
+            .get_current_omo_provider("opencode", "omo-slim")?
             .is_some()
     {
         crate::services::OmoService::write_config_to_file(
             state.inner(),
             &crate::services::omo::SLIM,
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
     }
     Ok(())
 }
@@ -408,6 +377,7 @@ mod tests {
     fn validate_common_config_snippet_rejects_invalid_codex_snippet() {
         let err = validate_common_config_snippet("codex", "[broken")
             .expect_err("invalid codex snippet should be rejected");
+        let err = err.to_string();
         assert!(
             err.contains("TOML") || err.contains("toml") || err.contains("格式"),
             "expected TOML validation error, got {err}"
@@ -420,8 +390,8 @@ pub async fn extract_common_config_snippet(
     appType: String,
     settingsConfig: Option<String>,
     state: tauri::State<'_, crate::store::AppState>,
-) -> Result<String, String> {
-    let app = AppType::from_str(&appType).map_err(|e| e.to_string())?;
+) -> Result<String, AppError> {
+    let app = AppType::from_str(&appType)?;
 
     if let Some(settings_config) = settingsConfig.filter(|s| !s.trim().is_empty()) {
         let settings: serde_json::Value =
@@ -430,10 +400,8 @@ pub async fn extract_common_config_snippet(
         return crate::services::provider::ProviderService::extract_common_config_snippet_from_settings(
             app,
             &settings,
-        )
-        .map_err(|e| e.to_string());
+        );
     }
 
     crate::services::provider::ProviderService::extract_common_config_snippet(&state, app)
-        .map_err(|e| e.to_string())
 }

@@ -522,7 +522,95 @@ fn atomic_write_with_unix_mode(
             });
         }
     }
+    if unix_mode.is_some() {
+        if let Err(source) = restrict_path_private(path) {
+            return Err(AppError::io(path, source));
+        }
+    }
     Ok(())
+}
+
+/// Restrict `path` to owner-only access: Unix mode 0600, Windows protected DACL
+/// (`FILE_ALL_ACCESS` for the owner and SYSTEM, no inherited ACEs).
+pub(crate) fn restrict_path_private(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(windows)]
+    {
+        restrict_path_private_windows(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn restrict_path_private_windows(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        SetFileSecurityW, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR,
+    };
+
+    // Protected DACL: full control for the owner and SYSTEM only.
+    const SDDL: &str = "D:P(A;;FA;;;OW)(A;;FA;;;SY)";
+    let sddl: Vec<u16> = SDDL.encode_utf16().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `sddl` is a NUL-terminated UTF-16 SDDL string. On success `sd`
+    // is a LocalAlloc pointer that LocalSd frees.
+    let converted = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut sd,
+            std::ptr::null_mut(),
+        )
+    };
+    if converted == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    struct LocalSd(PSECURITY_DESCRIPTOR);
+    impl Drop for LocalSd {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: `self.0` came from ConvertStringSecurityDescriptorToSecurityDescriptorW.
+                unsafe {
+                    LocalFree(self.0);
+                }
+            }
+        }
+    }
+    let guard = LocalSd(sd);
+
+    // SAFETY: `wide` is NUL-terminated; `guard.0` is a valid self-relative SD.
+    let ok = unsafe {
+        SetFileSecurityW(
+            wide.as_ptr(),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            guard.0,
+        )
+    };
+    if ok == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -796,6 +884,26 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "GEMINI_API_KEY=secret\n"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn restrict_path_private_succeeds_on_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.txt");
+        std::fs::write(&path, b"secret").unwrap();
+        restrict_path_private(&path).expect("windows DACL restriction");
+        assert_eq!(std::fs::read(&path).unwrap(), b"secret");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn write_json_file_private_succeeds_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.json");
+        write_json_file_private(&path, &serde_json::json!({ "token": "secret" })).unwrap();
+        let parsed: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(parsed["token"], "secret");
     }
 
     #[test]

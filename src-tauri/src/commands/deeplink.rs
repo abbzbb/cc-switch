@@ -2,14 +2,15 @@ use crate::deeplink::{
     import_mcp_from_deeplink, import_prompt_from_deeplink, import_provider_from_deeplink,
     import_skill_from_deeplink, parse_deeplink_url, DeepLinkImportRequest,
 };
+use crate::error::AppError;
 use crate::store::AppState;
 use tauri::State;
 
 /// Parse a deep link URL and return the parsed request for frontend confirmation
 #[tauri::command]
-pub fn parse_deeplink(url: String) -> Result<DeepLinkImportRequest, String> {
+pub fn parse_deeplink(url: String) -> Result<DeepLinkImportRequest, AppError> {
     log::info!("Parsing deep link URL: {}", crate::url_for_log(&url));
-    parse_deeplink_url(&url).map_err(|e| e.to_string())
+    parse_deeplink_url(&url)
 }
 
 /// Merge configuration from Base64/URL into a deep link request
@@ -17,9 +18,9 @@ pub fn parse_deeplink(url: String) -> Result<DeepLinkImportRequest, String> {
 #[tauri::command]
 pub fn merge_deeplink_config(
     request: DeepLinkImportRequest,
-) -> Result<DeepLinkImportRequest, String> {
+) -> Result<DeepLinkImportRequest, AppError> {
     log::info!("Merging config for deep link request: {:?}", request.name);
-    crate::deeplink::parse_and_merge_config(&request).map_err(|e| e.to_string())
+    crate::deeplink::parse_and_merge_config(&request)
 }
 
 /// Import a provider from a deep link request (legacy, kept for compatibility)
@@ -27,14 +28,14 @@ pub fn merge_deeplink_config(
 pub fn import_from_deeplink(
     state: State<AppState>,
     request: DeepLinkImportRequest,
-) -> Result<String, String> {
+) -> Result<String, AppError> {
     log::info!(
         "Importing provider from deep link: {:?} for app {:?}",
         request.name,
         request.app
     );
 
-    let provider_id = import_provider_from_deeplink(&state, request).map_err(|e| e.to_string())?;
+    let provider_id = import_provider_from_deeplink(&state, request)?;
 
     log::info!("Successfully imported provider with ID: {provider_id}");
 
@@ -46,28 +47,26 @@ pub fn import_from_deeplink(
 pub async fn import_from_deeplink_unified(
     state: State<'_, AppState>,
     request: DeepLinkImportRequest,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     log::info!("Importing {} resource from deep link", request.resource);
 
     match request.resource.as_str() {
         "provider" => {
-            let provider_id =
-                import_provider_from_deeplink(&state, request).map_err(|e| e.to_string())?;
+            let provider_id = import_provider_from_deeplink(&state, request)?;
             Ok(serde_json::json!({
                 "type": "provider",
                 "id": provider_id
             }))
         }
         "prompt" => {
-            let prompt_id =
-                import_prompt_from_deeplink(&state, request).map_err(|e| e.to_string())?;
+            let prompt_id = import_prompt_from_deeplink(&state, request)?;
             Ok(serde_json::json!({
                 "type": "prompt",
                 "id": prompt_id
             }))
         }
         "mcp" => {
-            let result = import_mcp_from_deeplink(&state, request).map_err(|e| e.to_string())?;
+            let result = import_mcp_from_deeplink(&state, request)?;
             // Add type field to the result
             Ok(serde_json::json!({
                 "type": "mcp",
@@ -77,13 +76,15 @@ pub async fn import_from_deeplink_unified(
             }))
         }
         "skill" => {
-            let skill_key =
-                import_skill_from_deeplink(&state, request).map_err(|e| e.to_string())?;
+            let skill_key = import_skill_from_deeplink(&state, request)?;
             Ok(serde_json::json!({
                 "type": "skill",
                 "key": skill_key
             }))
         }
-        _ => Err(format!("Unsupported resource type: {}", request.resource)),
+        _ => Err(AppError::from(format!(
+            "Unsupported resource type: {}",
+            request.resource
+        ))),
     }
 }

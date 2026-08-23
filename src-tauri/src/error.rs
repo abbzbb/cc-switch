@@ -108,6 +108,45 @@ impl From<rusqlite::Error> for AppError {
     }
 }
 
+impl From<String> for AppError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl From<&str> for AppError {
+    fn from(message: &str) -> Self {
+        Self::Message(message.to_string())
+    }
+}
+
+impl From<std::io::Error> for AppError {
+    fn from(source: std::io::Error) -> Self {
+        Self::IoContext {
+            context: "IO 错误".to_string(),
+            source,
+        }
+    }
+}
+
+impl From<anyhow::Error> for AppError {
+    fn from(err: anyhow::Error) -> Self {
+        Self::Message(err.to_string())
+    }
+}
+
+impl From<tauri::Error> for AppError {
+    fn from(err: tauri::Error) -> Self {
+        Self::Message(err.to_string())
+    }
+}
+
+impl From<tokio::task::JoinError> for AppError {
+    fn from(err: tokio::task::JoinError) -> Self {
+        Self::Message(format!("任务执行失败: {err}"))
+    }
+}
+
 impl From<AppError> for String {
     fn from(err: AppError) -> Self {
         err.to_string()
@@ -199,5 +238,13 @@ mod tests {
         let err = AppError::localized("k", "中文", "English");
         let text: String = err.into();
         assert_eq!(text, "中文 (English)");
+    }
+
+    #[test]
+    fn from_string_becomes_message_variant() {
+        let err = AppError::from("plain command error".to_string());
+        let value = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(value["message"], "plain command error");
+        assert!(value.get("key").is_none());
     }
 }

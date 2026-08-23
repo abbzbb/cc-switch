@@ -50,7 +50,7 @@ fn post_sync_warning<E: std::fmt::Display>(err: E) -> String {
 }
 
 pub(crate) fn post_sync_warning_from_result(
-    result: Result<Result<(), AppError>, String>,
+    result: Result<Result<(), AppError>, AppError>,
 ) -> Option<String> {
     match result {
         Ok(Ok(())) => None,
@@ -103,7 +103,8 @@ mod tests {
             panic!("forced join error");
         });
         let join_err = handle.await.expect_err("task should panic");
-        let warning = post_sync_warning_from_result(Err(join_err.to_string()));
+        let warning =
+            post_sync_warning_from_result(Err(crate::error::AppError::from(join_err.to_string())));
         assert!(warning.is_some());
     }
 

@@ -3392,5 +3392,264 @@
     "expiredHint": "{{tool}}コマンドを実行してログインを更新してください",
     "queryFailed": "クエリに失敗しました",
     "refresh": "更新"
+  },
+  "backend": {
+    "app": {
+      "prompts_unsupported": "This app does not support Prompts"
+    },
+    "backup": {
+      "sql": {
+        "incomplete_transaction": "The SQL backup transaction is incomplete; the file may be truncated.",
+        "invalid_format": "Only SQL backups exported by CC Switch are supported."
+      }
+    },
+    "claude": {
+      "live": {
+        "missing": "Claude settings file is missing"
+      }
+    },
+    "claude_desktop": {
+      "import_unsupported": "Claude Desktop 3P config cannot be imported through the generic import flow. Use 'Import compatible providers from Claude' instead.",
+      "live": {
+        "read_unsupported": "Claude Desktop 3P configuration cannot be imported as a generic live config. Use 'Import compatible providers from Claude' instead.",
+        "requires_db_context": "Claude Desktop configuration must be written through the provider switch flow"
+      },
+      "provider": {
+        "api_format_unsupported": "Claude Desktop phase 1 only supports native Anthropic Messages API",
+        "auth_token_missing": "Claude Desktop direct provider is missing ANTHROPIC_AUTH_TOKEN (Bearer Token)",
+        "base_url_missing": "Claude Desktop direct provider is missing ANTHROPIC_BASE_URL",
+        "credentials_missing": "Claude Desktop proxy provider is missing Base URL or API key",
+        "env_missing": "Claude Desktop direct provider is missing env configuration",
+        "full_url_unsupported": "Claude Desktop direct mode does not support full URL endpoint configuration",
+        "missing": "Claude Desktop has no available providers",
+        "mode_unsupported": "This Claude Desktop provider uses proxy mode and cannot be written as direct mode",
+        "model_missing": "Claude Desktop request is missing the model field",
+        "routes_missing": "Claude Desktop proxy mode requires at least one model route mapping",
+        "settings_not_object": "Claude Desktop proxy provider configuration must be a JSON object",
+        "type_unsupported": "Claude Desktop direct mode does not support providers that require local proxy conversion"
+      },
+      "unsupported_platform": "Claude Desktop 3P configuration is not supported on this platform yet. Phase 1 only supports macOS and Windows."
+    },
+    "codex": {
+      "live": {
+        "missing": "Codex configuration is missing"
+      }
+    },
+    "config": {
+      "unsupported_v1": "Detected legacy v1 config. Runtime auto-migration is no longer supported.\\n\\nSolutions:\\n1. Install v3.2.x for one-time auto-migration\\n2. Or manually edit ~/.cc-switch/config.json to adjust the top-level structure:\\n   {\\\"version\\\": 2, \\\"claude\\\": {...}, \\\"codex\\\": {...}, \\\"mcp\\\": {...}}\\n\\n"
+    },
+    "error": {
+      "multiplierEmpty": "Multiplier cannot be empty"
+    },
+    "gemini": {
+      "env": {
+        "missing": "Gemini .env file not found"
+      },
+      "live": {
+        "missing": "Gemini configuration file is missing"
+      },
+      "missing_api_key": "Missing GEMINI_API_KEY",
+      "validation": {
+        "invalid_config": "Gemini config invalid: config must be an object or null",
+        "invalid_env": "Gemini config invalid: env must be an object",
+        "missing_api_key": "Gemini config missing required field: GEMINI_API_KEY"
+      }
+    },
+    "grokbuild": {
+      "config": {
+        "missing": "Grok Build configuration file not found"
+      }
+    },
+    "hermes": {
+      "config": {
+        "missing": "Hermes configuration file not found"
+      }
+    },
+    "hermes_base_url_missing": "Hermes provider is missing `base_url`",
+
+    "openclaw": {
+      "config": {
+        "missing": "OpenClaw configuration file not found"
+      }
+    },
+    "openclaw_base_url_missing": "OpenClaw provider is missing `baseUrl`",
+    "opencode": {
+      "config": {
+        "missing": "OpenCode configuration file not found"
+      }
+    },
+    "opencode_base_url_missing": "OpenCode provider is missing `options.baseURL` and the SDK package has no default endpoint",
+    "provider": {
+      "claude": {
+        "api_key": {
+          "missing": "API key is missing"
+        },
+        "base_url": {
+          "missing": "Missing ANTHROPIC_BASE_URL configuration"
+        },
+        "env": {
+          "missing": "Invalid configuration: missing env section"
+        },
+        "settings": {
+          "not_object": "Claude configuration must be a JSON object"
+        }
+      },
+      "codex": {
+        "api_key": {
+          "missing": "API key is missing"
+        },
+        "auth": {
+          "missing": "Invalid configuration: missing auth section"
+        },
+        "base_url": {
+          "invalid": "base_url in config.toml has invalid format",
+          "missing": "base_url is missing from config.toml"
+        },
+        "config": {
+          "invalid_type": "Codex config field must be a string",
+          "missing": "Codex third-party provider is missing config.toml, cannot write bearer token"
+        },
+        "settings": {
+          "not_object": "Codex configuration must be a JSON object"
+        }
+      },
+      "endpoint": {
+        "url_required": "URL cannot be empty"
+      },
+      "grokbuild": {
+        "config": {
+          "missing": "Grok Build configuration is missing the config field",
+          "not_table": "Grok Build configuration must be a TOML table"
+        },
+        "context_window": {
+          "invalid": "Grok Build context_window must be a positive integer"
+        },
+        "credentials": {
+          "missing": "Grok Build configuration is missing the base URL or API key"
+        },
+        "default_model": {
+          "missing": "Grok Build configuration is missing models.default"
+        },
+        "model": {
+          "missing": "Grok Build configuration is missing [model.<name>]"
+        },
+        "models": {
+          "missing": "Grok Build configuration is missing [models]"
+        },
+        "settings": {
+          "not_object": "Grok Build configuration must be a JSON object"
+        }
+      },
+      "hermes": {
+        "settings": {
+          "not_object": "Hermes configuration must be a JSON object"
+        }
+      },
+      "import": {
+        "live_taken_over": "The live config is currently taken over by the proxy (contains placeholders) and cannot be imported as a provider. Disable proxy takeover or restore the live config first."
+      },
+      "openclaw": {
+        "api_key": {
+          "missing": "API key is missing"
+        },
+        "settings": {
+          "not_object": "OpenClaw configuration must be a JSON object"
+        }
+      },
+      "opencode": {
+        "api_key": {
+          "missing": "API key is missing"
+        },
+        "options": {
+          "missing": "Invalid configuration: missing options section"
+        },
+        "settings": {
+          "not_object": "OpenCode configuration must be a JSON object"
+        }
+      },
+      "usage": {
+        "disabled": "Usage query is disabled",
+        "script": {
+          "missing": "Usage script is not configured"
+        }
+      }
+    },
+    "s3": {
+      "access_key_id": {
+        "required": "S3 Access Key ID is required."
+      },
+      "bucket": {
+        "required": "S3 bucket is required."
+      },
+      "endpoint": {
+        "insecure": "S3 custom endpoints must use https. Cleartext http requires allowInsecure and disables auto-sync."
+      },
+      "put": {
+        "invalid_etag": "Invalid ETag value; cannot set conditional PUT header.",
+        "precondition_failed": "Remote data was updated by another client (412 Precondition Failed); remote was not overwritten."
+      },
+      "region": {
+        "required": "S3 region is required."
+      },
+      "secret_access_key": {
+        "required": "S3 Secret Access Key is required."
+      },
+      "sync": {
+        "disabled": "S3 sync is disabled.",
+        "not_configured": "S3 sync is not configured."
+      }
+    },
+    "switch": {
+      "official_blocked_by_proxy": "Cannot switch to official provider while proxy takeover is active. Using proxy with official APIs may cause account bans."
+    },
+    "usage": {
+      "displayNameRequired": "Display name is required",
+      "modelIdRequired": "Model ID is required"
+    },
+    "usage_script": {
+      "base_url_empty": "base_url cannot be empty",
+      "base_url_hostname_empty": "base_url hostname cannot be empty",
+      "base_url_hostname_missing": "base_url must include a valid hostname",
+      "base_url_https_required": "base_url must use HTTPS (localhost allowed)",
+      "base_url_private_host_forbidden": "Untrusted usage scripts cannot use loopback, private, or metadata hosts",
+      "dns_resolve_failed": "Request host resolved to no addresses",
+      "empty_array": "Script returned empty array",
+      "extra_type_error": "extra must be string or null",
+      "invalid_timeout": "Unable to compute script execution deadline",
+      "invalidmessage_type_error": "invalidMessage must be string or null",
+      "isvalid_type_error": "isValid must be boolean or null",
+      "must_return_object": "Script must return object or array of objects",
+      "planname_type_error": "planName must be string or null",
+      "remaining_type_error": "remaining must be number or null",
+      "request_failed": "English",
+      "request_https_required": "Request URL must use HTTPS (localhost allowed)",
+      "request_port_unknown": "Unable to determine port number",
+      "request_private_host_forbidden": "Untrusted usage scripts cannot target loopback, private, or metadata hosts",
+      "request_resolved_ip_forbidden": "Untrusted usage scripts cannot target hosts that resolve to loopback, private, or metadata addresses",
+      "request_url_invalid": "Request URL must include a valid hostname",
+      "serialize_none": "Serialization returned None",
+      "total_type_error": "total must be number or null",
+      "unit_type_error": "unit must be string or null",
+      "used_type_error": "used must be number or null"
+    },
+    "webdav": {
+      "base_url": {
+        "insecure": "WebDAV URLs must use https. Cleartext http requires allowInsecure and disables auto-sync.",
+        "required": "WebDAV URL is required.",
+        "scheme_invalid": "WebDAV URL must use http or https.",
+        "unusable": "WebDAV URL format does not support appending path segments."
+      },
+      "put": {
+        "invalid_etag": "Invalid ETag value; cannot set conditional PUT header.",
+        "precondition_failed": "Remote data was updated by another client (412 Precondition Failed); remote was not overwritten."
+      },
+      "sync": {
+        "disabled": "WebDAV sync is disabled.",
+        "not_configured": "WebDAV sync is not configured."
+      },
+      "username": {
+        "required": "WebDAV username is required."
+      }
+    }
   }
 }

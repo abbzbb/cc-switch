@@ -144,7 +144,7 @@ pub async fn webdav_sync_download(state: State<'_, AppState>) -> Result<Value, A
                 run_post_import_sync(&app_state_for_sync)
             })
             .await
-            .map_err(|e| e.to_string());
+            .map_err(AppError::from);
             Ok((result, post_sync_result))
         },
     )

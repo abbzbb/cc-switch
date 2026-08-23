@@ -4,6 +4,7 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 
 use crate::database::Profile;
+use crate::error::AppError;
 use crate::services::profile::{ProfilePayload, ProfileScope, ProfileService};
 use crate::store::AppState;
 
@@ -93,21 +94,18 @@ pub fn emit_profile_apply_events(
 }
 
 #[tauri::command]
-pub fn list_profiles(state: State<'_, AppState>) -> Result<ProfilesResponse, String> {
-    let profiles = ProfileService::list(&state).map_err(|e| e.to_string())?;
+pub fn list_profiles(state: State<'_, AppState>) -> Result<ProfilesResponse, AppError> {
+    let profiles = ProfileService::list(&state)?;
     let current_ids = CurrentProfileIds {
         claude: state
             .db
-            .get_current_profile_id(ProfileScope::Claude.as_str())
-            .map_err(|e| e.to_string())?,
+            .get_current_profile_id(ProfileScope::Claude.as_str())?,
         claude_desktop: state
             .db
-            .get_current_profile_id(ProfileScope::ClaudeDesktop.as_str())
-            .map_err(|e| e.to_string())?,
+            .get_current_profile_id(ProfileScope::ClaudeDesktop.as_str())?,
         codex: state
             .db
-            .get_current_profile_id(ProfileScope::Codex.as_str())
-            .map_err(|e| e.to_string())?,
+            .get_current_profile_id(ProfileScope::Codex.as_str())?,
     };
     Ok(ProfilesResponse {
         profiles: profiles.into_iter().map(ProfileDto::from).collect(),
@@ -120,11 +118,9 @@ pub fn create_profile(
     state: State<'_, AppState>,
     name: String,
     scope: String,
-) -> Result<ProfileDto, String> {
-    let scope = ProfileScope::parse(&scope).map_err(|e| e.to_string())?;
-    ProfileService::create(&state, &name, scope)
-        .map(ProfileDto::from)
-        .map_err(|e| e.to_string())
+) -> Result<ProfileDto, AppError> {
+    let scope = ProfileScope::parse(&scope)?;
+    ProfileService::create(&state, &name, scope).map(ProfileDto::from)
 }
 
 #[tauri::command]
@@ -134,28 +130,21 @@ pub fn update_profile(
     name: Option<String>,
     resnapshot: Option<bool>,
     scope: Option<String>,
-) -> Result<ProfileDto, String> {
-    let scope = scope
-        .map(|s| ProfileScope::parse(&s))
-        .transpose()
-        .map_err(|e| e.to_string())?;
+) -> Result<ProfileDto, AppError> {
+    let scope = scope.map(|s| ProfileScope::parse(&s)).transpose()?;
     ProfileService::update(&state, &id, name, resnapshot.unwrap_or(false), scope)
         .map(ProfileDto::from)
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn delete_profile(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    ProfileService::delete(&state, &id).map_err(|e| e.to_string())
+pub fn delete_profile(state: State<'_, AppState>, id: String) -> Result<(), AppError> {
+    ProfileService::delete(&state, &id)
 }
 
 #[tauri::command]
-pub fn clear_current_profile(state: State<'_, AppState>, scope: String) -> Result<(), String> {
-    let scope = ProfileScope::parse(&scope).map_err(|e| e.to_string())?;
-    state
-        .db
-        .set_current_profile_id(scope.as_str(), None)
-        .map_err(|e| e.to_string())
+pub fn clear_current_profile(state: State<'_, AppState>, scope: String) -> Result<(), AppError> {
+    let scope = ProfileScope::parse(&scope)?;
+    state.db.set_current_profile_id(scope.as_str(), None)
 }
 
 /// 应用项目快照（只作用于发起页所属分组内的应用）。
@@ -168,10 +157,9 @@ pub fn apply_profile(
     state: State<'_, AppState>,
     id: String,
     scope: String,
-) -> Result<Vec<String>, String> {
-    let scope = ProfileScope::parse(&scope).map_err(|e| e.to_string())?;
-    let (warnings, should_stop_proxy) =
-        ProfileService::apply(&state, &id, scope).map_err(|e| e.to_string())?;
+) -> Result<Vec<String>, AppError> {
+    let scope = ProfileScope::parse(&scope)?;
+    let (warnings, should_stop_proxy) = ProfileService::apply(&state, &id, scope)?;
 
     if should_stop_proxy {
         // sync 命令线程没有 Tokio runtime，无法直接 await stop()；

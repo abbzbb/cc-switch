@@ -1,4 +1,5 @@
 #![allow(non_snake_case)]
+use crate::error::AppError;
 
 use crate::app_config::AppType;
 use crate::init_status::{InitErrorPayload, SkillsMigrationPayload};
@@ -20,7 +21,7 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// 打开外部链接
 #[tauri::command]
-pub async fn open_external(app: AppHandle, url: String) -> Result<bool, String> {
+pub async fn open_external(app: AppHandle, url: String) -> Result<bool, AppError> {
     let url = if url.starts_with("http://") || url.starts_with("https://") {
         url
     } else {
@@ -29,45 +30,46 @@ pub async fn open_external(app: AppHandle, url: String) -> Result<bool, String> 
 
     app.opener()
         .open_url(&url, None::<String>)
-        .map_err(|e| format!("打开链接失败: {e}"))?;
+        .map_err(|e| AppError::from(format!("打开链接失败: {e}")))?;
 
     Ok(true)
 }
 
 #[tauri::command]
-pub async fn copy_text_to_clipboard(text: String) -> Result<bool, String> {
+pub async fn copy_text_to_clipboard(text: String) -> Result<bool, AppError> {
     // Use spawn_blocking to avoid blocking the async runtime
     // Clipboard access can block on some platforms and may have thread/loop constraints
     tokio::task::spawn_blocking(move || {
-        let mut clipboard =
-            arboard::Clipboard::new().map_err(|e| format!("访问系统剪贴板失败: {e}"))?;
+        let mut clipboard = arboard::Clipboard::new()
+            .map_err(|e| AppError::from(format!("访问系统剪贴板失败: {e}")))?;
         clipboard
             .set_text(text)
-            .map_err(|e| format!("写入系统剪贴板失败: {e}"))?;
+            .map_err(|e| AppError::from(format!("写入系统剪贴板失败: {e}")))?;
         Ok(true)
     })
     .await
-    .map_err(|e| format!("剪贴板任务执行失败: {e}"))?
+    .map_err(|e| AppError::from(format!("剪贴板任务执行失败: {e}")))?
 }
 
 /// 检查更新
 #[tauri::command]
-pub async fn check_for_updates(handle: AppHandle) -> Result<bool, String> {
+pub async fn check_for_updates(handle: AppHandle) -> Result<bool, AppError> {
     handle
         .opener()
         .open_url(
             "https://github.com/farion1231/cc-switch/releases/latest",
             None::<String>,
         )
-        .map_err(|e| format!("打开更新页面失败: {e}"))?;
+        .map_err(|e| AppError::from(format!("打开更新页面失败: {e}")))?;
 
     Ok(true)
 }
 
 /// 判断是否为便携版（绿色版）运行
 #[tauri::command]
-pub async fn is_portable_mode() -> Result<bool, String> {
-    let exe_path = std::env::current_exe().map_err(|e| format!("获取可执行路径失败: {e}"))?;
+pub async fn is_portable_mode() -> Result<bool, AppError> {
+    let exe_path =
+        std::env::current_exe().map_err(|e| AppError::from(format!("获取可执行路径失败: {e}")))?;
     if let Some(dir) = exe_path.parent() {
         Ok(dir.join("portable.ini").is_file())
     } else {
@@ -78,21 +80,21 @@ pub async fn is_portable_mode() -> Result<bool, String> {
 /// 获取应用启动阶段的初始化错误（若有）。
 /// 用于前端在早期主动拉取，避免事件订阅竞态导致的提示缺失。
 #[tauri::command]
-pub async fn get_init_error() -> Result<Option<InitErrorPayload>, String> {
+pub async fn get_init_error() -> Result<Option<InitErrorPayload>, AppError> {
     Ok(crate::init_status::get_init_error())
 }
 
 /// 获取 JSON→SQLite 迁移结果（若有）。
 /// 只返回一次 true，之后返回 false，用于前端显示一次性 Toast 通知。
 #[tauri::command]
-pub async fn get_migration_result() -> Result<bool, String> {
+pub async fn get_migration_result() -> Result<bool, AppError> {
     Ok(crate::init_status::take_migration_success())
 }
 
 /// 获取 Skills 自动导入（SSOT）迁移结果（若有）。
 /// 只返回一次 Some({count})，之后返回 None，用于前端显示一次性 Toast 通知。
 #[tauri::command]
-pub async fn get_skills_migration_result() -> Result<Option<SkillsMigrationPayload>, String> {
+pub async fn get_skills_migration_result() -> Result<Option<SkillsMigrationPayload>, AppError> {
     Ok(crate::init_status::take_skills_migration_result())
 }
 
@@ -153,7 +155,7 @@ fn tool_env_type_and_wsl_distro(_tool: &str) -> (String, Option<String>) {
 pub async fn get_tool_versions(
     tools: Option<Vec<String>>,
     wsl_shell_by_tool: Option<HashMap<String, WslShellPreferenceInput>>,
-) -> Result<Vec<ToolVersion>, String> {
+) -> Result<Vec<ToolVersion>, AppError> {
     let requested: Vec<&str> = if let Some(tools) = tools.as_ref() {
         let set: std::collections::HashSet<&str> = tools.iter().map(|s| s.as_str()).collect();
         VALID_TOOLS
@@ -182,11 +184,11 @@ pub async fn run_tool_lifecycle_action(
     tools: Vec<String>,
     action: String,
     wsl_shell_by_tool: Option<HashMap<String, WslShellPreferenceInput>>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let action = ToolLifecycleAction::from_str(&action)?;
     let requested = normalize_requested_tools(&tools);
     if requested.is_empty() {
-        return Err("No supported tools selected".to_string());
+        return Err(AppError::from("No supported tools selected".to_string()));
     }
 
     let label = match action {
@@ -202,7 +204,7 @@ pub async fn run_tool_lifecycle_action(
         run_tool_lifecycle_silently(&command_line, label)
     })
     .await
-    .map_err(|e| format!("tool lifecycle task join error: {e}"))?
+    .map_err(|e| AppError::from(format!("tool lifecycle task join error: {e}")))?
 }
 
 /// 静默执行工具安装/更新脚本：直接捕获子进程输出并阻塞到命令真正结束，
@@ -210,7 +212,7 @@ pub async fn run_tool_lifecycle_action(
 /// 后者仍保留给 provider 切换等需要交互式终端的场景）。
 /// 失败时回传 stderr/stdout 末尾若干行，供前端 toast 提示。
 #[cfg(not(target_os = "windows"))]
-fn run_tool_lifecycle_silently(command_line: &str, _label: &str) -> Result<(), String> {
+fn run_tool_lifecycle_silently(command_line: &str, _label: &str) -> Result<(), AppError> {
     use std::process::Command;
     // command_line 是 bash 风格脚本（含 `set -e` 与多行命令）；强制用 bash 执行，
     // 避免用户默认 shell 为 fish/zsh 时 `set -e` 等语义不一致。
@@ -223,20 +225,23 @@ fn run_tool_lifecycle_silently(command_line: &str, _label: &str) -> Result<(), S
         let inherited = std::env::var("PATH").unwrap_or_default();
         cmd.env("PATH", merge_path_segments(&login_path, &inherited));
     }
-    let output = cmd.output().map_err(|e| format!("启动安装进程失败: {e}"))?;
+    let output = cmd
+        .output()
+        .map_err(|e| AppError::from(format!("启动安装进程失败: {e}")))?;
     finish_lifecycle_output(&output)
 }
 
 /// Windows 静默执行：command_line 是 .bat 内容（@echo off + call/wsl 行，CRLF 分隔），
 /// 写临时 .bat 后用 `cmd /C` 执行，`CREATE_NO_WINDOW` 抑制 console 窗口。
 #[cfg(target_os = "windows")]
-fn run_tool_lifecycle_silently(command_line: &str, label: &str) -> Result<(), String> {
+fn run_tool_lifecycle_silently(command_line: &str, label: &str) -> Result<(), AppError> {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
     let bat_file =
         std::env::temp_dir().join(format!("cc_switch_{}_{}.bat", label, std::process::id()));
-    std::fs::write(&bat_file, command_line).map_err(|e| format!("写入批处理文件失败: {e}"))?;
+    std::fs::write(&bat_file, command_line)
+        .map_err(|e| AppError::from(format!("写入批处理文件失败: {e}")))?;
 
     let output = Command::new("cmd")
         .arg("/C")
@@ -245,12 +250,12 @@ fn run_tool_lifecycle_silently(command_line: &str, label: &str) -> Result<(), St
         .output();
     let _ = std::fs::remove_file(&bat_file);
 
-    finish_lifecycle_output(&output.map_err(|e| format!("启动安装进程失败: {e}"))?)
+    finish_lifecycle_output(&output.map_err(|e| AppError::from(format!("启动安装进程失败: {e}")))?)
 }
 
 /// 把子进程退出结果转成 `Result`：成功返回 `Ok`；失败提取 stderr（空则回退 stdout）
 /// 的末尾若干行作为错误详情，避免把整段安装日志塞进 toast。
-fn finish_lifecycle_output(output: &std::process::Output) -> Result<(), String> {
+fn finish_lifecycle_output(output: &std::process::Output) -> Result<(), AppError> {
     if output.status.success() {
         return Ok(());
     }
@@ -263,9 +268,12 @@ fn finish_lifecycle_output(output: &std::process::Output) -> Result<(), String> 
     };
     let detail = last_lines(raw, 8);
     Err(if detail.is_empty() {
-        format!("命令执行失败 (exit code: {:?})", output.status.code())
+        AppError::from(format!(
+            "命令执行失败 (exit code: {:?})",
+            output.status.code()
+        ))
     } else {
-        detail
+        AppError::from(detail)
     })
 }
 
@@ -382,7 +390,7 @@ fn build_tool_lifecycle_command(
     tools: &[&str],
     action: ToolLifecycleAction,
     wsl_shell_by_tool: Option<&HashMap<String, WslShellPreferenceInput>>,
-) -> Result<String, String> {
+) -> Result<String, AppError> {
     let mut lines = Vec::new();
 
     #[cfg(not(target_os = "windows"))]
@@ -635,7 +643,7 @@ fn build_tool_action_line(
     action: ToolLifecycleAction,
     wsl_shell: Option<&str>,
     wsl_shell_flag: Option<&str>,
-) -> Result<String, String> {
+) -> Result<String, AppError> {
     #[cfg(target_os = "windows")]
     {
         // ① WSL 工具(override 是 UNC `\\wsl$\<distro>\...`):锚定的绝对路径是 Windows
@@ -647,7 +655,7 @@ fn build_tool_action_line(
         //    语义也不适合跨 wsl.exe;这里统一替换为 POSIX 版安装/更新命令。
         if let Some(distro) = wsl_distro_for_tool(tool) {
             let command = wsl_tool_action_shell_command(tool, action)
-                .ok_or_else(|| format!("Unsupported tool action target: {tool}"))?;
+                .ok_or_else(|| AppError::from(format!("Unsupported tool action target: {tool}")))?;
             return build_wsl_tool_action_line(&distro, &command, wsl_shell, wsl_shell_flag);
         }
         // ② Windows 原生 update 锚定;install 走静态(install.sh 是 bash 脚本,Windows
@@ -666,7 +674,9 @@ fn build_tool_action_line(
             }
         };
         if command.is_empty() {
-            return Err(format!("Unsupported tool action target: {tool}"));
+            return Err(AppError::from(format!(
+                "Unsupported tool action target: {tool}"
+            )));
         }
         // .bat 调用 .cmd/.bat 必须用 `call` 否则当前脚本被替换、后续 `if errorlevel`
         // 行被跳过;对 .exe 加 call 无害(等同直接调用)。锚定命令头部可能是 .cmd
@@ -691,7 +701,9 @@ fn build_tool_action_line(
             ToolLifecycleAction::Install => install_command_for(tool),
         };
         if command.is_empty() {
-            return Err(format!("Unsupported tool action target: {tool}"));
+            return Err(AppError::from(format!(
+                "Unsupported tool action target: {tool}"
+            )));
         }
         Ok(command)
     }
@@ -703,21 +715,21 @@ fn build_wsl_tool_action_line(
     command: &str,
     force_shell: Option<&str>,
     force_shell_flag: Option<&str>,
-) -> Result<String, String> {
+) -> Result<String, AppError> {
     if !is_valid_wsl_distro_name(distro) {
-        return Err(format!("Invalid WSL distro name: {distro}"));
+        return Err(AppError::from(format!("Invalid WSL distro name: {distro}")));
     }
 
     let shell = force_shell
         .map(|s| s.rsplit('/').next().unwrap_or(s))
         .unwrap_or("sh");
     if !is_valid_shell(shell) {
-        return Err(format!("Invalid WSL shell: {shell}"));
+        return Err(AppError::from(format!("Invalid WSL shell: {shell}")));
     }
 
     let flag = if let Some(flag) = force_shell_flag {
         if !is_valid_shell_flag(flag) {
-            return Err(format!("Invalid WSL shell flag: {flag}"));
+            return Err(AppError::from(format!("Invalid WSL shell flag: {flag}")));
         }
         flag
     } else {
@@ -2207,7 +2219,7 @@ fn login_shell_path() -> Option<String> {
 fn resolve_path_default(
     tool: &str,
     deadline: Option<CommandDeadline>,
-) -> Result<Option<std::path::PathBuf>, String> {
+) -> Result<Option<std::path::PathBuf>, AppError> {
     use std::process::{Command, Stdio};
 
     let shell = std::env::var("SHELL")
@@ -2226,7 +2238,7 @@ fn resolve_path_default(
     isolate_child_process_group(&mut cmd);
     let child = cmd
         .spawn()
-        .map_err(|e| format!("Failed to locate {tool}: {e}"))?;
+        .map_err(|e| AppError::from(format!("Failed to locate {tool}: {e}")))?;
     let out = wait_child_output(child, deadline)?;
     if !out.status.success() {
         return Ok(None);
@@ -2272,7 +2284,7 @@ fn windows_path_lookup_command(
 fn resolve_path_default(
     tool: &str,
     deadline: Option<CommandDeadline>,
-) -> Result<Option<std::path::PathBuf>, String> {
+) -> Result<Option<std::path::PathBuf>, AppError> {
     // Restrict `where` to the merged effective PATH. A bare `where {tool}` also
     // searches the current directory first, which would let a project-local
     // `codex.cmd` be executed by a passive version check. The `$PATH:pattern`
@@ -2281,7 +2293,7 @@ fn resolve_path_default(
     let current_path = effective_path_os().unwrap_or_default();
     let child = windows_path_lookup_command(tool, &current_path)
         .spawn()
-        .map_err(|e| format!("Failed to locate {tool}: {e}"))?;
+        .map_err(|e| AppError::from(format!("Failed to locate {tool}: {e}")))?;
     let out = wait_child_output(child, deadline)?;
     if !out.status.success() {
         return Ok(None);
@@ -2320,7 +2332,7 @@ const INSTALL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 fn run_probe_version_command(
     tool_path: &Path,
     new_path: &std::ffi::OsStr,
-) -> Result<std::process::Output, String> {
+) -> Result<std::process::Output, AppError> {
     use std::process::{Command, Stdio};
 
     let mut cmd = Command::new(tool_path);
@@ -2330,7 +2342,7 @@ fn run_probe_version_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     isolate_child_process_group(&mut cmd);
-    let child = cmd.spawn().map_err(|e| e.to_string())?;
+    let child = cmd.spawn()?;
     wait_child_output(
         child,
         CommandDeadline::from_timeout(Some(INSTALL_PROBE_TIMEOUT)),
@@ -2345,14 +2357,14 @@ fn run_probe_version_command(
 fn run_probe_version_command(
     tool_path: &Path,
     new_path: &str,
-) -> Result<std::process::Output, String> {
+) -> Result<std::process::Output, AppError> {
     use std::process::Stdio;
 
     let mut cmd = build_windows_tool_command(tool_path, &["--version"], new_path);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let child = cmd.spawn().map_err(|e| e.to_string())?;
+    let child = cmd.spawn()?;
     wait_child_output(
         child,
         CommandDeadline::from_timeout(Some(INSTALL_PROBE_TIMEOUT)),
@@ -2419,7 +2431,7 @@ fn enumerate_tool_installations(tool: &str) -> Vec<ToolInstallation> {
                     };
                     (None, false, error)
                 }
-                Err(e) => (None, false, Some(e)),
+                Err(e) => (None, false, Some(e.to_string())),
             };
 
             let is_path_default = path_default.as_ref() == Some(&real);
@@ -2990,7 +3002,7 @@ fn default_install(installs: &[ToolInstallation]) -> Option<&ToolInstallation> {
 fn locate_default_tool(
     tool: &str,
     deadline: Option<CommandDeadline>,
-) -> Result<std::path::PathBuf, String> {
+) -> Result<std::path::PathBuf, AppError> {
     let path_default = resolve_path_default(tool, deadline)?;
 
     let mut seen = std::collections::HashSet::new();
@@ -3016,10 +3028,10 @@ fn locate_default_tool(
 
     match candidates.as_slice() {
         [only] => Ok(only.clone()),
-        [] => Err(format!("{tool} is not installed")),
-        _ => Err(format!(
+        [] => Err(AppError::from(format!("{tool} is not installed"))),
+        _ => Err(AppError::from(format!(
             "{tool} is installed but its default installation is ambiguous"
-        )),
+        ))),
     }
 }
 
@@ -3037,11 +3049,11 @@ impl CommandDeadline {
         })
     }
 
-    fn remaining(self) -> Result<std::time::Duration, String> {
+    fn remaining(self) -> Result<std::time::Duration, AppError> {
         self.expires_at
             .checked_duration_since(std::time::Instant::now())
             .filter(|remaining| !remaining.is_zero())
-            .ok_or_else(|| self.timeout_error())
+            .ok_or_else(|| AppError::from(self.timeout_error()))
     }
 
     fn timeout_error(self) -> String {
@@ -3094,7 +3106,7 @@ fn isolate_child_process_group(cmd: &mut std::process::Command) {
 fn wait_child_output(
     mut child: std::process::Child,
     deadline: Option<CommandDeadline>,
-) -> Result<std::process::Output, String> {
+) -> Result<std::process::Output, AppError> {
     use std::io::Read;
 
     let stdout_pipe = child.stdout.take();
@@ -3118,7 +3130,7 @@ fn wait_child_output(
     let status = match deadline {
         None => child
             .wait()
-            .map_err(|e| format!("Failed to wait for command: {e}"))?,
+            .map_err(|e| AppError::from(format!("Failed to wait for command: {e}")))?,
         Some(deadline) => {
             loop {
                 match child.try_wait() {
@@ -3146,7 +3158,7 @@ fn wait_child_output(
                         if terminate_child_tree(&mut child) {
                             let _ = child.wait();
                         }
-                        return Err(format!("Failed to wait for command: {e}"));
+                        return Err(AppError::from(format!("Failed to wait for command: {e}")));
                     }
                 }
             }
@@ -3203,9 +3215,9 @@ pub(crate) fn run_detected_tool_command_with_timeout(
     timeout: Option<std::time::Duration>,
     extra_env: &[(&str, String)],
     working_dir: &Path,
-) -> Result<std::process::Output, String> {
+) -> Result<std::process::Output, AppError> {
     if !VALID_TOOLS.contains(&tool) {
-        return Err(format!("Unsupported tool: {tool}"));
+        return Err(AppError::from(format!("Unsupported tool: {tool}")));
     }
     if args.iter().any(|arg| {
         arg.is_empty()
@@ -3213,7 +3225,7 @@ pub(crate) fn run_detected_tool_command_with_timeout(
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
     }) {
-        return Err("Invalid tool command arguments".to_string());
+        return Err(AppError::from("Invalid tool command arguments".to_string()));
     }
 
     let deadline = CommandDeadline::from_timeout(timeout);
@@ -3228,7 +3240,7 @@ pub(crate) fn run_detected_tool_command_with_timeout(
     let tool_path = locate_default_tool(tool, deadline)?;
     let dir = tool_path
         .parent()
-        .ok_or_else(|| format!("Invalid {tool} executable path"))?;
+        .ok_or_else(|| AppError::from(format!("Invalid {tool} executable path")))?;
     let current_path = std::env::var_os("PATH")
         .map(|value| value.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -3259,7 +3271,7 @@ pub(crate) fn run_detected_tool_command_with_timeout(
         isolate_child_process_group(&mut cmd);
         let child = cmd
             .spawn()
-            .map_err(|e| format!("Failed to run {tool}: {e}"))?;
+            .map_err(|e| AppError::from(format!("Failed to run {tool}: {e}")))?;
         wait_child_output(child, deadline)
     }
 }
@@ -3272,7 +3284,7 @@ fn run_windows_tool_command_capture(
     deadline: Option<CommandDeadline>,
     extra_env: &[(&str, String)],
     working_dir: &Path,
-) -> Result<std::process::Output, String> {
+) -> Result<std::process::Output, AppError> {
     use std::process::{Command, Stdio};
 
     let mut cmd = if is_windows_command_script(tool_path) {
@@ -3311,7 +3323,7 @@ fn run_windows_tool_command_capture(
         .stderr(Stdio::piped());
     let child = cmd
         .spawn()
-        .map_err(|e| format!("Failed to run tool: {e}"))?;
+        .map_err(|e| AppError::from(format!("Failed to run tool: {e}")))?;
     wait_child_output(child, deadline)
 }
 
@@ -3355,14 +3367,14 @@ fn wsl_unc_path_to_linux(path: &Path) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn build_wsl_env_argv(extra_env: &[(&str, String)]) -> Result<Vec<String>, String> {
+fn build_wsl_env_argv(extra_env: &[(&str, String)]) -> Result<Vec<String>, AppError> {
     let mut env_argv = Vec::new();
     for (key, value) in extra_env {
         if key.is_empty()
             || key.contains('=')
             || key.chars().any(|c| c.is_whitespace() || c.is_control())
         {
-            return Err(format!("invalid env for {key}"));
+            return Err(AppError::from(format!("invalid env for {key}")));
         }
 
         let linux_value = if *key == "OPENCODE_CONFIG_DIR" {
@@ -3374,7 +3386,7 @@ fn build_wsl_env_argv(extra_env: &[(&str, String)]) -> Result<Vec<String>, Strin
             value.clone()
         };
         if linux_value.chars().any(char::is_control) {
-            return Err(format!("invalid env for {key}"));
+            return Err(AppError::from(format!("invalid env for {key}")));
         }
         env_argv.push(format!("{key}={linux_value}"));
     }
@@ -3386,7 +3398,7 @@ fn build_wsl_tool_command(
     tool: &str,
     args: &[&str],
     deadline: Option<CommandDeadline>,
-) -> Result<String, String> {
+) -> Result<String, AppError> {
     let invocation = std::iter::once(tool)
         .chain(args.iter().copied())
         .collect::<Vec<_>>()
@@ -3414,17 +3426,20 @@ fn run_wsl_tool_command(
     deadline: Option<CommandDeadline>,
     extra_env: &[(&str, String)],
     working_dir: &Path,
-) -> Result<std::process::Output, String> {
+) -> Result<std::process::Output, AppError> {
     use std::process::{Command, Stdio};
 
     if !is_valid_wsl_distro_name(distro) {
-        return Err(format!("[WSL:{distro}] invalid distro name"));
+        return Err(AppError::from(format!(
+            "[WSL:{distro}] invalid distro name"
+        )));
     }
 
     let command = build_wsl_tool_command(tool, args, deadline)?;
     let linux_working_dir = wsl_unc_path_to_linux(working_dir)
-        .ok_or_else(|| format!("[WSL:{distro}] invalid working directory"))?;
-    let env_argv = build_wsl_env_argv(extra_env).map_err(|e| format!("[WSL:{distro}] {e}"))?;
+        .ok_or_else(|| AppError::from(format!("[WSL:{distro}] invalid working directory")))?;
+    let env_argv =
+        build_wsl_env_argv(extra_env).map_err(|e| AppError::from(format!("[WSL:{distro}] {e}")))?;
 
     let mut cmd = Command::new("wsl.exe");
     cmd.arg("-d")
@@ -3444,7 +3459,7 @@ fn run_wsl_tool_command(
         .stderr(Stdio::piped());
     let child = cmd
         .spawn()
-        .map_err(|e| format!("[WSL:{distro}] failed to run {tool}: {e}"))?;
+        .map_err(|e| AppError::from(format!("[WSL:{distro}] failed to run {tool}: {e}")))?;
     let output = wait_child_output(child, deadline).map_err(|e| {
         if e.starts_with("Command timed out") {
             format!("[WSL:{distro}] {e}")
@@ -3453,12 +3468,12 @@ fn run_wsl_tool_command(
         }
     })?;
     if output.status.code() == Some(124) {
-        return Err(format!(
+        return Err(AppError::from(format!(
             "[WSL:{distro}] {}",
             deadline
                 .map(CommandDeadline::timeout_error)
                 .unwrap_or_else(|| "Command timed out".to_string())
-        ));
+        )));
     }
     Ok(output)
 }
@@ -3613,10 +3628,10 @@ pub struct ToolInstallationReport {
 #[tauri::command]
 pub async fn probe_tool_installations(
     tools: Vec<String>,
-) -> Result<Vec<ToolInstallationReport>, String> {
+) -> Result<Vec<ToolInstallationReport>, AppError> {
     let requested = normalize_requested_tools(&tools);
     if requested.is_empty() {
-        return Err("No supported tools selected".to_string());
+        return Err(AppError::from("No supported tools selected".to_string()));
     }
     tokio::task::spawn_blocking(move || {
         requested
@@ -3637,7 +3652,7 @@ pub async fn probe_tool_installations(
             .collect()
     })
     .await
-    .map_err(|e| format!("probe task join error: {e}"))
+    .map_err(|e| AppError::from(format!("probe task join error: {e}")))
 }
 
 #[cfg(target_os = "windows")]
@@ -3693,17 +3708,17 @@ pub async fn open_provider_terminal(
     app: String,
     #[allow(non_snake_case)] providerId: String,
     cwd: Option<String>,
-) -> Result<bool, String> {
-    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+) -> Result<bool, AppError> {
+    let app_type = AppType::from_str(&app)?;
     let launch_cwd = resolve_launch_cwd(cwd)?;
 
     // 获取提供商配置
     let providers = ProviderService::list(state.inner(), app_type.clone())
-        .map_err(|e| format!("获取提供商列表失败: {e}"))?;
+        .map_err(|e| AppError::from(format!("获取提供商列表失败: {e}")))?;
 
     let provider = providers
         .get(&providerId)
-        .ok_or_else(|| format!("提供商 {providerId} 不存在"))?;
+        .ok_or_else(|| AppError::from(format!("提供商 {providerId} 不存在")))?;
 
     // 从提供商配置中提取环境变量
     let config = &provider.settings_config;
@@ -3711,7 +3726,7 @@ pub async fn open_provider_terminal(
 
     // 根据平台启动终端，传入提供商ID用于生成唯一的配置文件名
     launch_terminal_with_env(env_vars, &providerId, launch_cwd.as_deref())
-        .map_err(|e| format!("启动终端失败: {e}"))?;
+        .map_err(|e| AppError::from(format!("启动终端失败: {e}")))?;
 
     Ok(true)
 }
@@ -3766,23 +3781,27 @@ fn extract_env_vars_from_config(
     env_vars
 }
 
-fn resolve_launch_cwd(cwd: Option<String>) -> Result<Option<PathBuf>, String> {
+fn resolve_launch_cwd(cwd: Option<String>) -> Result<Option<PathBuf>, AppError> {
     let Some(raw_path) = cwd.filter(|value| !value.trim().is_empty()) else {
         return Ok(None);
     };
 
     if raw_path.contains('\n') || raw_path.contains('\r') {
-        return Err("目录路径包含非法换行符".to_string());
+        return Err(AppError::from("目录路径包含非法换行符".to_string()));
     }
 
     let path = Path::new(&raw_path);
     if !path.exists() {
-        return Err(format!("目录不存在: {raw_path}"));
+        return Err(AppError::from(format!("目录不存在: {raw_path}")));
     }
 
-    let resolved = std::fs::canonicalize(path).map_err(|e| format!("解析目录失败: {e}"))?;
+    let resolved =
+        std::fs::canonicalize(path).map_err(|e| AppError::from(format!("解析目录失败: {e}")))?;
     if !resolved.is_dir() {
-        return Err(format!("选择的路径不是文件夹: {}", resolved.display()));
+        return Err(AppError::from(format!(
+            "选择的路径不是文件夹: {}",
+            resolved.display()
+        )));
     }
 
     #[cfg(target_os = "windows")]
@@ -3797,7 +3816,7 @@ fn launch_terminal_with_env(
     env_vars: Vec<(String, String)>,
     provider_id: &str,
     cwd: Option<&Path>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let temp_dir = std::env::temp_dir();
     let config_file = temp_dir.join(format!(
         "claude_{}_{}.json",
@@ -3827,14 +3846,14 @@ fn launch_terminal_with_env(
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    Err("不支持的操作系统".to_string())
+    Err(AppError::from("不支持的操作系统".to_string()))
 }
 
 /// 写入 claude 配置文件
 fn write_claude_config(
     config_file: &std::path::Path,
     env_vars: &[(String, String)],
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let mut config_obj = serde_json::Map::new();
     let mut env_obj = serde_json::Map::new();
 
@@ -3844,15 +3863,19 @@ fn write_claude_config(
 
     config_obj.insert("env".to_string(), serde_json::Value::Object(env_obj));
 
-    let config_json =
-        serde_json::to_string_pretty(&config_obj).map_err(|e| format!("序列化配置失败: {e}"))?;
+    let config_json = serde_json::to_string_pretty(&config_obj)
+        .map_err(|e| AppError::from(format!("序列化配置失败: {e}")))?;
 
-    std::fs::write(config_file, config_json).map_err(|e| format!("写入配置文件失败: {e}"))
+    std::fs::write(config_file, config_json)
+        .map_err(|e| AppError::from(format!("写入配置文件失败: {e}")))
 }
 
 /// macOS: 根据用户首选终端启动
 #[cfg(target_os = "macos")]
-fn launch_macos_terminal(config_file: &std::path::Path, cwd: Option<&Path>) -> Result<(), String> {
+fn launch_macos_terminal(
+    config_file: &std::path::Path,
+    cwd: Option<&Path>,
+) -> Result<(), AppError> {
     use std::os::unix::fs::PermissionsExt;
 
     let preferred = crate::settings::get_preferred_terminal();
@@ -3885,11 +3908,12 @@ echo "{config_path}"
         exec_line = exec_line,
     );
 
-    std::fs::write(&script_file, &script_content).map_err(|e| format!("写入启动脚本失败: {e}"))?;
+    std::fs::write(&script_file, &script_content)
+        .map_err(|e| AppError::from(format!("写入启动脚本失败: {e}")))?;
 
     // Make script executable
     std::fs::set_permissions(&script_file, std::fs::Permissions::from_mode(0o755))
-        .map_err(|e| format!("设置脚本权限失败: {e}"))?;
+        .map_err(|e| AppError::from(format!("设置脚本权限失败: {e}")))?;
 
     // Try the preferred terminal first, fall back to Terminal.app if it fails
     // Note: Kitty doesn't need the -e flag, others do
@@ -3965,22 +3989,22 @@ end tell"#,
 
 /// Run AppleScript through `osascript -e` with shared error handling.
 #[cfg(target_os = "macos")]
-fn run_terminal_osascript(applescript: &str, terminal_label: &str) -> Result<(), String> {
+fn run_terminal_osascript(applescript: &str, terminal_label: &str) -> Result<(), AppError> {
     use std::process::Command;
 
     let output = Command::new("osascript")
         .arg("-e")
         .arg(applescript)
         .output()
-        .map_err(|e| format!("执行 osascript 失败: {e}"))?;
+        .map_err(|e| AppError::from(format!("执行 osascript 失败: {e}")))?;
 
     if !output.status.success() {
         let stderr = decode_command_output(&output.stderr);
-        return Err(format!(
+        return Err(AppError::from(format!(
             "{terminal_label} 执行失败 (exit code: {:?}): {}",
             output.status.code(),
             stderr
-        ));
+        )));
     }
 
     Ok(())
@@ -3988,7 +4012,7 @@ fn run_terminal_osascript(applescript: &str, terminal_label: &str) -> Result<(),
 
 /// macOS: Terminal.app
 #[cfg(target_os = "macos")]
-fn launch_macos_terminal_app(script_file: &std::path::Path) -> Result<(), String> {
+fn launch_macos_terminal_app(script_file: &std::path::Path) -> Result<(), AppError> {
     run_terminal_osascript(
         &build_macos_terminal_applescript(script_file),
         "Terminal.app",
@@ -4033,7 +4057,7 @@ end tell"#,
 
 /// macOS: iTerm2
 #[cfg(target_os = "macos")]
-fn launch_macos_iterm2(script_file: &std::path::Path) -> Result<(), String> {
+fn launch_macos_iterm2(script_file: &std::path::Path) -> Result<(), AppError> {
     run_terminal_osascript(&build_macos_iterm2_applescript(script_file), "iTerm2")
 }
 
@@ -4070,7 +4094,7 @@ end if
 
 /// macOS: Ghostty
 #[cfg(target_os = "macos")]
-fn launch_macos_ghostty(script_file: &std::path::Path) -> Result<(), String> {
+fn launch_macos_ghostty(script_file: &std::path::Path) -> Result<(), AppError> {
     match run_terminal_osascript(&build_macos_ghostty_applescript(script_file), "Ghostty") {
         Ok(()) => Ok(()),
         Err(applescript_error) => {
@@ -4088,7 +4112,7 @@ fn launch_macos_open_app(
     app_name: &str,
     script_file: &std::path::Path,
     use_e_flag: bool,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     use std::process::Command;
 
     let mut cmd = Command::new("open");
@@ -4104,23 +4128,23 @@ fn launch_macos_open_app(
 
     let output = cmd
         .output()
-        .map_err(|e| format!("启动 {app_name} 失败: {e}"))?;
+        .map_err(|e| AppError::from(format!("启动 {app_name} 失败: {e}")))?;
 
     if !output.status.success() {
         let stderr = decode_command_output(&output.stderr);
-        return Err(format!(
+        return Err(AppError::from(format!(
             "{} 启动失败 (exit code: {:?}): {}",
             app_name,
             output.status.code(),
             stderr
-        ));
+        )));
     }
 
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
-fn launch_macos_warp(script_file: &std::path::Path) -> Result<(), String> {
+fn launch_macos_warp(script_file: &std::path::Path) -> Result<(), AppError> {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
@@ -4136,7 +4160,7 @@ fn launch_macos_warp(script_file: &std::path::Path) -> Result<(), String> {
         .disable_cleanup(true)
         .permissions(std::fs::Permissions::from_mode(0o755))
         .tempfile()
-        .map_err(|e| format!("Failed to create temporary script file: {e}"))?;
+        .map_err(|e| AppError::from(format!("Failed to create temporary script file: {e}")))?;
 
     writeln!(
         &mut second_script_file,
@@ -4148,7 +4172,11 @@ fn launch_macos_warp(script_file: &std::path::Path) -> Result<(), String> {
         "#,
         quoted_script = shell_single_quote(&script_file.to_string_lossy()),
     )
-    .map_err(|e| format!("Failed to write to temporary script file for Warp: {e}"))?;
+    .map_err(|e| {
+        AppError::from(format!(
+            "Failed to write to temporary script file for Warp: {e}"
+        ))
+    })?;
 
     let mut warp_url = url::Url::parse("warp://action/new_tab").unwrap();
     warp_url
@@ -4157,14 +4185,16 @@ fn launch_macos_warp(script_file: &std::path::Path) -> Result<(), String> {
     let warp_url = warp_url.to_string();
     cmd.arg(warp_url);
 
-    let output = cmd.output().map_err(|e| format!("启动 Warp 失败: {e}"))?;
+    let output = cmd
+        .output()
+        .map_err(|e| AppError::from(format!("启动 Warp 失败: {e}")))?;
     if !output.status.success() {
         let stderr = decode_command_output(&output.stderr);
-        return Err(format!(
+        return Err(AppError::from(format!(
             "Warp 启动失败 (exit code: {:?}): {}",
             output.status.code(),
             stderr
-        ));
+        )));
     }
 
     Ok(())
@@ -4172,7 +4202,10 @@ fn launch_macos_warp(script_file: &std::path::Path) -> Result<(), String> {
 
 /// Linux: 根据用户首选终端启动
 #[cfg(target_os = "linux")]
-fn launch_linux_terminal(config_file: &std::path::Path, cwd: Option<&Path>) -> Result<(), String> {
+fn launch_linux_terminal(
+    config_file: &std::path::Path,
+    cwd: Option<&Path>,
+) -> Result<(), AppError> {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
@@ -4216,10 +4249,11 @@ echo "{config_path}"
         exec_line = exec_line,
     );
 
-    std::fs::write(&script_file, &script_content).map_err(|e| format!("写入启动脚本失败: {e}"))?;
+    std::fs::write(&script_file, &script_content)
+        .map_err(|e| AppError::from(format!("写入启动脚本失败: {e}")))?;
 
     std::fs::set_permissions(&script_file, std::fs::Permissions::from_mode(0o755))
-        .map_err(|e| format!("设置脚本权限失败: {e}"))?;
+        .map_err(|e| AppError::from(format!("设置脚本权限失败: {e}")))?;
 
     // Build terminal list: preferred terminal first (if specified), then defaults
     let terminals_to_try: Vec<(&str, Vec<&str>)> = if let Some(ref pref) = preferred {
@@ -4273,7 +4307,7 @@ echo "{config_path}"
     // Clean up on failure
     let _ = std::fs::remove_file(&script_file);
     let _ = std::fs::remove_file(config_file);
-    Err(last_error)
+    Err(AppError::from(last_error))
 }
 
 /// Check if a command exists using `which`
@@ -4293,7 +4327,7 @@ fn launch_windows_terminal(
     temp_dir: &std::path::Path,
     config_file: &std::path::Path,
     cwd: Option<&Path>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let preferred = crate::settings::get_preferred_terminal();
     let terminal = preferred.as_deref().unwrap_or("cmd");
 
@@ -4316,7 +4350,8 @@ del \"%~f0\" >nul 2>&1
         cwd_command = cwd_command,
     );
 
-    std::fs::write(&bat_file, &content).map_err(|e| format!("写入批处理文件失败: {e}"))?;
+    std::fs::write(&bat_file, &content)
+        .map_err(|e| AppError::from(format!("写入批处理文件失败: {e}")))?;
 
     let bat_path = bat_file.to_string_lossy();
     let ps_cmd = format!("& '{}'", bat_path);
@@ -4386,7 +4421,7 @@ fn escape_windows_batch_value(value: &str) -> String {
 }
 /// Windows: Run a start command with common error handling
 #[cfg(target_os = "windows")]
-fn run_windows_start_command(args: &[&str], terminal_name: &str) -> Result<(), String> {
+fn run_windows_start_command(args: &[&str], terminal_name: &str) -> Result<(), AppError> {
     use std::process::Command;
 
     let mut full_args = vec!["/C", "start"];
@@ -4396,16 +4431,16 @@ fn run_windows_start_command(args: &[&str], terminal_name: &str) -> Result<(), S
         .args(&full_args)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
-        .map_err(|e| format!("启动 {} 失败: {e}", terminal_name))?;
+        .map_err(|e| AppError::from(format!("启动 {} 失败: {e}", terminal_name)))?;
 
     if !output.status.success() {
         let stderr = decode_command_output(&output.stderr);
-        return Err(format!(
+        return Err(AppError::from(format!(
             "{} 启动失败 (exit code: {:?}): {}",
             terminal_name,
             output.status.code(),
             stderr
-        ));
+        )));
     }
 
     Ok(())
@@ -4417,7 +4452,7 @@ fn run_windows_start_command(args: &[&str], terminal_name: &str) -> Result<(), S
 ///
 /// **Security**：`command_line` 会被原样拼进 shell/batch 脚本，调用方必须
 /// 保证它是可信字符串（当前只由后端硬编码调用）。
-pub(crate) fn launch_terminal_running(command_line: &str, label: &str) -> Result<(), String> {
+pub(crate) fn launch_terminal_running(command_line: &str, label: &str) -> Result<(), AppError> {
     let temp_dir = std::env::temp_dir();
     let pid = std::process::id();
 
@@ -4446,9 +4481,9 @@ read -r _
         use std::os::unix::fs::PermissionsExt;
 
         std::fs::write(&script_file, &script_content)
-            .map_err(|e| format!("写入启动脚本失败: {e}"))?;
+            .map_err(|e| AppError::from(format!("写入启动脚本失败: {e}")))?;
         std::fs::set_permissions(&script_file, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("设置脚本权限失败: {e}"))?;
+            .map_err(|e| AppError::from(format!("设置脚本权限失败: {e}")))?;
 
         let preferred = crate::settings::get_preferred_terminal();
         let terminal = preferred.as_deref().unwrap_or("terminal");
@@ -4481,9 +4516,9 @@ read -r _
         use std::process::Command;
 
         std::fs::write(&script_file, &script_content)
-            .map_err(|e| format!("写入启动脚本失败: {e}"))?;
+            .map_err(|e| AppError::from(format!("写入启动脚本失败: {e}")))?;
         std::fs::set_permissions(&script_file, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("设置脚本权限失败: {e}"))?;
+            .map_err(|e| AppError::from(format!("设置脚本权限失败: {e}")))?;
 
         let preferred = crate::settings::get_preferred_terminal();
         let default_terminals = [
@@ -4541,7 +4576,7 @@ read -r _
         }
 
         let _ = std::fs::remove_file(&script_file);
-        Err(last_error)
+        Err(AppError::from(last_error))
     }
 
     #[cfg(target_os = "windows")]
@@ -4555,7 +4590,8 @@ read -r _
             label = label,
             cmd = command_line,
         );
-        std::fs::write(&bat_file, &content).map_err(|e| format!("写入批处理文件失败: {e}"))?;
+        std::fs::write(&bat_file, &content)
+            .map_err(|e| AppError::from(format!("写入批处理文件失败: {e}")))?;
 
         let bat_path = bat_file.to_string_lossy();
         let ps_cmd = format!("& '{}'", bat_path);
@@ -4592,14 +4628,14 @@ read -r _
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = (temp_dir, pid, command_line, label);
-        Err("不支持的操作系统".to_string())
+        Err(AppError::from("不支持的操作系统".to_string()))
     }
 }
 
 /// 设置窗口主题（Windows/macOS 标题栏颜色）
 /// theme: "dark" | "light" | "system"
 #[tauri::command]
-pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<(), String> {
+pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<(), AppError> {
     use tauri::Theme;
 
     let tauri_theme = match theme.as_str() {
@@ -4608,7 +4644,7 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
         _ => None, // system default
     };
 
-    window.set_theme(tauri_theme).map_err(|e| e.to_string())
+    window.set_theme(tauri_theme).map_err(AppError::from)
 }
 
 #[cfg(test)]
@@ -6760,7 +6796,7 @@ mod tests {
         let error = resolve_launch_cwd(Some(missing.to_string_lossy().into_owned()))
             .expect_err("missing directory should fail");
 
-        assert!(error.contains("目录不存在"));
+        assert!(error.to_string().contains("目录不存在"));
     }
 
     #[cfg(target_os = "macos")]

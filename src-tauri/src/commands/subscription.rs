@@ -2,6 +2,7 @@ use std::str::FromStr;
 use tauri::{Emitter, State};
 
 use crate::app_config::AppType;
+use crate::error::AppError;
 use crate::services::subscription::SubscriptionQuota;
 use crate::store::AppState;
 
@@ -20,7 +21,7 @@ pub async fn get_subscription_quota(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     tool: String,
-) -> Result<SubscriptionQuota, String> {
+) -> Result<SubscriptionQuota, AppError> {
     let inner = crate::services::subscription::get_subscription_quota(&tool).await;
     if let Ok(snapshot) = &inner {
         if let Ok(app_type) = AppType::from_str(&tool) {
@@ -38,5 +39,5 @@ pub async fn get_subscription_quota(
             crate::tray::schedule_tray_refresh(&app);
         }
     }
-    inner
+    inner.map_err(AppError::from)
 }

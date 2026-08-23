@@ -1,5 +1,6 @@
 //! Kimi For Coding OAuth state wrapper.
 
+use crate::error::AppError;
 use crate::proxy::providers::kimi_oauth_auth::KimiOAuthManager;
 use crate::services::subscription::{CredentialStatus, SubscriptionQuota};
 use crate::store::AppState;
@@ -13,7 +14,7 @@ pub async fn get_kimi_oauth_quota(
     account_id: Option<String>,
     state: State<'_, KimiOAuthState>,
     app_state: State<'_, AppState>,
-) -> Result<SubscriptionQuota, String> {
+) -> Result<SubscriptionQuota, AppError> {
     let manager = &state.0;
     let resolved = match account_id
         .as_deref()

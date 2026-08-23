@@ -267,6 +267,12 @@ impl From<std::io::Error> for CopilotAuthError {
     }
 }
 
+impl From<CopilotAuthError> for crate::error::AppError {
+    fn from(err: CopilotAuthError) -> Self {
+        crate::error::AppError::Message(err.to_string())
+    }
+}
+
 /// GitHub 设备码响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitHubDeviceCodeResponse {

@@ -2,6 +2,7 @@
 //!
 //! 提供 Tauri 命令，供前端在供应商表单中获取可用模型列表。
 
+use crate::error::AppError;
 use crate::services::model_fetch::{self, FetchedModel};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,7 +21,7 @@ const OPENCODE_MODELS_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// 复用工具更新页的 CLI 定位逻辑执行 `opencode models`，因此会包含 OpenCode
 /// 已加载的 OAuth 模型与 Zen 免费模型，而不是只读取 opencode.json。
 #[tauri::command]
-pub async fn get_opencode_models() -> Result<Vec<OpenCodeModelRef>, String> {
+pub async fn get_opencode_models() -> Result<Vec<OpenCodeModelRef>, AppError> {
     tokio::task::spawn_blocking(|| {
         // Align runtime discovery with the OpenCode config directory that
         // cc-switch already uses for live read/write (settings override included).
@@ -46,9 +47,9 @@ pub async fn get_opencode_models() -> Result<Vec<OpenCodeModelRef>, String> {
                 stderr.trim()
             };
             return Err(if detail.is_empty() {
-                "Failed to load OpenCode models".to_string()
+                AppError::from("Failed to load OpenCode models".to_string())
             } else {
-                format!("Failed to load OpenCode models: {detail}")
+                AppError::from(format!("Failed to load OpenCode models: {detail}"))
             });
         }
 
@@ -57,7 +58,7 @@ pub async fn get_opencode_models() -> Result<Vec<OpenCodeModelRef>, String> {
         )))
     })
     .await
-    .map_err(|e| format!("OpenCode model discovery task failed: {e}"))?
+    .map_err(|e| AppError::from(format!("OpenCode model discovery task failed: {e}")))?
 }
 
 fn parse_opencode_models(output: &str) -> Vec<OpenCodeModelRef> {
@@ -100,7 +101,7 @@ pub async fn fetch_models_for_config(
     custom_user_agent: Option<String>,
     api_format: Option<String>,
     request_headers: Option<BTreeMap<String, String>>,
-) -> Result<Vec<FetchedModel>, String> {
+) -> Result<Vec<FetchedModel>, AppError> {
     // 与转发 / 检测路径共用 parse_custom_user_agent：非法 UA 静默忽略（不阻断取模型）。
     let user_agent = crate::provider::parse_custom_user_agent(custom_user_agent.as_deref())
         .ok()
@@ -115,6 +116,7 @@ pub async fn fetch_models_for_config(
         request_headers.as_ref(),
     )
     .await
+    .map_err(AppError::from)
 }
 
 #[cfg(test)]

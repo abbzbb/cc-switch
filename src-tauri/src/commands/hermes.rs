@@ -2,6 +2,7 @@ use std::time::Duration;
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 
+use crate::error::AppError;
 use crate::hermes_config;
 use crate::store::AppState;
 
@@ -19,25 +20,22 @@ const HERMES_WEB_OFFLINE_ERROR: &str = "hermes_web_offline";
 /// Hermes uses additive mode — users may already have providers
 /// configured in config.yaml.
 #[tauri::command]
-pub fn import_hermes_providers_from_live(state: State<'_, AppState>) -> Result<usize, String> {
+pub fn import_hermes_providers_from_live(state: State<'_, AppState>) -> Result<usize, AppError> {
     crate::services::provider::import_hermes_providers_from_live(state.inner())
-        .map_err(|e| e.to_string())
 }
 
 /// Get provider names in the Hermes live config.
 #[tauri::command]
-pub fn get_hermes_live_provider_ids() -> Result<Vec<String>, String> {
-    hermes_config::get_providers()
-        .map(|providers| providers.keys().cloned().collect())
-        .map_err(|e| e.to_string())
+pub fn get_hermes_live_provider_ids() -> Result<Vec<String>, AppError> {
+    hermes_config::get_providers().map(|providers| providers.keys().cloned().collect())
 }
 
 /// Get a single Hermes provider fragment from live config.
 #[tauri::command]
 pub fn get_hermes_live_provider(
     #[allow(non_snake_case)] providerId: String,
-) -> Result<Option<serde_json::Value>, String> {
-    hermes_config::get_provider(&providerId).map_err(|e| e.to_string())
+) -> Result<Option<serde_json::Value>, AppError> {
+    hermes_config::get_provider(&providerId)
 }
 
 // ============================================================================
@@ -47,8 +45,8 @@ pub fn get_hermes_live_provider(
 /// Get Hermes model config (model section of config.yaml). Read-only — writes
 /// happen implicitly through `apply_switch_defaults` when switching providers.
 #[tauri::command]
-pub fn get_hermes_model_config() -> Result<Option<hermes_config::HermesModelConfig>, String> {
-    hermes_config::get_model_config().map_err(|e| e.to_string())
+pub fn get_hermes_model_config() -> Result<Option<hermes_config::HermesModelConfig>, AppError> {
+    hermes_config::get_model_config()
 }
 
 // ============================================================================
@@ -56,26 +54,26 @@ pub fn get_hermes_model_config() -> Result<Option<hermes_config::HermesModelConf
 // ============================================================================
 
 #[tauri::command]
-pub fn get_hermes_memory(kind: hermes_config::MemoryKind) -> Result<String, String> {
-    hermes_config::read_memory(kind).map_err(|e| e.to_string())
+pub fn get_hermes_memory(kind: hermes_config::MemoryKind) -> Result<String, AppError> {
+    hermes_config::read_memory(kind)
 }
 
 #[tauri::command]
-pub fn set_hermes_memory(kind: hermes_config::MemoryKind, content: String) -> Result<(), String> {
-    hermes_config::write_memory(kind, &content).map_err(|e| e.to_string())
+pub fn set_hermes_memory(kind: hermes_config::MemoryKind, content: String) -> Result<(), AppError> {
+    hermes_config::write_memory(kind, &content)
 }
 
 #[tauri::command]
-pub fn get_hermes_memory_limits() -> Result<hermes_config::HermesMemoryLimits, String> {
-    hermes_config::read_memory_limits().map_err(|e| e.to_string())
+pub fn get_hermes_memory_limits() -> Result<hermes_config::HermesMemoryLimits, AppError> {
+    hermes_config::read_memory_limits()
 }
 
 #[tauri::command]
 pub fn set_hermes_memory_enabled(
     kind: hermes_config::MemoryKind,
     enabled: bool,
-) -> Result<hermes_config::HermesWriteOutcome, String> {
-    hermes_config::set_memory_enabled(kind, enabled).map_err(|e| e.to_string())
+) -> Result<hermes_config::HermesWriteOutcome, AppError> {
+    hermes_config::set_memory_enabled(kind, enabled)
 }
 
 // ============================================================================
@@ -95,7 +93,7 @@ pub fn set_hermes_memory_enabled(
 /// there is no need (and no way) for CC Switch to inject it — we just open
 /// the URL and let Hermes handle auth.
 #[tauri::command]
-pub async fn open_hermes_web_ui(app: AppHandle, path: Option<String>) -> Result<(), String> {
+pub async fn open_hermes_web_ui(app: AppHandle, path: Option<String>) -> Result<(), AppError> {
     let port = std::env::var("HERMES_WEB_PORT")
         .ok()
         .and_then(|raw| raw.trim().parse::<u16>().ok())
@@ -111,11 +109,11 @@ pub async fn open_hermes_web_ui(app: AppHandle, path: Option<String>) -> Result<
         .timeout(Duration::from_millis(1200))
         .no_proxy()
         .build()
-        .map_err(|e| format!("failed to build probe client: {e}"))?;
+        .map_err(|e| AppError::from(format!("failed to build probe client: {e}")))?;
 
     match client.get(&probe_url).send().await {
         Ok(_) => {}
-        Err(_) => return Err(HERMES_WEB_OFFLINE_ERROR.to_string()),
+        Err(_) => return Err(AppError::from(HERMES_WEB_OFFLINE_ERROR.to_string())),
     }
 
     let target = match path.as_deref() {
@@ -126,7 +124,7 @@ pub async fn open_hermes_web_ui(app: AppHandle, path: Option<String>) -> Result<
 
     app.opener()
         .open_url(&target, None::<String>)
-        .map_err(|e| format!("failed to open Hermes Web UI: {e}"))
+        .map_err(|e| AppError::from(format!("failed to open Hermes Web UI: {e}")))
 }
 
 /// Open the preferred terminal and run `hermes dashboard`. Non-blocking —
@@ -134,10 +132,10 @@ pub async fn open_hermes_web_ui(app: AppHandle, path: Option<String>) -> Result<
 /// since Hermes startup can take several seconds and may fail outright if
 /// the `hermes-agent[web]` extras are missing.
 #[tauri::command]
-pub async fn launch_hermes_dashboard() -> Result<(), String> {
+pub async fn launch_hermes_dashboard() -> Result<(), AppError> {
     tokio::task::spawn_blocking(|| {
         crate::commands::misc::launch_terminal_running("hermes dashboard", "hermes_dashboard")
     })
     .await
-    .map_err(|e| format!("launch task join error: {e}"))?
+    .map_err(|e| AppError::from(format!("launch task join error: {e}")))?
 }
