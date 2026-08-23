@@ -62,8 +62,7 @@ vi.mock("@tanstack/react-query", async () => {
     ...actual,
     useQueryClient: () => ({
       getQueryData: (...args: unknown[]) => getQueryDataMock(...args),
-      invalidateQueries: (...args: unknown[]) =>
-        invalidateQueriesMock(...args),
+      invalidateQueries: (...args: unknown[]) => invalidateQueriesMock(...args),
     }),
   };
 });
@@ -94,28 +93,36 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 
-const createSettingsFormMock = (overrides: Record<string, unknown> = {}) => ({
-  settings: {
-    showInTray: true,
-    minimizeToTrayOnClose: true,
-    enableClaudePluginIntegration: false,
-    skipClaudeOnboarding: true,
-    claudeConfigDir: "/claude",
-    codexConfigDir: "/codex",
-    geminiConfigDir: "/gemini",
-    opencodeConfigDir: "/opencode",
-    openclawConfigDir: "/openclaw",
-    hermesConfigDir: "/hermes",
-    piConfigDir: "/pi",
-    language: "zh",
-  },
-  isLoading: false,
-  initialLanguage: "zh",
-  updateSettings: vi.fn(),
-  resetSettings: vi.fn(),
-  syncLanguage: vi.fn(),
-  ...overrides,
-});
+const createSettingsFormMock = (overrides: Record<string, unknown> = {}) => {
+  const mock = {
+    settings: {
+      showInTray: true,
+      minimizeToTrayOnClose: true,
+      enableClaudePluginIntegration: false,
+      skipClaudeOnboarding: true,
+      claudeConfigDir: "/claude",
+      codexConfigDir: "/codex",
+      geminiConfigDir: "/gemini",
+      opencodeConfigDir: "/opencode",
+      openclawConfigDir: "/openclaw",
+      hermesConfigDir: "/hermes",
+      piConfigDir: "/pi",
+      language: "zh",
+    },
+    isLoading: false,
+    initialLanguage: "zh",
+    updateSettings: vi.fn(),
+    resetSettings: vi.fn(),
+    syncLanguage: vi.fn(),
+    getLatestSettings: () => null as Settings | null,
+    markSettingsClean: vi.fn(),
+    ...overrides,
+  };
+  if (!overrides.getLatestSettings) {
+    mock.getLatestSettings = () => mock.settings as Settings;
+  }
+  return mock;
+};
 
 const createDirectorySettingsMock = (
   overrides: Record<string, unknown> = {},

@@ -147,7 +147,22 @@ pub async fn execute_usage_script(
     )?;
 
     // 6. 发送 HTTP 请求
-    let response_data = send_http_request(&request, timeout_secs, restrict_private_hosts).await?;
+    let mut known_secrets = Vec::new();
+    if !api_key.is_empty() {
+        known_secrets.push(api_key.to_string());
+    }
+    if let Some(token) = access_token {
+        if !token.is_empty() {
+            known_secrets.push(token.to_string());
+        }
+    }
+    let response_data = send_http_request(
+        &request,
+        timeout_secs,
+        restrict_private_hosts,
+        &known_secrets,
+    )
+    .await?;
 
     // 7. 在独立作用域中执行 extractor（确保 Runtime/Context 在函数结束前释放）
     let result: Value = {
@@ -252,11 +267,31 @@ struct RequestConfig {
     body: Option<String>,
 }
 
+fn redact_usage_http_error(text: &str, secrets: &[String]) -> String {
+    crate::redact_known_secrets_strict(
+        &crate::redact_url_for_log_with_secrets(text, secrets),
+        secrets,
+    )
+}
+
+fn truncate_usage_body_preview(text: &str) -> String {
+    if text.len() > 200 {
+        let mut safe_cut = 200usize;
+        while !text.is_char_boundary(safe_cut) {
+            safe_cut = safe_cut.saturating_sub(1);
+        }
+        format!("{}...", &text[..safe_cut])
+    } else {
+        text.to_string()
+    }
+}
+
 /// 发送 HTTP 请求
 async fn send_http_request(
     config: &RequestConfig,
     timeout_secs: u64,
     restrict_private_hosts: bool,
+    known_secrets: &[String],
 ) -> Result<String, AppError> {
     // 约束超时范围，防止异常配置导致长时间阻塞（最小 2 秒，最大 30 秒）
     let request_timeout = std::time::Duration::from_secs(timeout_secs.clamp(2, 30));
@@ -313,34 +348,31 @@ async fn send_http_request(
         req = req.body(body.clone());
     }
 
+    let mut secrets = known_secrets.to_vec();
+    secrets.extend(config.headers.values().cloned());
+
     // 发送请求
     let resp = req.send().await.map_err(|e| {
+        let detail = redact_usage_http_error(&e.to_string(), &secrets);
         AppError::localized(
             "usage_script.request_failed",
-            format!("请求失败: {e}"),
-            format!("Request failed: {e}"),
+            format!("请求失败: {detail}"),
+            format!("Request failed: {detail}"),
         )
     })?;
 
     let status = resp.status();
     let text = resp.text().await.map_err(|e| {
+        let detail = redact_usage_http_error(&e.to_string(), &secrets);
         AppError::localized(
             "usage_script.read_response_failed",
-            format!("读取响应失败: {e}"),
-            format!("Failed to read response: {e}"),
+            format!("读取响应失败: {detail}"),
+            format!("Failed to read response: {detail}"),
         )
     })?;
 
     if !status.is_success() {
-        let preview = if text.len() > 200 {
-            let mut safe_cut = 200usize;
-            while !text.is_char_boundary(safe_cut) {
-                safe_cut = safe_cut.saturating_sub(1);
-            }
-            format!("{}...", &text[..safe_cut])
-        } else {
-            text.clone()
-        };
+        let preview = redact_usage_http_error(&truncate_usage_body_preview(&text), &secrets);
         return Err(AppError::localized(
             "usage_script.http_error",
             format!("HTTP {status} : {preview}"),
@@ -732,19 +764,12 @@ fn untrusted_usage_http_client(
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(30))
-        .connect_timeout(std::time::Duration::from_secs(10));
+        .connect_timeout(std::time::Duration::from_secs(10))
+        // DNS pin is ignored for CONNECT when a proxy is set, so untrusted
+        // scripts must not inherit the user's global HTTP/SOCKS proxy.
+        .no_proxy();
     if let Some((host, addr)) = pinned {
         builder = builder.resolve(&host, addr);
-    }
-    if let Some(proxy_url) = crate::proxy::http_client::get_current_proxy_url() {
-        let proxy = reqwest::Proxy::all(&proxy_url).map_err(|e| {
-            AppError::localized(
-                "usage_script.proxy_invalid",
-                format!("无效的代理配置: {e}"),
-                format!("Invalid proxy configuration: {e}"),
-            )
-        })?;
-        builder = builder.proxy(proxy);
     }
     builder.build().map_err(|e| {
         AppError::localized(

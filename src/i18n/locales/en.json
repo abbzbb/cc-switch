@@ -2716,6 +2716,11 @@
     "mcpImportSuccessDescription": "Successfully imported {{count}} server(s)",
     "mcpPartialSuccess": "Partial import success",
     "mcpPartialSuccessDescription": "Success: {{success}}, Failed: {{failed}}",
+    "validation": {
+      "providerRequired": "Importing a provider requires an app type and name",
+      "skillRepoRequired": "Importing a skill requires a repository",
+      "promptContentRequired": "Importing a prompt requires content"
+    },
     "skillImportSuccess": "Skill repository added successfully",
     "skillImportSuccessDescription": "Added repository: {{repo}}",
     "app": "App Type",

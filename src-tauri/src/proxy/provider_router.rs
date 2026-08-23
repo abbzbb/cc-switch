@@ -790,18 +790,9 @@ impl ProviderRouter {
             }
         }
 
-        // 如果不存在，获取写锁创建
-        let mut breakers = self.circuit_breakers.write().await;
-
-        // 双重检查，防止竞争条件
-        if let Some(breaker) = breakers.get(key) {
-            return breaker.clone();
-        }
-
-        // 从 key 中提取 app_type (格式: "app_type:provider_id")
+        // Load config before taking the map write lock so a slow DB (import /
+        // VACUUM) cannot stall every request that needs circuit_breakers.
         let app_type = circuit_app_type_from_key(key);
-
-        // 按应用独立读取熔断器配置
         let config = match self.db.get_proxy_config_for_app(app_type).await {
             Ok(app_config) => crate::proxy::circuit_breaker::CircuitBreakerConfig {
                 failure_threshold: app_config.circuit_failure_threshold,
@@ -812,6 +803,11 @@ impl ProviderRouter {
             },
             Err(_) => crate::proxy::circuit_breaker::CircuitBreakerConfig::default(),
         };
+
+        let mut breakers = self.circuit_breakers.write().await;
+        if let Some(breaker) = breakers.get(key) {
+            return breaker.clone();
+        }
 
         let breaker = Arc::new(CircuitBreaker::new(config));
         breakers.insert(key.to_string(), breaker.clone());

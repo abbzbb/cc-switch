@@ -120,6 +120,31 @@ describe("Skills management mutation hooks", () => {
     await waitFor(() => expect(result.current.isPending).toBe(false));
   });
 
+  it("refreshes installed skills when a single toggle rejects", async () => {
+    toggleAppMock.mockRejectedValueOnce(new Error("sync failed"));
+    const queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: false } },
+    });
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    const { result } = renderHook(() => useToggleSkillApp(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await act(async () => {
+      await result.current
+        .mutateAsync({
+          id: "alpha",
+          app: "claude",
+          enabled: true,
+        })
+        .catch(() => undefined);
+    });
+
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: ["skills", "installed"],
+    });
+  });
+
   it("keeps backup restore pending until installed skills and backups refresh", async () => {
     let releaseInvalidation: (() => void) | undefined;
     const invalidationPending = new Promise<void>((resolve) => {

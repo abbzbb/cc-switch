@@ -223,11 +223,13 @@ fn close_open_streaming_blocks(
         } else {
             state.id.clone()
         };
-        let fallback_name = if state.name.is_empty() {
-            "unknown_tool".to_string()
-        } else {
-            state.name.clone()
-        };
+        if state.name.trim().is_empty() {
+            // Fail closed: a nameless tool_use makes Claude Code call a
+            // non-existent tool. Drop the block instead of synthesizing
+            // `unknown_tool`.
+            continue;
+        }
+        let fallback_name = state.name.clone();
         state.started = true;
         let pending = std::mem::take(&mut state.pending_args);
         late_tool_starts.push((state.anthropic_index, fallback_id, fallback_name, pending));
@@ -828,7 +830,7 @@ fn map_stop_reason(finish_reason: Option<&str>) -> Option<String> {
             "tool_calls" | "function_call" => "tool_use",
             "stop" => "end_turn",
             "length" => "max_tokens",
-            "content_filter" => "end_turn",
+            "content_filter" => "refusal",
             other => {
                 log::warn!("[Claude/OpenRouter] Unknown finish_reason in streaming: {other}");
                 "end_turn"
@@ -880,7 +882,7 @@ mod tests {
         );
         assert_eq!(
             map_stop_reason(Some("content_filter")),
-            Some("end_turn".to_string())
+            Some("refusal".to_string())
         );
     }
 

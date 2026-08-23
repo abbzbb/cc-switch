@@ -919,3 +919,42 @@ fn ensure_incremental_auto_vacuum_rebuilds_existing_file_db() {
         "file db should persist INCREMENTAL auto_vacuum after VACUUM rebuild"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn sqlite_related_files_are_restricted_to_0600() {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::path::PathBuf;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("cc-switch.db");
+    create_private_sqlite_file_if_needed(&db_path, false).expect("create private db");
+    let mode = std::fs::metadata(&db_path)
+        .expect("db metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
+
+    std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o644)).expect("chmod 644");
+    let wal_path = {
+        let mut name = std::ffi::OsString::from(db_path.as_os_str());
+        name.push("-wal");
+        PathBuf::from(name)
+    };
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&wal_path)
+        .expect("create wal");
+    restrict_sqlite_file_permissions(&db_path);
+    for path in [&db_path, &wal_path] {
+        let mode = std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "{} should be 0600", path.display());
+    }
+}

@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 #[cfg(any(target_os = "macos", windows))]
 use crate::config::get_home_dir;
-use crate::config::{atomic_write, delete_file, read_json_file, write_json_file};
+use crate::config::{
+    atomic_write_private, delete_file, read_json_file, write_json_file, write_json_file_private,
+};
 use crate::database::Database;
 use crate::database::CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID;
 use crate::error::AppError;
@@ -1085,7 +1087,7 @@ fn apply_provider_to_paths_inner(
 
     write_deployment_mode(&paths.normal_config_path, "3p")?;
     write_deployment_mode(&paths.threep_config_path, "3p")?;
-    write_json_file(&paths.profile_path, &profile)?;
+    write_json_file_private(&paths.profile_path, &profile)?;
     write_meta(&paths.meta_path, Some(PROFILE_ID))?;
 
     Ok(())
@@ -1104,13 +1106,34 @@ fn restore_official_at_paths_inner(paths: &ClaudeDesktopPaths) -> Result<(), App
     Ok(())
 }
 
+fn cowork_egress_allowed_hosts(gateway_base_url: &str) -> Vec<String> {
+    if let Ok(url) = url::Url::parse(gateway_base_url) {
+        if let Some(host) = url.host_str() {
+            let host = if host.contains(':') && !host.starts_with('[') {
+                format!("[{host}]")
+            } else {
+                host.to_string()
+            };
+            let origin = match url.port() {
+                Some(port) => format!("{}://{}:{port}", url.scheme(), host),
+                None => format!("{}://{}", url.scheme(), host),
+            };
+            return vec![origin];
+        }
+    }
+    vec![
+        "http://127.0.0.1".to_string(),
+        "http://localhost".to_string(),
+    ]
+}
+
 fn build_gateway_profile(
     base_url: &str,
     api_key: &str,
     model_specs: Option<&[InferenceModelSpec]>,
 ) -> Value {
     let mut profile = json!({
-        "coworkEgressAllowedHosts": ["*"],
+        "coworkEgressAllowedHosts": cowork_egress_allowed_hosts(base_url),
         "disableDeploymentModeChooser": true,
         "inferenceGatewayApiKey": api_key,
         "inferenceGatewayAuthScheme": "bearer",
@@ -1136,7 +1159,10 @@ fn read_json_or_empty(path: &Path) -> Result<Value, AppError> {
     if value.is_object() {
         Ok(value)
     } else {
-        Ok(json!({}))
+        Err(AppError::Config(format!(
+            "Claude Desktop 配置根节点必须是对象: {}",
+            path.display()
+        )))
     }
 }
 
@@ -1181,7 +1207,7 @@ fn restore_snapshots(snapshots: &[FileSnapshot]) -> Result<(), AppError> {
                 if let Some(parent) = snapshot.path.parent() {
                     fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
                 }
-                atomic_write(&snapshot.path, content)?;
+                atomic_write_private(&snapshot.path, content)?;
             }
             None => {
                 delete_file(&snapshot.path)?;
@@ -1579,6 +1605,25 @@ mod tests {
     }
 
     #[test]
+    fn cowork_egress_allowed_hosts_uses_gateway_origin_or_localhost() {
+        assert_eq!(
+            cowork_egress_allowed_hosts("https://gateway.example.com/v1"),
+            vec!["https://gateway.example.com".to_string()]
+        );
+        assert_eq!(
+            cowork_egress_allowed_hosts("http://127.0.0.1:15721/claude-desktop"),
+            vec!["http://127.0.0.1:15721".to_string()]
+        );
+        assert_eq!(
+            cowork_egress_allowed_hosts("not a url"),
+            vec![
+                "http://127.0.0.1".to_string(),
+                "http://localhost".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn claude_desktop_apply_writes_3p_profile_and_meta() {
         let temp = TempDir::new().expect("tempdir");
         let paths = test_paths(temp.path());
@@ -1602,7 +1647,10 @@ mod tests {
         assert_eq!(profile["inferenceGatewayApiKey"], json!("test-token"));
         assert_eq!(profile["inferenceGatewayAuthScheme"], json!("bearer"));
         assert_eq!(profile["disableDeploymentModeChooser"], json!(true));
-        assert_eq!(profile["coworkEgressAllowedHosts"], json!(["*"]));
+        assert_eq!(
+            profile["coworkEgressAllowedHosts"],
+            json!(["https://gateway.example.com"])
+        );
         assert!(profile.get("inferenceModels").is_none());
         assert_eq!(meta["appliedId"], json!(PROFILE_ID));
         assert!(meta["entries"]
@@ -1663,7 +1711,10 @@ mod tests {
             json!("http://127.0.0.1:15721/claude-desktop")
         );
         assert_eq!(profile["inferenceGatewayAuthScheme"], json!("bearer"));
-        assert_eq!(profile["coworkEgressAllowedHosts"], json!(["*"]));
+        assert_eq!(
+            profile["coworkEgressAllowedHosts"],
+            json!(["http://127.0.0.1:15721"])
+        );
         assert_ne!(profile["inferenceGatewayApiKey"], json!("test-token"));
         assert!(profile["inferenceGatewayApiKey"]
             .as_str()

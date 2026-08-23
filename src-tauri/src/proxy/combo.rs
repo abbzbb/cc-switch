@@ -341,9 +341,25 @@ pub fn resolve_combo_targets(
         }) else {
             continue;
         };
+        let mut upstream_model = target.model.trim().to_string();
+        if let Some((prefix, rest)) = upstream_model.split_once('/') {
+            let prefix = prefix.trim();
+            let rest = rest.trim();
+            if !rest.is_empty()
+                && (prefix.eq_ignore_ascii_case(&want)
+                    || slugs
+                        .get(&provider.id)
+                        .is_some_and(|slug| slug.eq_ignore_ascii_case(prefix)))
+            {
+                upstream_model = rest.to_string();
+            }
+        }
+        if upstream_model.is_empty() {
+            continue;
+        }
         resolved.push(ResolvedComboTarget {
             provider: provider.clone(),
-            upstream_model: target.model.trim().to_string(),
+            upstream_model,
             weight: target.weight.max(MIN_WEIGHT),
         });
     }

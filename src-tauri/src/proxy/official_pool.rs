@@ -76,6 +76,11 @@ impl OfficialPoolState {
         self.affinity.get(session_id).map(String::as_str)
     }
 
+    pub fn clear_affinity(&mut self) {
+        self.affinity.clear();
+        self.affinity_order.clear();
+    }
+
     pub fn forget_provider(&mut self, provider_id: &str) {
         let provider_id = provider_id.trim();
         if provider_id.is_empty() {

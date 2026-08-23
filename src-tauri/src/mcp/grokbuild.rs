@@ -172,7 +172,9 @@ pub fn sync_single_server_to_grokbuild(
         id,
         Item::Table(json_server_to_grokbuild_toml_table(server_spec)?),
     );
-    crate::config::write_text_file(&path, &doc.to_string())
+    crate::grok_config::with_live_grok_toml_lock(|| {
+        crate::config::write_text_file(&path, &doc.to_string())
+    })
 }
 
 pub fn remove_server_from_grokbuild(id: &str) -> Result<(), AppError> {
@@ -187,8 +189,9 @@ pub fn remove_server_from_grokbuild(id: &str) -> Result<(), AppError> {
     let mut doc = match text.parse::<toml_edit::DocumentMut>() {
         Ok(doc) => doc,
         Err(error) => {
-            log::warn!("解析 Grok Build config.toml 失败: {error}，跳过删除操作");
-            return Ok(());
+            return Err(AppError::McpValidation(format!(
+                "解析 Grok Build config.toml 失败，无法删除 MCP 服务器: {error}"
+            )));
         }
     };
     // 与写入侧对称使用 as_table_like_mut：inline table 形态下 as_table_mut 返回
@@ -207,7 +210,9 @@ pub fn remove_server_from_grokbuild(id: &str) -> Result<(), AppError> {
             None => {}
         }
     }
-    crate::config::write_text_file(&path, &doc.to_string())
+    crate::grok_config::with_live_grok_toml_lock(|| {
+        crate::config::write_text_file(&path, &doc.to_string())
+    })
 }
 
 #[cfg(test)]

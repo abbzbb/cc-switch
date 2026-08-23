@@ -25,9 +25,7 @@ impl McpService {
             .map(|s| s.apps.clone())
             .unwrap_or_default();
 
-        state.db.save_mcp_server(&server)?;
-
-        // 处理禁用：若旧版本启用但新版本取消，则需要从该应用的 live 配置移除
+        // Live first: a failed projection must not leave SSOT ahead of disk.
         if prev_apps.claude && !server.apps.claude {
             Self::remove_server_from_app(state, &server.id, &AppType::Claude)?;
         }
@@ -47,8 +45,8 @@ impl McpService {
             Self::remove_server_from_app(state, &server.id, &AppType::Hermes)?;
         }
 
-        // 同步到各个启用的应用
         Self::sync_server_to_apps(state, &server)?;
+        state.db.save_mcp_server(&server)?;
 
         Ok(())
     }
@@ -58,10 +56,8 @@ impl McpService {
         let server = state.db.get_all_mcp_servers()?.shift_remove(id);
 
         if let Some(server) = server {
-            state.db.delete_mcp_server(id)?;
-
-            // 从所有应用的 live 配置中移除
             Self::remove_server_from_all_apps(state, id, &server)?;
+            state.db.delete_mcp_server(id)?;
             Ok(true)
         } else {
             Ok(false)

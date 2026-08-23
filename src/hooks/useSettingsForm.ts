@@ -114,6 +114,8 @@ export interface UseSettingsFormResult {
   resetSettings: (serverData: Settings | null) => void;
   readPersistedLanguage: () => Language;
   syncLanguage: (lang: Language) => void;
+  getLatestSettings: () => SettingsFormState | null;
+  markSettingsClean: () => void;
 }
 
 /**
@@ -136,6 +138,8 @@ export function useSettingsForm(): UseSettingsFormResult {
   const isDirtyRef = useRef(false);
   const hasHydratedRef = useRef(false);
   const lastServerDataRef = useRef<Settings | null>(null);
+  const settingsRef = useRef<SettingsFormState | null>(null);
+  settingsRef.current = settingsState;
 
   const readPersistedLanguage = useCallback((): Language => {
     if (typeof window !== "undefined") {
@@ -162,7 +166,9 @@ export function useSettingsForm(): UseSettingsFormResult {
       const normalizedLanguage = normalizeLanguage(
         serverData.language ?? readPersistedLanguage(),
       );
-      setSettingsState(toFormState(serverData, normalizedLanguage));
+      const next = toFormState(serverData, normalizedLanguage);
+      settingsRef.current = next;
+      setSettingsState(next);
       initialLanguageRef.current = normalizedLanguage;
       isDirtyRef.current = false;
       hasHydratedRef.current = true;
@@ -184,7 +190,12 @@ export function useSettingsForm(): UseSettingsFormResult {
       prevServer &&
       onlySyncStatusChanged(prevServer, data)
     ) {
-      setSettingsState((prev) => (prev ? mergeSyncStatus(prev, data) : prev));
+      setSettingsState((prev) => {
+        if (!prev) return prev;
+        const next = mergeSyncStatus(prev, data);
+        settingsRef.current = next;
+        return next;
+      });
       return;
     }
 
@@ -219,11 +230,18 @@ export function useSettingsForm(): UseSettingsFormResult {
           syncLanguage(normalized);
         }
 
+        settingsRef.current = next;
         return next;
       });
     },
     [readPersistedLanguage, syncLanguage],
   );
+
+  const getLatestSettings = useCallback(() => settingsRef.current, []);
+
+  const markSettingsClean = useCallback(() => {
+    isDirtyRef.current = false;
+  }, []);
 
   const resetSettings = useCallback(
     (serverData: Settings | null) => {
@@ -233,7 +251,9 @@ export function useSettingsForm(): UseSettingsFormResult {
         serverData.language ?? readPersistedLanguage(),
       );
 
-      setSettingsState(toFormState(serverData, normalizedLanguage));
+      const next = toFormState(serverData, normalizedLanguage);
+      settingsRef.current = next;
+      setSettingsState(next);
       isDirtyRef.current = false;
       hasHydratedRef.current = true;
       lastServerDataRef.current = serverData;
@@ -250,5 +270,7 @@ export function useSettingsForm(): UseSettingsFormResult {
     resetSettings,
     readPersistedLanguage,
     syncLanguage,
+    getLatestSettings,
+    markSettingsClean,
   };
 }

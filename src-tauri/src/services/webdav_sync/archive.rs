@@ -193,14 +193,35 @@ pub(crate) fn backup_current_skills() -> Result<SkillsBackup, AppError> {
 }
 
 pub(crate) fn restore_skills_from_backup(backup: &SkillsBackup) -> Result<(), AppError> {
+    if !backup.existed {
+        if backup.ssot_path.exists() {
+            fs::remove_dir_all(&backup.ssot_path)
+                .map_err(|e| AppError::io(&backup.ssot_path, e))?;
+        }
+        return Ok(());
+    }
+
+    let parent = backup
+        .ssot_path
+        .parent()
+        .ok_or_else(|| AppError::Config("invalid skills SSOT path".to_string()))?;
+    let bak = parent.join("skills.bak");
+    if bak.exists() {
+        fs::remove_dir_all(&bak).map_err(|e| AppError::io(&bak, e))?;
+    }
     if backup.ssot_path.exists() {
-        fs::remove_dir_all(&backup.ssot_path).map_err(|e| AppError::io(&backup.ssot_path, e))?;
+        fs::rename(&backup.ssot_path, &bak).map_err(|e| AppError::io(&backup.ssot_path, e))?;
     }
-
-    if backup.existed {
-        copy_dir_recursive(&backup.backup_dir, &backup.ssot_path)?;
+    if let Err(error) = copy_dir_recursive(&backup.backup_dir, &backup.ssot_path) {
+        let _ = fs::remove_dir_all(&backup.ssot_path);
+        if bak.exists() {
+            let _ = fs::rename(&bak, &backup.ssot_path);
+        }
+        return Err(error);
     }
-
+    if bak.exists() {
+        let _ = fs::remove_dir_all(&bak);
+    }
     Ok(())
 }
 

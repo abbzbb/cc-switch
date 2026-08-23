@@ -83,6 +83,9 @@ fn clamp_item(item: &mut Value, map: &mut HashMap<String, String>) -> bool {
         obj.insert((*key).to_string(), json!(replacement));
         changed = true;
     }
+    if let Some(content) = obj.get_mut("content") {
+        changed |= clamp_item_list(content, map);
+    }
     changed
 }
 

@@ -117,6 +117,10 @@ pub struct WebDavSyncSettings {
     pub enabled: bool,
     #[serde(default)]
     pub auto_sync: bool,
+    /// Allow `http://` WebDAV URLs. Default false; auto-sync is forced off
+    /// whenever the URL is cleartext HTTP.
+    #[serde(default)]
+    pub allow_insecure: bool,
     #[serde(default)]
     pub base_url: String,
     #[serde(default)]
@@ -136,6 +140,7 @@ impl Default for WebDavSyncSettings {
         Self {
             enabled: false,
             auto_sync: false,
+            allow_insecure: false,
             base_url: String::new(),
             username: String::new(),
             password: String::new(),
@@ -162,6 +167,14 @@ impl WebDavSyncSettings {
                 "WebDAV username is required.",
             ));
         }
+        crate::services::webdav::parse_base_url(&self.base_url)?;
+        if crate::services::webdav::url_is_insecure_http(&self.base_url) && !self.allow_insecure {
+            return Err(crate::error::AppError::localized(
+                "webdav.base_url.insecure",
+                "WebDAV 仅支持 https 地址；明文 http 需显式开启 allowInsecure，且不会启用自动同步。",
+                "WebDAV URLs must use https. Cleartext http requires allowInsecure and disables auto-sync.",
+            ));
+        }
         Ok(())
     }
 
@@ -175,6 +188,9 @@ impl WebDavSyncSettings {
         }
         if self.profile.is_empty() {
             self.profile = default_profile();
+        }
+        if crate::services::webdav::url_is_insecure_http(&self.base_url) {
+            self.auto_sync = false;
         }
     }
 
@@ -192,6 +208,10 @@ pub struct S3SyncSettings {
     pub enabled: bool,
     #[serde(default)]
     pub auto_sync: bool,
+    /// Allow `http://` custom endpoints. Default false; auto-sync is forced
+    /// off whenever the endpoint is cleartext HTTP.
+    #[serde(default)]
+    pub allow_insecure: bool,
     #[serde(default)]
     pub region: String,
     #[serde(default)]
@@ -215,6 +235,7 @@ impl Default for S3SyncSettings {
         Self {
             enabled: false,
             auto_sync: false,
+            allow_insecure: false,
             region: String::new(),
             bucket: String::new(),
             access_key_id: String::new(),
@@ -257,6 +278,15 @@ impl S3SyncSettings {
                 "S3 Secret Access Key is required.",
             ));
         }
+        if crate::services::s3::custom_endpoint_is_insecure_http(&self.endpoint)
+            && !self.allow_insecure
+        {
+            return Err(crate::error::AppError::localized(
+                "s3.endpoint.insecure",
+                "S3 自定义端点仅支持 https；明文 http 需显式开启 allowInsecure，且不会启用自动同步。",
+                "S3 custom endpoints must use https. Cleartext http requires allowInsecure and disables auto-sync.",
+            ));
+        }
         Ok(())
     }
 
@@ -272,6 +302,9 @@ impl S3SyncSettings {
         }
         if self.profile.is_empty() {
             self.profile = default_profile();
+        }
+        if crate::services::s3::custom_endpoint_is_insecure_http(&self.endpoint) {
+            self.auto_sync = false;
         }
     }
 
@@ -1205,6 +1238,52 @@ mod tests {
     use super::*;
     use crate::app_config::AppType;
     use std::path::Path;
+
+    #[test]
+    fn webdav_validate_rejects_http_without_allow_insecure() {
+        let settings = WebDavSyncSettings {
+            base_url: "http://nas.local/dav".to_string(),
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+            ..WebDavSyncSettings::default()
+        };
+        assert!(settings.validate().is_err());
+
+        let allowed = WebDavSyncSettings {
+            allow_insecure: true,
+            ..settings.clone()
+        };
+        assert!(allowed.validate().is_ok());
+
+        let mut auto = allowed.clone();
+        auto.auto_sync = true;
+        auto.normalize();
+        assert!(!auto.auto_sync);
+    }
+
+    #[test]
+    fn s3_validate_rejects_http_endpoint_without_allow_insecure() {
+        let settings = S3SyncSettings {
+            region: "us-east-1".to_string(),
+            bucket: "data".to_string(),
+            access_key_id: "AKIA".to_string(),
+            secret_access_key: "secret".to_string(),
+            endpoint: "http://minio:9000".to_string(),
+            ..S3SyncSettings::default()
+        };
+        assert!(settings.validate().is_err());
+
+        let allowed = S3SyncSettings {
+            allow_insecure: true,
+            ..settings.clone()
+        };
+        assert!(allowed.validate().is_ok());
+
+        let mut auto = allowed.clone();
+        auto.auto_sync = true;
+        auto.normalize();
+        assert!(!auto.auto_sync);
+    }
 
     struct IsolatedHome {
         dir: tempfile::TempDir,

@@ -4,7 +4,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::{atomic_write, get_claude_mcp_path};
+use crate::config::{atomic_write_private, get_claude_mcp_path};
 use crate::error::AppError;
 
 /// 需要在 Windows 上用 cmd /c 包装的命令
@@ -116,7 +116,7 @@ fn write_json_value(path: &Path, value: &Value) -> Result<(), AppError> {
     }
     let json =
         serde_json::to_string_pretty(value).map_err(|e| AppError::JsonSerialize { source: e })?;
-    atomic_write(path, json.as_bytes())
+    atomic_write_private(path, json.as_bytes())
 }
 
 pub fn get_mcp_status() -> Result<McpStatus, AppError> {

@@ -22,6 +22,7 @@ import {
   useUpdateProviderMutation,
   useDeleteProviderMutation,
   useSwitchProviderMutation,
+  type ProvidersQueryData,
 } from "@/lib/query";
 import { usageKeys } from "@/lib/query/usage";
 import { extractErrorMessage } from "@/utils/errorUtils";
@@ -331,6 +332,9 @@ export function useProviderActions(
           } else if (activeApp === "opencode" || activeApp === "openclaw") {
             messageKey = "notifications.addToConfigSuccess";
             defaultMessage = "已添加到配置";
+          } else if (activeApp === "pi") {
+            messageKey = "pi.provider.enabled";
+            defaultMessage = "已在 Pi 中启用";
           }
           toast.success(t(messageKey, { defaultValue: defaultMessage }), {
             closeButton: true,
@@ -362,10 +366,15 @@ export function useProviderActions(
   const saveUsageScript = useCallback(
     async (provider: Provider, script: UsageScript) => {
       try {
+        const cached = queryClient.getQueryData<ProvidersQueryData>([
+          "providers",
+          activeApp,
+        ]);
+        const latestProvider = cached?.providers?.[provider.id] ?? provider;
         const updatedProvider: Provider = {
-          ...provider,
+          ...latestProvider,
           meta: {
-            ...provider.meta,
+            ...latestProvider.meta,
             usage_script: script,
           },
         };

@@ -326,9 +326,16 @@ impl RequestForwarder {
         let provider_id = provider.id.clone();
         let provider_name = provider.name.clone();
         let app_type = app_type_str.to_string();
+        let expected_current = self.current_provider_id_at_start.clone();
         tokio::spawn(async move {
             let _ = failover_manager
-                .try_switch(app_handle.as_ref(), &app_type, &provider_id, &provider_name)
+                .try_switch_if_current(
+                    app_handle.as_ref(),
+                    &app_type,
+                    &provider_id,
+                    &provider_name,
+                    Some(expected_current.as_str()),
+                )
                 .await;
         });
     }
@@ -1795,6 +1802,7 @@ impl RequestForwarder {
         if matches!(app_type, AppType::Codex | AppType::GrokBuild)
             && !codex_responses_to_chat
             && !codex_responses_to_anthropic
+            && !super::providers::provider_is_xai_prompt_cache_upstream(provider)
             && super::providers::transform_codex_responses_ids::clamp_responses_item_ids(
                 &mut request_body,
             )
@@ -1907,7 +1915,10 @@ impl RequestForwarder {
         let force_identity_encoding = needs_transform
             || codex_responses_to_chat
             || codex_responses_to_anthropic
-            || request_is_streaming;
+            || request_is_streaming
+            || (matches!(app_type, AppType::Codex | AppType::GrokBuild)
+                && !codex_responses_to_chat
+                && !codex_responses_to_anthropic);
 
         // Codex OAuth 需要注入的 ChatGPT-Account-Id（在动态 token 获取期间填充）
         let mut codex_oauth_account_id: Option<String> = None;

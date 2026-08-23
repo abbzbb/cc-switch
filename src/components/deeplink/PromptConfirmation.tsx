@@ -47,8 +47,7 @@ export function PromptConfirmation({
           {t("deeplink.prompt.contentPreview")}
         </label>
         <pre className="mt-1 max-h-48 overflow-auto bg-muted/50 p-2 rounded text-xs whitespace-pre-wrap border">
-          {decodedContent.substring(0, 500)}
-          {decodedContent.length > 500 && "..."}
+          {decodedContent}
         </pre>
       </div>
 

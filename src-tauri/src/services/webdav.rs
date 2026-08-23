@@ -56,6 +56,11 @@ pub fn parse_base_url(raw: &str) -> Result<Url, AppError> {
     }
 }
 
+/// True when `raw` is an `http://` URL (cleartext).
+pub fn url_is_insecure_http(raw: &str) -> bool {
+    raw.trim().to_ascii_lowercase().starts_with("http://")
+}
+
 /// Build a full URL from a base URL string and path segments.
 ///
 /// Each segment is individually percent-encoded by the `url` crate.
@@ -78,8 +83,11 @@ pub fn build_remote_url(base_url: &str, segments: &[String]) -> Result<String, A
 }
 
 /// Split a slash-delimited path into non-empty segments.
+/// Drops `.` / `..` so a `profile` of `../../other` cannot escape `remote_root`.
 pub fn path_segments(raw: &str) -> impl Iterator<Item = &str> {
-    raw.trim_matches('/').split('/').filter(|s| !s.is_empty())
+    raw.trim_matches('/').split('/').filter(|s| {
+        !s.is_empty() && *s != "." && *s != ".." && !s.contains('\\') && !s.contains('\0')
+    })
 }
 
 // ─── Auth ────────────────────────────────────────────────────
@@ -601,6 +609,9 @@ mod tests {
 
         let segs: Vec<_> = path_segments("").collect();
         assert!(segs.is_empty());
+
+        let segs: Vec<_> = path_segments("../../other/name").collect();
+        assert_eq!(segs, vec!["other", "name"]);
     }
 
     #[test]
@@ -608,6 +619,15 @@ mod tests {
         assert!(auth_from_credentials("  ", "pass").is_none());
         let auth = auth_from_credentials(" user ", "pass");
         assert_eq!(auth, Some(("user".to_string(), Some("pass".to_string()))));
+    }
+
+    #[test]
+    fn url_is_insecure_http_detects_cleartext() {
+        assert!(url_is_insecure_http("http://nas.local/dav"));
+        assert!(url_is_insecure_http(" HTTP://NAS.LOCAL/dav "));
+        assert!(!url_is_insecure_http("https://dav.example.com"));
+        assert!(!url_is_insecure_http(""));
+        parse_base_url("http://nas.local/dav").expect("transport still parses http");
     }
 
     #[test]

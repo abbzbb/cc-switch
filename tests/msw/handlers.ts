@@ -89,10 +89,11 @@ export const handlers = [
     const { id, app } = await withJson<{ id: string; app: AppId }>(request);
     const providers = listProviders(app);
     if (!providers[id]) {
-      return HttpResponse.json(false, { status: 404 });
+      // Tauri invoke rejects with a string (not HTTP 404 + boolean).
+      return new HttpResponse(`供应商不存在: ${id}`, { status: 500 });
     }
     setCurrentProviderId(app, id);
-    return success(true);
+    return success({ warnings: [] });
   }),
 
   http.post(`${TAURI_ENDPOINT}/add_provider`, async ({ request }) => {

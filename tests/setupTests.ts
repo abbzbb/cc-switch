@@ -7,6 +7,14 @@ import { server } from "./msw/server";
 import { resetProviderState } from "./msw/state";
 import "./msw/tauriMocks";
 
+vi.mock("@tauri-apps/plugin-log", () => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+  debug: vi.fn(),
+  trace: vi.fn(),
+}));
+
 beforeAll(async () => {
   server.listen({ onUnhandledRequest: "warn" });
   await i18n.use(initReactI18next).init({

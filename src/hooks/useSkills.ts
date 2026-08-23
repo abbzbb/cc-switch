@@ -169,7 +169,9 @@ export function useToggleSkillApp() {
       app: AppId;
       enabled: boolean;
     }) => skillsApi.toggleApp(id, app, enabled),
-    onSuccess: () =>
+    // The backend may persist the toggle before a live-config write fails.
+    // Always refresh so the UI matches disk after both success and error.
+    onSettled: () =>
       queryClient.invalidateQueries({ queryKey: ["skills", "installed"] }),
   });
 }

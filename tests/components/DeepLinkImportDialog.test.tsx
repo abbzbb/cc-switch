@@ -1,8 +1,31 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { emitTauriEvent } from "../msw/tauriMocks";
+
+const deeplinkMocks = vi.hoisted(() => ({
+  importFromDeeplink: vi.fn(),
+  mergeDeeplinkConfig: vi.fn(async (request: unknown) => request),
+}));
+
+vi.mock("@/lib/api/deeplink", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api/deeplink")>();
+  return {
+    ...actual,
+    deeplinkApi: {
+      ...actual.deeplinkApi,
+      importFromDeeplink: deeplinkMocks.importFromDeeplink,
+      mergeDeeplinkConfig: deeplinkMocks.mergeDeeplinkConfig,
+    },
+  };
+});
 
 vi.mock("@/components/ui/dialog", () => ({
   Dialog: ({ children }: { children: React.ReactNode }) => (
@@ -32,6 +55,14 @@ const Wrapper = ({ children }: { children: React.ReactNode }) => (
 );
 
 describe("DeepLinkImportDialog", () => {
+  beforeEach(() => {
+    deeplinkMocks.importFromDeeplink.mockReset();
+    deeplinkMocks.mergeDeeplinkConfig.mockReset();
+    deeplinkMocks.mergeDeeplinkConfig.mockImplementation(
+      async (request: unknown) => request,
+    );
+  });
+
   it("renders masked usage access token and user id for provider imports", async () => {
     render(<DeepLinkImportDialog />, { wrapper: Wrapper });
 
@@ -98,5 +129,85 @@ describe("DeepLinkImportDialog", () => {
       ),
     ).not.toBeInTheDocument();
     expect(screen.queryByText("脚本代码")).not.toBeInTheDocument();
+  });
+
+  it("keeps the dialog open and lists MCP import failures", async () => {
+    deeplinkMocks.importFromDeeplink.mockResolvedValue({
+      type: "mcp",
+      importedCount: 1,
+      importedIds: ["ok-server"],
+      failed: [{ id: "bad-server", error: "command missing" }],
+    });
+
+    render(<DeepLinkImportDialog />, { wrapper: Wrapper });
+
+    act(() => {
+      emitTauriEvent("deeplink-import", {
+        version: "v1",
+        resource: "mcp",
+        apps: "claude",
+      });
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "deeplink.import" }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "deeplink.import" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("bad-server")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/command missing/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "deeplink.import" }),
+    ).toBeInTheDocument();
+  });
+
+  it("validates required provider fields before importing", async () => {
+    render(<DeepLinkImportDialog />, { wrapper: Wrapper });
+
+    act(() => {
+      emitTauriEvent("deeplink-import", {
+        version: "v1",
+        resource: "provider",
+        homepage: "https://example.com",
+      });
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "deeplink.import" }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "deeplink.import" }));
+
+    await waitFor(() => {
+      expect(deeplinkMocks.importFromDeeplink).not.toHaveBeenCalled();
+    });
+  });
+
+  it("shows the full prompt content instead of a truncated preview", async () => {
+    const content = `line-one\n${"x".repeat(520)}\nline-end`;
+    render(<DeepLinkImportDialog />, { wrapper: Wrapper });
+
+    act(() => {
+      emitTauriEvent("deeplink-import", {
+        version: "v1",
+        resource: "prompt",
+        app: "claude",
+        name: "Long Prompt",
+        content: btoa(content),
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/line-one/)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/line-end/)).toBeInTheDocument();
+    expect(screen.queryByText(/\.\.\.$/)).not.toBeInTheDocument();
   });
 });

@@ -30,7 +30,7 @@
 //!     args: ["-y", "@modelcontextprotocol/server-filesystem"]
 //! ```
 
-use crate::config::{atomic_write, get_app_config_dir};
+use crate::config::{atomic_write, atomic_write_private, get_app_config_dir};
 use crate::error::AppError;
 use crate::settings::{effective_backup_retain_count, get_hermes_override_dir};
 use chrono::Local;
@@ -375,7 +375,7 @@ fn create_hermes_backup(source: &str) -> Result<PathBuf, AppError> {
         counter += 1;
     }
 
-    atomic_write(&backup_path, source.as_bytes())?;
+    atomic_write_private(&backup_path, source.as_bytes())?;
     cleanup_hermes_backups(&backup_dir)?;
     Ok(backup_path)
 }
@@ -456,7 +456,7 @@ fn write_yaml_section_to_config_locked(
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
     }
 
-    atomic_write(&config_path, new_raw.as_bytes())?;
+    atomic_write_private(&config_path, new_raw.as_bytes())?;
 
     log::debug!(
         "Hermes config section '{}' written to {:?}",

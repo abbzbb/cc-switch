@@ -101,7 +101,11 @@ import {
   useDisableCurrentOmo,
   useDisableCurrentOmoSlim,
 } from "@/lib/query/omo";
-import { invalidatePiProviderCaches, piKeys, usePiCurrentState } from "@/lib/query/pi";
+import {
+  invalidatePiProviderCaches,
+  piKeys,
+  usePiCurrentState,
+} from "@/lib/query/pi";
 import WorkspaceFilesPanel from "@/components/workspace/WorkspaceFilesPanel";
 import EnvPanel from "@/components/openclaw/EnvPanel";
 import ToolsPanel from "@/components/openclaw/ToolsPanel";
@@ -179,6 +183,8 @@ function App() {
   const queryClient = useQueryClient();
 
   const [activeApp, setActiveApp] = useState<AppId>(getInitialApp);
+  const activeAppRef = useRef(activeApp);
+  activeAppRef.current = activeApp;
   const sharedFeatureApp: AppId =
     activeApp === "claude-desktop" ? "claude" : activeApp;
   const [currentView, setCurrentView] = useState<View>(getInitialView);
@@ -232,6 +238,16 @@ function App() {
       return;
     }
     if (
+      (currentView === "skills" ||
+        currentView === "skillsDiscovery" ||
+        currentView === "prompts" ||
+        currentView === "mcp") &&
+      sharedFeatureApp === "openclaw"
+    ) {
+      setCurrentView("providers");
+      return;
+    }
+    if (
       currentView === "sessions" &&
       sharedFeatureApp !== "claude" &&
       sharedFeatureApp !== "codex" &&
@@ -252,6 +268,7 @@ function App() {
     provider: Provider;
     action: "remove" | "delete";
   } | null>(null);
+  const [confirmPending, setConfirmPending] = useState(false);
   const [envConflicts, setEnvConflicts] = useState<EnvConflict[]>([]);
   const [showEnvBanner, setShowEnvBanner] = useState(false);
 
@@ -337,37 +354,6 @@ function App() {
     currentAppUsesProxy && isProxyRunning,
     isProxyRunning && isCurrentAppTakeoverActive,
   );
-  const handleEnablePiProvider = async (provider: Provider) => {
-    try {
-      await providersApi.switch(provider.id, "pi");
-      await invalidatePiProviderCaches(queryClient);
-      await providersApi.updateTrayMenu().catch((error) => {
-        console.error(
-          "Failed to update tray menu after enabling Pi provider",
-          error,
-        );
-      });
-      toast.success(
-        t("pi.provider.enabled", {
-          defaultValue: "已在 Pi 中启用",
-        }),
-        { closeButton: true },
-      );
-    } catch (error) {
-      const detail = extractErrorMessage(error);
-      toast.error(
-        t("pi.provider.enableFailed", {
-          defaultValue: "无法在 Pi 中启用此供应商",
-        }),
-        {
-          description:
-            translatePiProviderMutationError(detail, t) || detail || undefined,
-          closeButton: true,
-        },
-      );
-    }
-  };
-
   const disableOmoMutation = useDisableCurrentOmo();
   const handleDisableOmo = () => {
     disableOmoMutation.mutate(undefined, {
@@ -402,38 +388,38 @@ function App() {
     });
   };
 
-  useEffect(() => {
-    let unsubscribe: (() => void) | undefined;
-    let active = true;
+  useTauriEvent<ProviderSwitchEvent>("provider-switched", async (event) => {
+    if (event.appType === activeAppRef.current) {
+      await queryClient.invalidateQueries({
+        queryKey: ["providers", event.appType],
+      });
+    }
+    if (event.appType === "pi") {
+      await invalidatePiProviderCaches(queryClient);
+    }
+  });
 
-    const setupListener = async () => {
-      try {
-        const off = await providersApi.onSwitched(
-          async (event: ProviderSwitchEvent) => {
-            if (event.appType === activeApp) {
-              await refetch();
-            }
-            if (event.appType === "pi") {
-              await invalidatePiProviderCaches(queryClient);
-            }
-          },
-        );
-        if (!active) {
-          off();
-          return;
-        }
-        unsubscribe = off;
-      } catch (error) {
-        console.error("[App] Failed to subscribe provider switch event", error);
-      }
-    };
-
-    void setupListener();
-    return () => {
-      active = false;
-      unsubscribe?.();
-    };
-  }, [activeApp, queryClient, refetch]);
+  useTauriEvent<{
+    appType?: string;
+    proxyEnabled?: boolean;
+    autoFailoverEnabled?: boolean;
+    providerId?: string;
+  }>("proxy-flags-changed", async (payload) => {
+    await queryClient.invalidateQueries({ queryKey: proxyKeys.status });
+    await queryClient.invalidateQueries({
+      queryKey: proxyKeys.takeoverStatus,
+    });
+    await queryClient.invalidateQueries({ queryKey: ["autoFailoverEnabled"] });
+    await queryClient.invalidateQueries({ queryKey: ["failoverQueue"] });
+    const appType = payload?.appType;
+    if (appType) {
+      await queryClient.invalidateQueries({
+        queryKey: ["providers", appType],
+      });
+    } else {
+      await queryClient.invalidateQueries({ queryKey: ["providers"] });
+    }
+  });
 
   useTauriEvent("universal-provider-synced", async () => {
     await queryClient.invalidateQueries({ queryKey: ["providers"] });
@@ -722,63 +708,68 @@ function App() {
   };
 
   const handleConfirmAction = async () => {
-    if (!confirmAction) return;
+    if (!confirmAction || confirmPending) return;
     const { provider, action } = confirmAction;
+    setConfirmPending(true);
 
-    if (action === "remove") {
-      // Remove from live config only (for additive mode apps like OpenCode/OpenClaw)
-      // Does NOT delete from database - provider remains in the list
-      try {
-        await providersApi.removeFromLiveConfig(provider.id, activeApp);
-      } catch (error) {
-        const detail = extractErrorMessage(error);
-        const description =
-          activeApp === "pi"
-            ? translatePiProviderMutationError(detail, t) || detail
-            : detail;
-        if (activeApp === "pi") {
-          void invalidatePiProviderCaches(queryClient).catch(() => undefined);
+    try {
+      if (action === "remove") {
+        // Remove from live config only (for additive mode apps like OpenCode/OpenClaw)
+        // Does NOT delete from database - provider remains in the list
+        try {
+          await providersApi.removeFromLiveConfig(provider.id, activeApp);
+        } catch (error) {
+          const detail = extractErrorMessage(error);
+          const description =
+            activeApp === "pi"
+              ? translatePiProviderMutationError(detail, t) || detail
+              : detail;
+          if (activeApp === "pi") {
+            void invalidatePiProviderCaches(queryClient).catch(() => undefined);
+          }
+          toast.error(t("notifications.removeFromConfigFailed"), {
+            description: description || t("common.unknown"),
+            closeButton: true,
+          });
+          return;
         }
-        toast.error(t("notifications.removeFromConfigFailed"), {
-          description: description || t("common.unknown"),
-          closeButton: true,
-        });
-        return;
+        if (activeApp === "pi") {
+          await invalidatePiProviderCaches(queryClient);
+        }
+        // Invalidate queries to refresh the isInConfig state
+        if (activeApp === "opencode") {
+          await queryClient.invalidateQueries({
+            queryKey: ["opencodeLiveProviderIds"],
+          });
+        } else if (activeApp === "openclaw") {
+          await queryClient.invalidateQueries({
+            queryKey: openclawKeys.liveProviderIds,
+          });
+          await queryClient.invalidateQueries({
+            queryKey: openclawKeys.health,
+          });
+        } else if (activeApp === "hermes") {
+          await queryClient.invalidateQueries({
+            queryKey: hermesKeys.liveProviderIds,
+          });
+        }
+        toast.success(
+          activeApp === "pi"
+            ? t("pi.provider.removed", {
+                defaultValue: "已从 Pi 移除",
+              })
+            : t("notifications.removeFromConfigSuccess", {
+                defaultValue: "已从配置移除",
+              }),
+          { closeButton: true },
+        );
+      } else {
+        await deleteProvider(provider.id);
       }
-      if (activeApp === "pi") {
-        await invalidatePiProviderCaches(queryClient);
-      }
-      // Invalidate queries to refresh the isInConfig state
-      if (activeApp === "opencode") {
-        await queryClient.invalidateQueries({
-          queryKey: ["opencodeLiveProviderIds"],
-        });
-      } else if (activeApp === "openclaw") {
-        await queryClient.invalidateQueries({
-          queryKey: openclawKeys.liveProviderIds,
-        });
-        await queryClient.invalidateQueries({
-          queryKey: openclawKeys.health,
-        });
-      } else if (activeApp === "hermes") {
-        await queryClient.invalidateQueries({
-          queryKey: hermesKeys.liveProviderIds,
-        });
-      }
-      toast.success(
-        activeApp === "pi"
-          ? t("pi.provider.removed", {
-              defaultValue: "已从 Pi 移除",
-            })
-          : t("notifications.removeFromConfigSuccess", {
-              defaultValue: "已从配置移除",
-            }),
-        { closeButton: true },
-      );
-    } else {
-      await deleteProvider(provider.id);
+      setConfirmAction(null);
+    } finally {
+      setConfirmPending(false);
     }
-    setConfirmAction(null);
   };
 
   const generateUniqueProviderCopyKey = (
@@ -1074,18 +1065,14 @@ function App() {
               onInteractionBlockedChange={setSkillsManagementBusy}
               onNavigationBlockedChange={setSkillsNavigationBusy}
               onCheckUpdatesStateChange={setSkillsCheckUpdatesState}
-              currentApp={
-                sharedFeatureApp === "openclaw" ? "claude" : sharedFeatureApp
-              }
+              currentApp={sharedFeatureApp}
             />
           );
         case "skillsDiscovery":
           return (
             <SkillsPage
               ref={skillsPageRef}
-              initialApp={
-                sharedFeatureApp === "openclaw" ? "claude" : sharedFeatureApp
-              }
+              initialApp={sharedFeatureApp}
               onSourceChange={setSkillsDiscoverySource}
             />
           );
@@ -1149,10 +1136,6 @@ function App() {
                       activeProviderId={activeProviderId}
                       onSwitch={(provider) => {
                         if (isProviderActionPending) return;
-                        if (activeApp === "pi") {
-                          void handleEnablePiProvider(provider);
-                          return;
-                        }
                         void switchProvider(provider);
                       }}
                       onEdit={(provider) => {
@@ -1814,7 +1797,10 @@ function App() {
         }}
         onSubmit={handleEditProvider}
         appId={activeApp}
-        isProxyTakeover={isCurrentAppTakeoverActive}
+        isProxyTakeover={
+          isProxyRunning &&
+          (isCurrentAppTakeoverActive || activeApp === "claude-desktop")
+        }
       />
 
       {effectiveUsageProvider && (
@@ -1840,6 +1826,7 @@ function App() {
             : t("confirm.deleteProvider")
         }
         message={confirmActionMessage}
+        pending={confirmPending}
         onConfirm={() => void handleConfirmAction()}
         onCancel={() => setConfirmAction(null)}
       />

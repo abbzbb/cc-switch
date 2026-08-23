@@ -29,7 +29,7 @@ use axum::{
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{oneshot, watch, RwLock};
 use tokio::task::JoinHandle;
 
 /// 代理服务器状态（共享）
@@ -105,6 +105,8 @@ pub struct ProxyServer {
     config: ProxyConfig,
     state: ProxyState,
     shutdown_tx: Arc<RwLock<Option<oneshot::Sender<()>>>>,
+    /// 通知已接受的连接走 graceful_shutdown，避免停服后仍用旧 upstream。
+    conn_shutdown_tx: Arc<RwLock<Option<watch::Sender<bool>>>>,
     /// 服务器任务句柄，用于等待服务器实际关闭
     server_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
@@ -120,6 +122,7 @@ impl ProxyServer {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn new_with_codex_oauth(
         config: ProxyConfig,
         db: Arc<Database>,
@@ -190,6 +193,7 @@ impl ProxyServer {
             config,
             state,
             shutdown_tx: Arc::new(RwLock::new(None)),
+            conn_shutdown_tx: Arc::new(RwLock::new(None)),
             server_handle: Arc::new(RwLock::new(None)),
         }
     }
@@ -207,6 +211,7 @@ impl ProxyServer {
 
         // 创建关闭通道
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (conn_shutdown_tx, conn_shutdown_rx) = watch::channel(false);
 
         // 构建路由
         let app = self.build_router();
@@ -227,6 +232,7 @@ impl ProxyServer {
 
         // 保存关闭句柄
         *self.shutdown_tx.write().await = Some(shutdown_tx);
+        *self.conn_shutdown_tx.write().await = Some(conn_shutdown_tx);
 
         // 更新状态
         let mut status = self.state.status.write().await;
@@ -256,6 +262,7 @@ impl ProxyServer {
                         };
 
                         let app = app.clone();
+                        let mut conn_shutdown_rx = conn_shutdown_rx.clone();
                         tokio::spawn(async move {
                             // Peek raw TCP bytes to capture original header casing
                             // before hyper parses (and lowercases) the header names.
@@ -295,11 +302,19 @@ impl ProxyServer {
                                 }
                             });
 
-                            if let Err(e) = hyper::server::conn::http1::Builder::new()
-                                .preserve_header_case(true)
-                                .serve_connection(TokioIo::new(stream), service)
-                                .await
-                            {
+                            let mut conn = std::pin::pin!(
+                                hyper::server::conn::http1::Builder::new()
+                                    .preserve_header_case(true)
+                                    .serve_connection(TokioIo::new(stream), service)
+                            );
+                            let result = tokio::select! {
+                                result = conn.as_mut() => result,
+                                _ = conn_shutdown_rx.changed() => {
+                                    conn.as_mut().graceful_shutdown();
+                                    conn.await
+                                }
+                            };
+                            if let Err(e) = result {
                                 // Connection reset / broken pipe 等在代理场景下很常见，debug 级别
                                 log::debug!("[{SRV}] connection error: {e}", SRV = log_srv::CONN_ERR);
                             }
@@ -327,7 +342,10 @@ impl ProxyServer {
     }
 
     pub async fn stop(&self) -> Result<(), ProxyError> {
-        // 1. 发送关闭信号
+        // 1. 发送关闭信号（先通知连接 graceful_shutdown，再停 accept）
+        if let Some(tx) = self.conn_shutdown_tx.write().await.take() {
+            let _ = tx.send(true);
+        }
         if let Some(tx) = self.shutdown_tx.write().await.take() {
             let _ = tx.send(());
         } else {
@@ -856,6 +874,8 @@ mod tests {
     #[tokio::test]
     async fn get_status_http_uses_aggregated_status() {
         let db = Arc::new(Database::memory().expect("memory database"));
+        let token =
+            crate::proxy::inbound_auth::get_or_create_inbound_token(&db).expect("inbound token");
         let proxy = ProxyServer::new(
             ProxyConfig {
                 listen_port: 0,
@@ -869,8 +889,16 @@ mod tests {
         let proxy_info = proxy.start().await.expect("start test proxy");
         proxy.set_active_target("codex", "c1", "Codex One").await;
 
+        let denied = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{}/status", proxy_info.port))
+            .send()
+            .await
+            .expect("GET /status without token");
+        assert_eq!(denied.status().as_u16(), 401);
+
         let status: Value = reqwest::Client::new()
             .get(format!("http://127.0.0.1:{}/status", proxy_info.port))
+            .header(crate::proxy::inbound_auth::INBOUND_HEADER, token)
             .send()
             .await
             .expect("GET /status")

@@ -12,6 +12,7 @@ export interface ConfigTransferResult {
   message: string;
   filePath?: string;
   backupId?: string;
+  warning?: string;
 }
 
 export interface WebDavTestResult {
@@ -355,7 +356,9 @@ export const backupsApi = {
     return await invoke("list_db_backups");
   },
 
-  async restoreDbBackup(filename: string): Promise<string> {
+  async restoreDbBackup(
+    filename: string,
+  ): Promise<{ success: boolean; filename?: string; warning?: string }> {
     return await invoke("restore_db_backup", { filename });
   },
 

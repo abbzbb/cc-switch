@@ -147,33 +147,6 @@ pub async fn copilot_logout(state: State<'_, CopilotAuthState>) -> Result<(), St
     auth_manager.clear_auth().await.map_err(|e| e.to_string())
 }
 
-// ==================== Token 获取 ====================
-
-/// 获取有效的 Copilot Token（向后兼容：使用第一个账号）
-///
-/// 内部使用，用于代理请求
-#[tauri::command]
-pub async fn copilot_get_token(state: State<'_, CopilotAuthState>) -> Result<String, String> {
-    let auth_manager = state.0.read().await;
-    auth_manager
-        .get_valid_token()
-        .await
-        .map_err(|e| e.to_string())
-}
-
-/// 获取指定账号的有效 Copilot Token
-#[tauri::command(rename_all = "camelCase")]
-pub async fn copilot_get_token_for_account(
-    account_id: String,
-    state: State<'_, CopilotAuthState>,
-) -> Result<String, String> {
-    let auth_manager = state.0.read().await;
-    auth_manager
-        .get_valid_token_for_account(&account_id)
-        .await
-        .map_err(|e| e.to_string())
-}
-
 // ==================== 模型和使用量 ====================
 
 /// 获取 Copilot 可用模型列表（向后兼容：使用第一个账号）

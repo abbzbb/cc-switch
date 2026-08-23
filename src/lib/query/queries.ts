@@ -1,5 +1,9 @@
 import { useRef } from "react";
-import { useQuery, type UseQueryResult } from "@tanstack/react-query";
+import {
+  useQuery,
+  useQueryClient,
+  type UseQueryResult,
+} from "@tanstack/react-query";
 import {
   providersApi,
   settingsApi,
@@ -66,6 +70,7 @@ export const useProvidersQuery = (
   options?: UseProvidersQueryOptions,
 ): UseQueryResult<ProvidersQueryData> => {
   const { isProxyRunning = false } = options || {};
+  const queryClient = useQueryClient();
 
   return useQuery({
     queryKey: ["providers", appId],
@@ -76,17 +81,26 @@ export const useProvidersQuery = (
     refetchInterval: isProxyRunning ? 10000 : false,
     queryFn: async () => {
       const providers = await providersApi.getAll(appId);
-      let currentProviderId = "";
       try {
-        currentProviderId = await providersApi.getCurrent(appId);
+        const currentProviderId = await providersApi.getCurrent(appId);
+        return {
+          providers: sortProviders(providers),
+          currentProviderId,
+        };
       } catch (error) {
         console.error("获取当前供应商失败:", error);
+        const previous = queryClient.getQueryData<ProvidersQueryData>([
+          "providers",
+          appId,
+        ]);
+        if (previous) {
+          return {
+            providers: sortProviders(providers),
+            currentProviderId: previous.currentProviderId,
+          };
+        }
+        throw error;
       }
-
-      return {
-        providers: sortProviders(providers),
-        currentProviderId,
-      };
     },
   });
 };

@@ -16,6 +16,7 @@ import { proxyKeys } from "@/lib/query/proxy";
 import { usageKeys } from "@/lib/query/usage";
 import { invalidatePiProviderCaches } from "@/lib/query/pi";
 import { GROKBUILD_OFFICIAL_PROVIDER_ID } from "@/utils/providerCapabilities";
+import { redactFrontendLogText } from "@/lib/frontendLogger";
 
 export const useAddProviderMutation = (appId: AppId) => {
   const queryClient = useQueryClient();
@@ -357,7 +358,10 @@ export const useSwitchProviderMutation = (appId: AppId) => {
       }
     },
     onError: (error: Error) => {
-      const detail = extractErrorMessage(error) || t("common.unknown");
+      const raw = extractErrorMessage(error) || t("common.unknown");
+      const translated =
+        appId === "pi" ? translatePiProviderMutationError(raw, t) : "";
+      const detail = redactFrontendLogText(translated || raw);
 
       toast.error(
         t("notifications.switchFailedTitle", { defaultValue: "切换失败" }),

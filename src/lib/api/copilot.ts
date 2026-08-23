@@ -111,17 +111,6 @@ export interface CopilotModel {
 }
 
 /**
- * 获取有效的 Copilot Token
- *
- * 内部使用，用于代理请求。
- *
- * @returns Copilot Token
- */
-export async function copilotGetToken(): Promise<string> {
-  return invoke<string>("copilot_get_token");
-}
-
-/**
  * 获取 Copilot 可用模型列表
  *
  * @returns 可用模型列表
@@ -213,20 +202,6 @@ export async function copilotSetDefaultAccount(
   accountId: string,
 ): Promise<void> {
   return invoke("copilot_set_default_account", { accountId });
-}
-
-/**
- * 获取指定账号的有效 Copilot Token
- *
- * 内部使用，用于代理请求。
- *
- * @param accountId - GitHub 用户 ID
- * @returns Copilot Token
- */
-export async function copilotGetTokenForAccount(
-  accountId: string,
-): Promise<string> {
-  return invoke<string>("copilot_get_token_for_account", { accountId });
 }
 
 /**

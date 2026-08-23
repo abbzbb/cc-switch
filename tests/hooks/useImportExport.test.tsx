@@ -113,6 +113,29 @@ describe("useImportExport Hook", () => {
     expect(onImportSuccess).toHaveBeenCalledTimes(1);
   });
 
+  it("toasts the backend warning on partial import success", async () => {
+    openFileDialogMock.mockResolvedValue("/config.json");
+    importConfigMock.mockResolvedValue({
+      success: true,
+      backupId: "backup-warn",
+      warning: "post-import sync skipped",
+    });
+
+    const { result } = renderHook(() => useImportExport());
+
+    await act(async () => {
+      await result.current.selectImportFile();
+    });
+
+    await act(async () => {
+      await result.current.importConfig();
+    });
+
+    expect(result.current.status).toBe("partial-success");
+    expect(toastWarningMock).toHaveBeenCalledWith("post-import sync skipped");
+    expect(toastSuccessMock).not.toHaveBeenCalled();
+  });
+
   it("should show error message and keep selected file when import result fails", async () => {
     openFileDialogMock.mockResolvedValue("/config.json");
     importConfigMock.mockResolvedValue({

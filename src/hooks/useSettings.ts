@@ -47,6 +47,8 @@ export interface UseSettingsResult {
   ) => Promise<SaveResult | null>;
   resetSettings: () => void;
   acknowledgeRestart: () => void;
+  getLatestSettings: () => SettingsFormState | null;
+  markSettingsClean: () => void;
 }
 
 export type { SettingsFormState, ResolvedDirectories };
@@ -78,6 +80,8 @@ export function useSettings(): UseSettingsResult {
     updateSettings,
     resetSettings: resetForm,
     syncLanguage,
+    getLatestSettings,
+    markSettingsClean,
   } = useSettingsForm();
 
   // 2️⃣ 目录管理
@@ -187,7 +191,8 @@ export function useSettings(): UseSettingsResult {
   // 保存基础配置 + 独立的系统 API 调用（开机自启）
   const autoSaveSettings = useCallback(
     async (updates: Partial<SettingsFormState>): Promise<SaveResult | null> => {
-      const mergedSettings = settings ? { ...settings, ...updates } : null;
+      const latest = getLatestSettings() ?? settings;
+      const mergedSettings = latest ? { ...latest, ...updates } : null;
       if (!mergedSettings) return null;
 
       try {
@@ -230,6 +235,7 @@ export function useSettings(): UseSettingsResult {
 
         // 保存到配置文件
         await saveMutation.mutateAsync(payload);
+        markSettingsClean();
 
         // 如果开机自启状态改变，调用系统 API
         if (
@@ -314,7 +320,16 @@ export function useSettings(): UseSettingsResult {
         throw error;
       }
     },
-    [data, queryClient, saveMutation, settings, syncClaudePluginIfChanged, t],
+    [
+      data,
+      getLatestSettings,
+      markSettingsClean,
+      queryClient,
+      saveMutation,
+      settings,
+      syncClaudePluginIfChanged,
+      t,
+    ],
   );
 
   // 完整保存设置（用于 Advanced 标签页的手动保存）
@@ -543,5 +558,7 @@ export function useSettings(): UseSettingsResult {
     autoSaveSettings,
     resetSettings,
     acknowledgeRestart,
+    getLatestSettings,
+    markSettingsClean,
   };
 }

@@ -66,6 +66,9 @@ fn should_run_auto_sync(settings: Option<&S3SyncSettings>) -> bool {
     let Some(sync) = settings else {
         return false;
     };
+    if crate::services::s3::custom_endpoint_is_insecure_http(&sync.endpoint) {
+        return false;
+    }
     sync.enabled && sync.auto_sync
 }
 
@@ -249,6 +252,18 @@ mod tests {
             ..S3SyncSettings::default()
         };
         assert!(should_run_auto_sync(Some(&enabled)));
+
+        let insecure_http = S3SyncSettings {
+            enabled: true,
+            auto_sync: true,
+            allow_insecure: true,
+            endpoint: "http://minio:9000".to_string(),
+            ..S3SyncSettings::default()
+        };
+        assert!(
+            !should_run_auto_sync(Some(&insecure_http)),
+            "cleartext http custom endpoints must never auto-sync"
+        );
     }
 
     #[test]

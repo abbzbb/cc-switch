@@ -2373,18 +2373,34 @@ impl SkillService {
             return Err(err);
         }
 
-        if dest.exists() || Self::is_symlink(dest) {
-            Self::remove_path(dest)?;
+        let bak = parent.join(format!(".{tmp_name}.bak-{}-{nonce}", std::process::id()));
+        let dest_existed = dest.exists() || Self::is_symlink(dest);
+        if dest_existed {
+            if bak.exists() || Self::is_symlink(&bak) {
+                Self::remove_path(&bak)?;
+            }
+            fs::rename(dest, &bak).with_context(|| {
+                let _ = Self::remove_path(&tmp);
+                format!("备份 Skill 目录失败: {}", dest.display())
+            })?;
         }
 
-        fs::rename(&tmp, dest).with_context(|| {
+        if let Err(err) = fs::rename(&tmp, dest) {
+            if dest_existed {
+                let _ = fs::rename(&bak, dest);
+            }
             let _ = Self::remove_path(&tmp);
-            format!(
-                "替换 Skill 目录失败: {} -> {}",
-                tmp.display(),
-                dest.display()
-            )
-        })?;
+            return Err(err).with_context(|| {
+                format!(
+                    "替换 Skill 目录失败: {} -> {}",
+                    tmp.display(),
+                    dest.display()
+                )
+            });
+        }
+        if dest_existed {
+            let _ = Self::remove_path(&bak);
+        }
 
         Ok(())
     }

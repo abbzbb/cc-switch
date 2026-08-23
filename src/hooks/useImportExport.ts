@@ -102,7 +102,10 @@ export function useImportExport(
       void onImportSuccess?.();
 
       const syncResult = await syncCurrentProvidersLiveSafe();
-      if (syncResult.ok) {
+      if (result.warning) {
+        setStatus("partial-success");
+        toast.warning(result.warning);
+      } else if (syncResult.ok) {
         setStatus("success");
         toast.success(
           t("settings.importSuccess", {

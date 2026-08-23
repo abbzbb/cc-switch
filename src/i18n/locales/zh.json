@@ -2716,6 +2716,11 @@
     "mcpImportSuccessDescription": "成功导入 {{count}} 个服务器",
     "mcpPartialSuccess": "部分导入成功",
     "mcpPartialSuccessDescription": "成功: {{success}}, 失败: {{failed}}",
+    "validation": {
+      "providerRequired": "导入供应商需要指定应用类型和名称",
+      "skillRepoRequired": "导入 Skill 需要指定仓库地址",
+      "promptContentRequired": "导入提示词需要提供内容"
+    },
     "skillImportSuccess": "Skill 仓库添加成功",
     "skillImportSuccessDescription": "已添加仓库: {{repo}}",
     "app": "应用类型",

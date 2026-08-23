@@ -9,6 +9,26 @@ describe("error utilities", () => {
     expect(extractErrorMessage("backend failed")).toBe("backend failed");
   });
 
+  it("extracts localized AppError objects", () => {
+    const err = {
+      key: "usage_script.request_failed",
+      message: "中文 (English)",
+      zh: "中文",
+      en: "English",
+    };
+    window.localStorage.setItem("language", "zh");
+    expect(extractErrorMessage(err)).toBe("中文");
+    window.localStorage.setItem("language", "en");
+    expect(extractErrorMessage(err)).toBe("English");
+    window.localStorage.removeItem("language");
+  });
+
+  it("extracts {message} objects without locale fields", () => {
+    expect(extractErrorMessage({ message: "plain object" })).toBe(
+      "plain object",
+    );
+  });
+
   it("maps a simultaneous models.json write to a concise error", () => {
     const t = vi.fn((key: string) => key);
 

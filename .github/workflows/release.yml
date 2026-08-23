@@ -24,7 +24,6 @@ jobs:
     environment: release
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-    continue-on-error: ${{ matrix.os == 'windows-11-arm' || matrix.os == 'macos-14' }}
     strategy:
       fail-fast: false
       matrix:
@@ -709,11 +708,32 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if find release-assets -name '*.sig' | grep -q .; then
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          else
+          shopt -s nullglob
+          sigs=(release-assets/*.sig)
+          if [ ${#sigs[@]} -eq 0 ]; then
+            echo "No updater signatures found — marking prerelease"
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          # A linux/windows .sig must not promote a full release when the
+          # macOS updater artifact is present without its darwin signature.
+          missing=0
+          if compgen -G 'release-assets/*macOS*' > /dev/null \
+            || compgen -G 'release-assets/*.tar.gz' > /dev/null; then
+            if ! compgen -G 'release-assets/*.tar.gz.sig' > /dev/null; then
+              echo "macOS artifacts exist but darwin updater .sig is missing"
+              missing=1
+            fi
+          fi
+
+          if [ "$missing" -ne 0 ]; then
+            echo "Required platform signature missing — marking prerelease"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "prerelease=false" >> "$GITHUB_OUTPUT"
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v3

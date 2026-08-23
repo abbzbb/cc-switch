@@ -291,7 +291,7 @@ fn handle_deeplink_url(
             if let Err(emit_err) = app.emit(
                 "deeplink-error",
                 serde_json::json!({
-                    "url": url_str,
+                    "url": url_for_log(url_str).to_string(),
                     "error": e.to_string()
                 }),
             ) {
@@ -1697,8 +1697,6 @@ pub fn run() {
             commands::copilot_get_auth_status,
             commands::copilot_logout,
             commands::copilot_is_authenticated,
-            commands::copilot_get_token,
-            commands::copilot_get_token_for_account,
             commands::copilot_get_models,
             commands::copilot_get_models_for_account,
             commands::copilot_get_usage,

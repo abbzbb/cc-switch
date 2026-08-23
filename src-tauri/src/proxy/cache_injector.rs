@@ -103,10 +103,9 @@ pub fn inject(body: &mut Value, config: &OptimizerConfig) {
     }
 
     log::info!(
-        "[OPT] cache: {}bp({},{},pre={existing})",
+        "[OPT] cache: {}bp({},ttl=ephemeral-default,pre=existing)",
         injected.len(),
         injected.join("+"),
-        "5m",
     );
 }
 
@@ -133,6 +132,9 @@ fn inject_message_breakpoint(message: &mut Value) -> bool {
 }
 
 fn make_cache_control() -> Value {
+    // Anthropic's default TTL for `{ "type": "ephemeral" }` is 5 minutes.
+    // OptimizerConfig has no ttl field, so do not log or comment as if 5m were
+    // a separately configured value.
     json!({"type": "ephemeral"})
 }
 

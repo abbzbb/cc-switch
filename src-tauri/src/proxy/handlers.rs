@@ -1091,16 +1091,23 @@ async fn handle_responses_for_app(
                     ctx.provider.id
                 );
                 let mut headers = HeaderMap::new();
-                headers.insert(
-                    header::CONTENT_TYPE,
-                    header::HeaderValue::from_static("text/event-stream"),
-                );
+                if is_stream {
+                    headers.insert(
+                        header::CONTENT_TYPE,
+                        header::HeaderValue::from_static("text/event-stream"),
+                    );
+                } else {
+                    headers.insert(
+                        header::CONTENT_TYPE,
+                        header::HeaderValue::from_static("application/json"),
+                    );
+                }
                 let response =
                     transform_codex_responses_continue::reasoning_only_to_incomplete_response(
                         StatusCode::OK,
                         headers,
                         Bytes::new(),
-                        true,
+                        is_stream,
                     );
                 return process_response(response, &ctx, &state, &CODEX_PARSER_CONFIG, None).await;
             }
@@ -1389,6 +1396,7 @@ async fn apply_xai_reasoning_continue(
                 );
                 transform_codex_responses_continue::prepare_reasoning_continue_request(
                     request_body,
+                    Some(&completed_response),
                 );
                 let provider = result.provider.clone();
                 let outbound = result.outbound_model.clone();
@@ -3198,27 +3206,19 @@ fn chat_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
         ));
     }
 
-    // tool_calls 终结化：全空壳（index 空洞或未收到任何字段）直接丢弃（避免幽灵
-    // tool_use）；缺 id/name 的按原始 index 回填合成值（对齐 streaming.rs 的
-    // tool_call_{idx}/unknown_tool）——空 id 会破坏 Claude 的 tool_use_id ↔
-    // tool_result 回程
+    // tool_calls 终结化：全空壳直接丢弃。缺 id 回填合成值（空 id 会破坏
+    // Claude 的 tool_use_id ↔ tool_result 回程）。空 name 不再合成
+    // `unknown_tool`——那会让 Claude Code 去调一个不存在的工具。
     let tool_calls: Vec<Value> = tool_calls
         .into_iter()
         .filter(|(_, tc)| {
-            tc["id"].as_str().is_some_and(|s| !s.is_empty())
-                || tc["function"]["name"]
-                    .as_str()
-                    .is_some_and(|s| !s.is_empty())
-                || tc["function"]["arguments"]
-                    .as_str()
-                    .is_some_and(|s| !s.is_empty())
+            tc["function"]["name"]
+                .as_str()
+                .is_some_and(|s| !s.trim().is_empty())
         })
         .map(|(index, mut tc)| {
             if tc["id"].as_str().is_none_or(str::is_empty) {
                 tc["id"] = json!(format!("tool_call_{index}"));
-            }
-            if tc["function"]["name"].as_str().is_none_or(str::is_empty) {
-                tc["function"]["name"] = json!("unknown_tool");
             }
             tc
         })
@@ -3329,6 +3329,53 @@ fn merge_tool_call_delta(
 // 使用量记录（保留用于 Claude 转换逻辑）
 // ============================================================================
 
+fn provider_redaction_secrets(
+    provider: &crate::provider::Provider,
+    app_type: &AppType,
+) -> Vec<String> {
+    let mut secrets = Vec::new();
+    let (_, api_key) = provider.resolve_usage_credentials(app_type);
+    if !api_key.is_empty() {
+        secrets.push(api_key);
+    }
+    collect_json_secret_strings(&provider.settings_config, &mut secrets);
+    secrets.sort();
+    secrets.dedup();
+    secrets
+}
+
+fn collect_json_secret_strings(value: &Value, out: &mut Vec<String>) {
+    const KEY_HINTS: &[&str] = &[
+        "key",
+        "token",
+        "secret",
+        "password",
+        "authorization",
+        "auth",
+    ];
+    match value {
+        Value::Object(map) => {
+            for (key, nested) in map {
+                let key_l = key.to_ascii_lowercase();
+                if KEY_HINTS.iter().any(|hint| key_l.contains(hint)) {
+                    if let Some(secret) = nested.as_str() {
+                        if !secret.is_empty() && secret.len() <= 8 * 1024 {
+                            out.push(secret.to_string());
+                        }
+                    }
+                }
+                collect_json_secret_strings(nested, out);
+            }
+        }
+        Value::Array(items) => {
+            for nested in items {
+                collect_json_secret_strings(nested, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn log_forward_error(
     state: &ProxyState,
     ctx: &RequestContext,
@@ -3339,7 +3386,8 @@ fn log_forward_error(
 
     let logger = UsageLogger::new(&state.db);
     let status_code = map_proxy_error_to_status(error);
-    let error_message = get_error_message(error);
+    let secrets = provider_redaction_secrets(&ctx.provider, &ctx.app_type);
+    let error_message = crate::redact_known_secrets_strict(&get_error_message(error), &secrets);
     let request_id = uuid::Uuid::new_v4().to_string();
 
     let outbound_model = ctx

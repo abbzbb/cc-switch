@@ -22,7 +22,7 @@ use serde_json::{json, Map, Value};
 use std::str::FromStr;
 use std::sync::Arc;
 use tauri::Emitter;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 /// 用于接管 Live 配置时的占位符（避免客户端提示缺少 key，同时不泄露真实 Token）
 const PROXY_TOKEN_PLACEHOLDER: &str = "PROXY_MANAGED";
@@ -400,6 +400,9 @@ pub struct ProxyService {
     /// AppHandle，用于传递给 ProxyServer 以支持故障转移时的 UI 更新
     app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
     switch_locks: SwitchLockManager,
+    /// Serializes `start()` so two apps enabling takeover cannot both bind
+    /// `listen_port=0` and then Drop the first listener.
+    start_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -449,6 +452,7 @@ impl ProxyService {
             server: Arc::new(RwLock::new(None)),
             app_handle: Arc::new(RwLock::new(None)),
             switch_locks: SwitchLockManager::new(),
+            start_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -963,6 +967,7 @@ impl ProxyService {
 
     /// 启动代理服务器
     pub async fn start(&self) -> Result<ProxyServerInfo, String> {
+        let _start_guard = self.start_lock.lock().await;
         // 1. 启动时自动设置 proxy_enabled = true
         let mut global_config = self
             .db
@@ -1227,6 +1232,7 @@ impl ProxyService {
                 if has_backup && live_matches_current_proxy {
                     self.refresh_active_target_from_current_provider(&app).await;
                     if matches!(&app, AppType::Codex) {
+                        drop(_guard);
                         let _ = self.refresh_codex_routing_catalog_if_takeover().await;
                     }
                     return Ok(());
@@ -1345,6 +1351,7 @@ impl ProxyService {
             }
 
             if matches!(&app, AppType::Codex) {
+                drop(_guard);
                 let _ = self.refresh_codex_routing_catalog_if_takeover().await;
             }
 
@@ -2706,8 +2713,11 @@ impl ProxyService {
         // Clearing the token prevents a stale local route from looking usable.
         let updated = crate::grok_config::update_api_key(config_toml, "")
             .map_err(|e| format!("清理 Grok Build 接管占位符失败: {e}"))?;
-        crate::config::write_text_file(&crate::grok_config::get_grok_config_path(), &updated)
-            .map_err(|e| format!("写入 Grok Build 配置失败: {e}"))
+        crate::config::write_text_file_private(
+            &crate::grok_config::get_grok_config_path(),
+            &updated,
+        )
+        .map_err(|e| format!("写入 Grok Build 配置失败: {e}"))
     }
 
     /// 检查是否处于 Live 接管模式
@@ -3010,7 +3020,32 @@ impl ProxyService {
         app_type: &str,
         provider_id: &str,
     ) -> Result<HotSwitchOutcome, String> {
+        self.hot_switch_provider_if_current(app_type, provider_id, None)
+            .await
+    }
+
+    pub async fn hot_switch_provider_if_current(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+        expected_current: Option<&str>,
+    ) -> Result<HotSwitchOutcome, String> {
         let _guard = self.switch_locks.lock_for_app(app_type).await;
+        if let Some(expected) = expected_current {
+            let app_type_enum =
+                AppType::from_str(app_type).map_err(|_| format!("无效的应用类型: {app_type}"))?;
+            let current = crate::settings::get_effective_current_provider(&self.db, &app_type_enum)
+                .map_err(|e| format!("读取当前供应商失败: {e}"))?;
+            if current.as_deref() != Some(expected) {
+                log::info!(
+                    "[Failover] skip promote to {provider_id}: current is {:?} (expected {expected})",
+                    current
+                );
+                return Ok(HotSwitchOutcome {
+                    logical_target_changed: false,
+                });
+            }
+        }
         self.hot_switch_provider_inner(app_type, provider_id).await
     }
 
@@ -3255,6 +3290,10 @@ impl ProxyService {
             server
                 .set_active_target(app_type_enum.as_str(), &provider.id, &provider.name)
                 .await;
+        }
+
+        if logical_target_changed {
+            self.official_pool.write().await.clear_affinity();
         }
 
         Ok(HotSwitchOutcome {
@@ -3959,10 +3998,8 @@ impl ProxyService {
                             .map_err(|e| format!("写入 Codex auth 失败: {e}"))
                     }
                 }
-                (None, Some(cfg)) => {
-                    crate::codex_config::write_codex_live_config_atomic(Some(cfg))
-                        .map_err(|e| format!("写入 Codex config 失败: {e}"))
-                }
+                (None, Some(cfg)) => crate::codex_config::write_codex_live_config_atomic(Some(cfg))
+                    .map_err(|e| format!("写入 Codex config 失败: {e}")),
                 (None, None) => Ok(()),
             }
         };
@@ -4082,31 +4119,50 @@ impl ProxyService {
 
         if require_restart {
             if let Some(server) = server_guard.take() {
-                server
-                    .stop()
-                    .await
-                    .map_err(|e| format!("重启前停止代理服务器失败: {e}"))?;
+                if let Err(e) = server.stop().await {
+                    log::warn!("重启前停止代理服务器失败: {e}");
+                }
             }
 
             let app_handle = self.app_handle.read().await.clone();
-            let new_server = ProxyServer::new_with_managed_auth(
-                new_config.clone(),
-                self.db.clone(),
-                app_handle,
-                Some(self.codex_oauth_manager.clone()),
-                Some(self.official_pool.clone()),
-                Some(self.kimi_oauth_manager.clone()),
-                Some(self.anthropic_oauth_manager.clone()),
-            );
-            let info = new_server
-                .start()
-                .await
-                .map_err(|e| format!("重启代理服务器失败: {e}"))?;
+            let spawn_server = |config: ProxyConfig| {
+                ProxyServer::new_with_managed_auth(
+                    config,
+                    self.db.clone(),
+                    app_handle.clone(),
+                    Some(self.codex_oauth_manager.clone()),
+                    Some(self.official_pool.clone()),
+                    Some(self.kimi_oauth_manager.clone()),
+                    Some(self.anthropic_oauth_manager.clone()),
+                )
+            };
+            let new_server = spawn_server(new_config.clone());
+            let info = match new_server.start().await {
+                Ok(info) => info,
+                Err(e) => {
+                    let fallback = spawn_server(previous.clone());
+                    match fallback.start().await {
+                        Ok(_) => {
+                            *server_guard = Some(fallback);
+                            return Err(format!("重启代理服务器失败，已回退旧监听: {e}"));
+                        }
+                        Err(fallback_err) => {
+                            return Err(format!(
+                                "重启代理服务器失败且无法回退旧监听: {e}; {fallback_err}"
+                            ));
+                        }
+                    }
+                }
+            };
             if let Err(e) = self
                 .persist_ephemeral_listen_port_if_needed(&new_config, info.port)
                 .await
             {
                 let _ = new_server.stop().await;
+                let fallback = spawn_server(previous.clone());
+                if fallback.start().await.is_ok() {
+                    *server_guard = Some(fallback);
+                }
                 return Err(e);
             }
 

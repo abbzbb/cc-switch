@@ -86,18 +86,6 @@ export function ProxyPanel({
   const handleTakeoverChange = async (appType: string, enabled: boolean) => {
     try {
       await setTakeoverForApp.mutateAsync({ appType, enabled });
-      toast.success(
-        enabled
-          ? t("proxy.takeover.enabled", {
-              app: appType,
-              defaultValue: `${appType} 接管已启用`,
-            })
-          : t("proxy.takeover.disabled", {
-              app: appType,
-              defaultValue: `${appType} 接管已关闭`,
-            }),
-        { closeButton: true },
-      );
     } catch (error) {
       const detail =
         extractErrorMessage(error) ||
@@ -118,12 +106,6 @@ export function ProxyPanel({
         ...globalConfig,
         enableLogging: enabled,
       });
-      toast.success(
-        enabled
-          ? t("proxy.logging.enabled", { defaultValue: "日志记录已启用" })
-          : t("proxy.logging.disabled", { defaultValue: "日志记录已关闭" }),
-        { closeButton: true },
-      );
     } catch (error) {
       toast.error(
         t("proxy.logging.failed", { defaultValue: "切换日志状态失败" }),
@@ -196,10 +178,6 @@ export function ProxyPanel({
         listenAddress: normalizedAddress,
         listenPort: port,
       });
-      toast.success(
-        t("proxy.settings.configSaved", { defaultValue: "代理配置已保存" }),
-        { closeButton: true },
-      );
     } catch (error) {
       toast.error(
         t("proxy.settings.configSaveFailed", { defaultValue: "保存配置失败" }),

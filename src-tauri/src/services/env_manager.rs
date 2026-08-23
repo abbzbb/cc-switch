@@ -193,6 +193,11 @@ fn delete_single_env(conflict: &EnvConflict) -> Result<(), String> {
 
                 hklm.delete_value(&conflict.var_name)
                     .map_err(|e| format!("删除系统注册表项失败: {}", e))?;
+            } else {
+                return Err(format!(
+                    "无法识别的 Windows 环境变量来源: {}",
+                    conflict.source_path
+                ));
             }
             Ok(())
         }

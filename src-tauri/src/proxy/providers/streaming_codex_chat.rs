@@ -575,7 +575,7 @@ impl ChatToResponsesState {
             response["incomplete_details"] = json!({ "reason": "max_output_tokens" });
         }
 
-        events.push(sse::response_completed(&response));
+        events.push(sse::response_terminal(status, &response));
         self.completed = true;
         events
     }
@@ -1186,8 +1186,9 @@ mod tests {
         ])
         .await;
 
-        assert!(output.contains("event: response.completed"));
+        assert!(output.contains("event: response.incomplete"));
         assert!(output.contains("\"status\":\"incomplete\""));
+        assert!(!output.contains("event: response.completed"));
         assert!(!output.contains("event: response.failed"));
     }
 

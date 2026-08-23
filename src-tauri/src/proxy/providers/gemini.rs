@@ -309,7 +309,12 @@ pub(crate) async fn ensure_gemini_oauth_access_token(
             "Gemini OAuth access_token is empty and refresh failed".to_string(),
         ));
     };
-    auth.access_token = Some(token);
+    auth.access_token = Some(token.clone());
+    if let Err(error) = crate::services::subscription::persist_gemini_oauth_access_token(&token) {
+        log::warn!(
+            "[Gemini] refreshed access token but failed to persist oauth_creds.json: {error}"
+        );
+    }
     Ok(())
 }
 

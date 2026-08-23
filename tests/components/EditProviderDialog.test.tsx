@@ -254,6 +254,49 @@ describe("EditProviderDialog", () => {
     ).toEqual(provider.settingsConfig);
   });
 
+  it("代理接管中编辑 Claude Desktop 当前供应商时不读取 live BASE_URL", async () => {
+    const provider: Provider = {
+      id: "desktop-custom",
+      name: "Desktop Custom",
+      category: "custom",
+      settingsConfig: {
+        env: {
+          ANTHROPIC_BASE_URL: "https://api.example.com",
+          ANTHROPIC_AUTH_TOKEN: "db-key",
+        },
+      },
+    };
+
+    apiMocks.getCurrent.mockResolvedValue(provider.id);
+    apiMocks.getLiveProviderSettings.mockResolvedValue({
+      env: {
+        ANTHROPIC_BASE_URL: "http://127.0.0.1:15721",
+        ANTHROPIC_AUTH_TOKEN: "PROXY_MANAGED",
+      },
+    });
+
+    render(
+      <EditProviderDialog
+        open
+        provider={provider}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+        appId="claude-desktop"
+        isProxyTakeover
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("is-proxy-takeover").textContent).toBe("true");
+    });
+
+    expect(apiMocks.getLiveProviderSettings).not.toHaveBeenCalled();
+    expect(apiMocks.getCurrent).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(screen.getByTestId("settings-config").textContent ?? "{}"),
+    ).toEqual(provider.settingsConfig);
+  });
+
   it("clears the nested auth panel before the dialog reopens", async () => {
     const provider: Provider = {
       id: "official",

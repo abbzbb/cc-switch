@@ -1,3 +1,31 @@
+const readPreferredLanguage = (): string => {
+  if (typeof window === "undefined") {
+    return "zh";
+  }
+  try {
+    return (window.localStorage.getItem("language") || "zh").toLowerCase();
+  } catch {
+    return "zh";
+  }
+};
+
+const pickLocalizedMessage = (errObject: Record<string, unknown>): string => {
+  const zh = typeof errObject.zh === "string" ? errObject.zh.trim() : "";
+  const en = typeof errObject.en === "string" ? errObject.en.trim() : "";
+  const message =
+    typeof errObject.message === "string" ? errObject.message.trim() : "";
+  const key = typeof errObject.key === "string" ? errObject.key.trim() : "";
+  if (!zh && !en && !key) {
+    return "";
+  }
+  const lang = readPreferredLanguage();
+  if (lang.startsWith("zh") && zh) return zh;
+  if (lang.startsWith("en") && en) return en;
+  if (zh) return zh;
+  if (en) return en;
+  return message;
+};
+
 /**
  * 从各种错误对象中提取错误信息
  * @param error 错误对象
@@ -15,6 +43,11 @@ export const extractErrorMessage = (error: unknown): string => {
   if (typeof error === "object") {
     const errObject = error as Record<string, unknown>;
 
+    const localized = pickLocalizedMessage(errObject);
+    if (localized) {
+      return localized;
+    }
+
     const candidate = errObject.message ?? errObject.error ?? errObject.detail;
     if (typeof candidate === "string" && candidate.trim()) {
       return candidate;
@@ -26,6 +59,10 @@ export const extractErrorMessage = (error: unknown): string => {
     }
     if (payload && typeof payload === "object") {
       const payloadObj = payload as Record<string, unknown>;
+      const localizedPayload = pickLocalizedMessage(payloadObj);
+      if (localizedPayload) {
+        return localizedPayload;
+      }
       const payloadCandidate =
         payloadObj.message ?? payloadObj.error ?? payloadObj.detail;
       if (typeof payloadCandidate === "string" && payloadCandidate.trim()) {

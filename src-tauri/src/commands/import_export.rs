@@ -6,7 +6,8 @@ use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::commands::sync_support::{
-    post_sync_warning_from_result, run_post_import_sync, success_payload_with_warning,
+    attach_warning, post_sync_warning_from_result, run_post_import_sync,
+    success_payload_with_warning,
 };
 use crate::database::backup::BackupEntry;
 use crate::database::Database;
@@ -171,7 +172,7 @@ pub fn list_db_backups() -> Result<Vec<BackupEntry>, String> {
 pub async fn restore_db_backup(
     state: State<'_, AppState>,
     filename: String,
-) -> Result<String, String> {
+) -> Result<Value, String> {
     let app_state_for_sync = state.inner().clone();
     let db = app_state_for_sync.db.clone();
     run_with_database_restore_lock(move || {
@@ -182,12 +183,17 @@ pub async fn restore_db_backup(
             };
             let warning =
                 post_sync_warning_from_result(Ok(run_post_import_sync(&app_state_for_sync)));
-            if let Some(message) = warning {
-                // This legacy command returns only the restored filename, so keep
-                // restore success and surface incomplete projection in the log.
+            if let Some(message) = warning.as_ref() {
                 log::warn!("[Restore] post-import sync warning: {message}");
             }
-            Ok::<_, AppError>(restored)
+            Ok::<_, AppError>(attach_warning(
+                json!({
+                    "success": true,
+                    "message": "Database restored",
+                    "filename": restored
+                }),
+                warning,
+            ))
         })
     })
     .await

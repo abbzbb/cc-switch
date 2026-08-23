@@ -45,6 +45,21 @@ impl FailoverSwitchManager {
         provider_id: &str,
         provider_name: &str,
     ) -> Result<bool, AppError> {
+        self.try_switch_if_current(app_handle, app_type, provider_id, provider_name, None)
+            .await
+    }
+
+    /// Promote `provider_id` only if the app's current provider is still
+    /// `expected_current`. A user switch that landed after the failing request
+    /// started must win over failover promotion.
+    pub async fn try_switch_if_current(
+        &self,
+        app_handle: Option<&tauri::AppHandle>,
+        app_type: &str,
+        provider_id: &str,
+        provider_name: &str,
+        expected_current: Option<&str>,
+    ) -> Result<bool, AppError> {
         let switch_key = format!("{app_type}:{provider_id}");
 
         // 去重检查：如果相同切换已在进行中，跳过
@@ -59,7 +74,13 @@ impl FailoverSwitchManager {
 
         // 执行切换（确保最后清理 pending 标记）
         let result = self
-            .do_switch(app_handle, app_type, provider_id, provider_name)
+            .do_switch(
+                app_handle,
+                app_type,
+                provider_id,
+                provider_name,
+                expected_current,
+            )
             .await;
 
         // 清理 pending 标记
@@ -77,6 +98,7 @@ impl FailoverSwitchManager {
         app_type: &str,
         provider_id: &str,
         provider_name: &str,
+        expected_current: Option<&str>,
     ) -> Result<bool, AppError> {
         // 检查该应用是否已被代理接管（enabled=true）
         // 只有被接管的应用才允许执行故障转移切换
@@ -98,32 +120,34 @@ impl FailoverSwitchManager {
         let mut switched = false;
 
         if let Some(app) = app_handle {
-            if let Some(app_state) = app.try_state::<crate::store::AppState>() {
-                switched = app_state
-                    .proxy_service
-                    .hot_switch_provider(app_type, provider_id)
-                    .await
-                    .map_err(AppError::Message)?
-                    .logical_target_changed;
+            let Some(app_state) = app.try_state::<crate::store::AppState>() else {
+                log::warn!("[Failover] AppState 不可用，跳过切换");
+                return Ok(false);
+            };
 
-                if !switched {
-                    return Ok(false);
-                }
+            switched = app_state
+                .proxy_service
+                .hot_switch_provider_if_current(app_type, provider_id, expected_current)
+                .await
+                .map_err(AppError::Message)?
+                .logical_target_changed;
 
-                if let Ok(new_menu) = crate::tray::create_tray_menu(app, app_state.inner()) {
-                    if let Some(tray) = app.tray_by_id(crate::tray::TRAY_ID) {
-                        if let Err(e) = tray.set_menu(Some(new_menu)) {
-                            log::error!("[Failover] 更新托盘菜单失败: {e}");
-                        }
+            if !switched {
+                return Ok(false);
+            }
+
+            if let Ok(new_menu) = crate::tray::create_tray_menu(app, app_state.inner()) {
+                if let Some(tray) = app.tray_by_id(crate::tray::TRAY_ID) {
+                    if let Err(e) = tray.set_menu(Some(new_menu)) {
+                        log::error!("[Failover] 更新托盘菜单失败: {e}");
                     }
                 }
             }
 
-            // 发射事件到前端
             let event_data = serde_json::json!({
                 "appType": app_type,
                 "providerId": provider_id,
-                "source": "failover"  // 标识来源是故障转移
+                "source": "failover"
             });
             if let Err(e) = app.emit("provider-switched", event_data) {
                 log::error!("[Failover] 发射事件失败: {e}");

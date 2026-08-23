@@ -1,8 +1,9 @@
 use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
-use crate::config::{get_home_dir, write_text_file};
+use crate::config::{get_home_dir, write_text_file_private};
 use crate::error::AppError;
 use crate::provider::Provider;
 
@@ -396,6 +397,18 @@ pub fn write_grok_provider_live(provider: &Provider) -> Result<(), AppError> {
 ///
 /// 代理接管的备份/恢复也走这里：官方态 live（无自定义模型表）必须可以
 /// 原样写回。完整形状校验由 `write_grok_provider_live` 的非官方分支负责。
+fn live_grok_toml_lock() -> &'static Mutex<()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    &LOCK
+}
+
+pub(crate) fn with_live_grok_toml_lock<T>(update: impl FnOnce() -> T) -> T {
+    let _guard = live_grok_toml_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    update()
+}
+
 pub fn write_grok_live_settings(settings: &Value) -> Result<(), AppError> {
     let config = settings
         .get("config")
@@ -408,7 +421,7 @@ pub fn write_grok_live_settings(settings: &Value) -> Result<(), AppError> {
             )
         })?;
     validate_config_toml_syntax(config)?;
-    write_text_file(&get_grok_config_path(), config)
+    with_live_grok_toml_lock(|| write_text_file_private(&get_grok_config_path(), config))
 }
 
 #[cfg(test)]

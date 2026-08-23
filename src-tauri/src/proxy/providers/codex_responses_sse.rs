@@ -53,12 +53,31 @@ pub(crate) fn response_completed(response: &Value) -> Bytes {
     )
 }
 
+/// `response.incomplete` — truncated / budget-exhausted turns. Codex ends the
+/// agent loop on `response.completed` even when `response.status` is
+/// `"incomplete"`, so converters must emit this event name instead.
+pub(crate) fn response_incomplete(response: &Value) -> Bytes {
+    sse_event(
+        "response.incomplete",
+        json!({ "type": "response.incomplete", "response": response }),
+    )
+}
+
 /// `response.failed`.
 pub(crate) fn response_failed(response: &Value) -> Bytes {
     sse_event(
         "response.failed",
         json!({ "type": "response.failed", "response": response }),
     )
+}
+
+/// Pick the terminal Responses SSE event that matches `status`.
+pub(crate) fn response_terminal(status: &str, response: &Value) -> Bytes {
+    match status {
+        "incomplete" => response_incomplete(response),
+        "failed" => response_failed(response),
+        _ => response_completed(response),
+    }
 }
 
 // ---------------------------------------------------------------------------

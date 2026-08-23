@@ -9,6 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::HashMap;
 
 use crate::config;
+use crate::error::AppError;
+use serde_json::json;
 
 // ── 数据类型 ──────────────────────────────────────────────
 
@@ -1006,11 +1008,33 @@ pub(crate) async fn refresh_gemini_token(refresh_token: &str) -> Option<String> 
         .ok()?;
 
     if !resp.status().is_success() {
+        log::warn!("[Gemini] OAuth refresh HTTP {}", resp.status());
         return None;
     }
 
-    let body: serde_json::Value = resp.json().await.ok()?;
+    let body: serde_json::Value = match resp.json().await {
+        Ok(body) => body,
+        Err(error) => {
+            log::warn!("[Gemini] OAuth refresh JSON parse failed: {error}");
+            return None;
+        }
+    };
     body.get("access_token")?.as_str().map(String::from)
+}
+
+pub(crate) fn persist_gemini_oauth_access_token(access_token: &str) -> Result<(), AppError> {
+    let cred_path = crate::gemini_config::get_gemini_dir().join("oauth_creds.json");
+    let mut value = if cred_path.exists() {
+        crate::config::read_json_file::<serde_json::Value>(&cred_path).unwrap_or_else(|_| json!({}))
+    } else {
+        json!({})
+    };
+    if !value.is_object() {
+        value = json!({});
+    }
+    value["access_token"] = json!(access_token);
+    value["expiry_date"] = json!(chrono::Utc::now().timestamp_millis() + 3_500_000);
+    crate::config::write_json_file_private(&cred_path, &value)
 }
 
 // ── Gemini API 查询 ──────────────────────────────────────

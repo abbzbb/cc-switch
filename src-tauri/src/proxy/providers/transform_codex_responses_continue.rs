@@ -64,7 +64,9 @@ pub(crate) fn same_card_followup(
 
 /// Short progress-only assistant text stays in the empty-hop bucket.
 /// Longer text is treated as a real answer even if it starts with "let me".
-const PROGRESS_ONLY_MAX_CHARS: usize = 180;
+/// Keep this at a status-sentence length so "I'll look at parse.rs and fix it"
+/// is not swallowed as an empty hop.
+const PROGRESS_ONLY_MAX_CHARS: usize = 80;
 
 const CONTINUE_NUDGE: &str = "Your previous response did not finish the turn: it was empty, cut off, reasoning-only, or only a short progress note, with no tool call and no user-facing answer. Continue the same turn: call a tool or write the answer. Do not stop after a status sentence.";
 
@@ -242,6 +244,10 @@ fn collapse_ws(text: &str) -> String {
 }
 
 fn looks_like_progress_phrase(s: &str) -> bool {
+    if has_answer_signal(s) {
+        return false;
+    }
+
     const ZH: &[&str] = &[
         "我先看",
         "我先检查",
@@ -272,7 +278,8 @@ fn looks_like_progress_phrase(s: &str) -> bool {
         "我打开",
         "我打開",
     ];
-    if ZH.iter().any(|needle| s.contains(needle)) {
+    // Prefix only — substring match turned "我打开了 README，结论是…" into an empty hop.
+    if ZH.iter().any(|needle| s.starts_with(needle)) {
         return true;
     }
 
@@ -301,6 +308,22 @@ fn looks_like_progress_phrase(s: &str) -> bool {
         "peek", "view",
     ];
     VERBS.iter().any(|verb| s.contains(verb))
+}
+
+fn has_answer_signal(s: &str) -> bool {
+    const SIGNALS: &[&str] = &[
+        "结论",
+        "結論",
+        "because",
+        " and fix",
+        " then fix",
+        ".rs",
+        ".ts",
+        ".tsx",
+        "readme",
+        "路由",
+    ];
+    SIGNALS.iter().any(|signal| s.contains(signal))
 }
 
 /// Hold the inspect buffer until a terminal event, a tool call, or the text is
@@ -382,7 +405,17 @@ fn items_have_reasoning_item(item: &Value) -> bool {
 
 fn sse_event_is_productive(event: &str, value: &Value) -> bool {
     match event {
-        "response.output_text.delta" => false,
+        "response.output_text.delta" => {
+            value
+                .get("delta")
+                .and_then(Value::as_str)
+                .is_some_and(|delta| {
+                    let trimmed = delta.trim();
+                    !trimmed.is_empty()
+                        && !is_progress_only_text(trimmed)
+                        && has_answer_signal(trimmed)
+                })
+        }
         "response.function_call_arguments.delta"
         | "response.custom_tool_call_input.delta"
         | "response.mcp_call_arguments.delta" => true,
@@ -471,9 +504,61 @@ pub(crate) fn raise_continue_max_output_tokens(body: &mut Value) -> u64 {
     next
 }
 
-pub(crate) fn prepare_reasoning_continue_request(body: &mut Value) {
+pub(crate) fn prepare_reasoning_continue_request(body: &mut Value, previous: Option<&Value>) {
+    if let Some(previous) = previous {
+        append_previous_hop_output(body, previous);
+    }
     append_continue_nudge(body);
     raise_continue_max_output_tokens(body);
+}
+
+fn append_previous_hop_output(body: &mut Value, previous: &Value) -> bool {
+    let output = previous
+        .get("output")
+        .or_else(|| {
+            previous
+                .get("response")
+                .and_then(|response| response.get("output"))
+        })
+        .and_then(Value::as_array);
+    let Some(output) = output else {
+        return false;
+    };
+    if output.is_empty() {
+        return false;
+    }
+    let extras: Vec<Value> = output.iter().cloned().map(output_item_as_input).collect();
+    match body.get_mut("input") {
+        Some(Value::Array(items)) => {
+            items.extend(extras);
+            true
+        }
+        Some(Value::String(text)) => {
+            let previous_text = text.clone();
+            let mut items = vec![json!({
+                "role": "user",
+                "content": [{ "type": "input_text", "text": previous_text }]
+            })];
+            items.extend(extras);
+            body["input"] = Value::Array(items);
+            true
+        }
+        None => {
+            body["input"] = Value::Array(extras);
+            true
+        }
+        Some(_) => false,
+    }
+}
+
+fn output_item_as_input(mut item: Value) -> Value {
+    if let Some(object) = item.as_object_mut() {
+        if object.get("type").and_then(Value::as_str) == Some("message") {
+            object.entry("role").or_insert_with(|| json!("assistant"));
+            object.remove("status");
+        }
+    }
+    item
 }
 
 pub(crate) fn mark_response_incomplete(response: &mut Value) {
@@ -709,7 +794,30 @@ pub(crate) async fn inspect_native_responses_turn_timed(
                 Ok(Some(chunk)) => chunk,
                 Ok(None) => break,
                 Err(_) => {
-                    let leftover = leftover_snapshot(&parse_buffer, &utf8_remainder, last_event);
+                    let leftover =
+                        leftover_snapshot(&parse_buffer, &utf8_remainder, last_event.clone());
+                    if items_have_reasoning(&seen_items)
+                        || last_event
+                            .as_deref()
+                            .is_some_and(|event| event.contains("reasoning"))
+                    {
+                        log::warn!(
+                            "[Codex] Grok Responses inspect idle timeout {}s with reasoning already in-flight (event={:?}); treating as empty hop instead of stream-broken",
+                            idle.as_secs(),
+                            leftover.0
+                        );
+                        let completed = stub_response(last_response, &seen_items);
+                        let reason =
+                            empty_hop_reason(&completed, &seen_items, &accumulated_text, true);
+                        return InspectedTurn::ReasoningOnly {
+                            status,
+                            headers,
+                            body: raw.freeze(),
+                            completed_response: completed,
+                            is_sse: saw_sse || declared_sse,
+                            reason,
+                        };
+                    }
                     log::warn!(
                         "[Codex] Grok Responses inspect idle timeout {}s (event={:?} leftover={} bytes)",
                         idle.as_secs(),
@@ -1364,6 +1472,10 @@ mod tests {
         assert!(!is_progress_only_text("Let me be clear: ship the fix."));
         assert!(!is_progress_only_text("I am seeing a race in the parser."));
         assert!(!is_progress_only_text("Please look at src/main.rs:40."));
+        assert!(!is_progress_only_text("我打开了 README，结论是应改路由。"));
+        assert!(!is_progress_only_text(
+            "I'll look at the race in parse.rs and fix it."
+        ));
         assert_eq!(
             classify_output_items(&[assistant_message(
                 "I'll start by inspecting the screenshot you shared."
@@ -1429,7 +1541,7 @@ mod tests {
             "input": [{"role": "user", "content": [{"type": "input_text", "text": "read the ppt"}]}],
             "max_output_tokens": 16384
         });
-        prepare_reasoning_continue_request(&mut body);
+        prepare_reasoning_continue_request(&mut body, None);
         let input = body["input"].as_array().unwrap();
         assert_eq!(input.len(), 2);
         assert_eq!(input[1]["role"], "developer");
@@ -1441,6 +1553,27 @@ mod tests {
             same_card_followup(SameCardKind::EmptyHop, 0, 1),
             SameCardFollowup::ContinueEmpty
         );
+    }
+
+    #[test]
+    fn continue_appends_previous_hop_output_before_nudge() {
+        let mut body = json!({
+            "model": "grok-4.6",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "max_output_tokens": 16384
+        });
+        let previous = json!({
+            "output": [
+                {"type": "reasoning", "id": "rs_1", "summary": []},
+                {"type": "message", "id": "msg_1", "content": [{"type": "output_text", "text": "looking"}]}
+            ]
+        });
+        prepare_reasoning_continue_request(&mut body, Some(&previous));
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[2]["role"], "assistant");
+        assert_eq!(input[3]["role"], "developer");
     }
 
     #[tokio::test]

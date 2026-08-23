@@ -119,7 +119,22 @@ impl serde::Serialize for AppError {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&self.to_string())
+        use serde::ser::SerializeMap;
+        match self {
+            AppError::Localized { key, zh, en } => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("key", key)?;
+                map.serialize_entry("message", &self.to_string())?;
+                map.serialize_entry("zh", zh)?;
+                map.serialize_entry("en", en)?;
+                map.end()
+            }
+            _ => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("message", &self.to_string())?;
+                map.end()
+            }
+        }
     }
 }
 
@@ -146,4 +161,35 @@ pub fn format_skill_error(
         // 如果 JSON 序列化失败，返回简单格式
         format!("ERROR:{code}")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serializes_localized_as_object_with_key() {
+        let err = AppError::localized("usage_script.request_failed", "中文", "English");
+        let value = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(value["key"], "usage_script.request_failed");
+        assert_eq!(value["zh"], "中文");
+        assert_eq!(value["en"], "English");
+        assert_eq!(value["message"], "中文 (English)");
+    }
+
+    #[test]
+    fn serializes_plain_error_as_message_object() {
+        let err = AppError::Config("oops".to_string());
+        let value = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(value["message"], "配置错误: oops");
+        assert!(value.get("key").is_none());
+        assert!(value.get("zh").is_none());
+    }
+
+    #[test]
+    fn into_string_keeps_display_text() {
+        let err = AppError::localized("k", "中文", "English");
+        let text: String = err.into();
+        assert_eq!(text, "中文 (English)");
+    }
 }

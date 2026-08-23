@@ -134,7 +134,7 @@ impl Database {
             fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
         }
 
-        crate::config::atomic_write(target_path, dump.as_bytes())
+        crate::config::atomic_write_private(target_path, dump.as_bytes())
     }
 
     /// 从 SQL 文件导入，返回生成的备份 ID（若无备份则为空字符串）
@@ -1463,6 +1463,16 @@ mod tests {
 
         let backup_path = test_home.path().join("round-trip.sql");
         source.export_sql(&backup_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&backup_path)
+                .expect("sql dump metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "SQL dump must be written 0600");
+        }
 
         let target = Database::memory()?;
         {

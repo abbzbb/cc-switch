@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -40,6 +40,32 @@ import type {
   S3SyncSettings,
   WebDavSyncSettings,
 } from "@/types";
+
+const invalidateSettingsQueries = (queryClient: QueryClient) =>
+  queryClient.invalidateQueries({ queryKey: ["settings"] });
+
+const invalidateAfterRemoteConfigDownload = (queryClient: QueryClient) =>
+  Promise.all([
+    queryClient.invalidateQueries({ queryKey: ["settings"] }),
+    queryClient.invalidateQueries({ queryKey: ["providers"] }),
+    queryClient.invalidateQueries({ queryKey: ["mcp"] }),
+    queryClient.invalidateQueries({ queryKey: ["skills"] }),
+    queryClient.invalidateQueries({ queryKey: ["profiles"] }),
+    queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+    queryClient.invalidateQueries({ queryKey: ["sessionMessages"] }),
+    queryClient.invalidateQueries({ queryKey: ["proxyStatus"] }),
+    queryClient.invalidateQueries({ queryKey: ["proxyTakeoverStatus"] }),
+    queryClient.invalidateQueries({ queryKey: ["modelCombos"] }),
+    queryClient.invalidateQueries({ queryKey: ["sidecarSettings"] }),
+    queryClient.invalidateQueries({ queryKey: ["globalProxyUrl"] }),
+    queryClient.invalidateQueries({ queryKey: ["usage"] }),
+    queryClient.invalidateQueries({ queryKey: ["pi"] }),
+    queryClient.invalidateQueries({ queryKey: ["openclaw"] }),
+    queryClient.invalidateQueries({ queryKey: ["hermes"] }),
+    queryClient.invalidateQueries({ queryKey: ["opencodeLiveProviderIds"] }),
+    queryClient.invalidateQueries({ queryKey: ["omo"] }),
+    queryClient.invalidateQueries({ queryKey: ["omo-slim"] }),
+  ]);
 
 // ─── WebDAV service presets ─────────────────────────────────
 
@@ -514,7 +540,7 @@ export function WebdavSyncSection({
         setJustSaved(false);
         justSavedTimerRef.current = null;
       }, 2000);
-      await queryClient.invalidateQueries();
+      await invalidateSettingsQueries(queryClient);
     } catch (error) {
       pendingPasswordPreservationRef.current = null;
       toast.error(
@@ -577,7 +603,7 @@ export function WebdavSyncSection({
     try {
       await settingsApi.webdavSyncUpload();
       toast.success(t("settings.webdavSync.uploadSuccess"));
-      await queryClient.invalidateQueries();
+      await invalidateSettingsQueries(queryClient);
     } catch (error) {
       toast.error(
         t("settings.webdavSync.uploadFailed", {
@@ -637,7 +663,7 @@ export function WebdavSyncSection({
     try {
       await settingsApi.webdavSyncDownload();
       toast.success(t("settings.webdavSync.downloadSuccess"));
-      await queryClient.invalidateQueries();
+      await invalidateAfterRemoteConfigDownload(queryClient);
     } catch (error) {
       toast.error(
         t("settings.webdavSync.downloadFailed", {
@@ -733,7 +759,7 @@ export function WebdavSyncSection({
         setS3JustSaved(false);
         s3JustSavedTimerRef.current = null;
       }, 2000);
-      await queryClient.invalidateQueries();
+      await invalidateSettingsQueries(queryClient);
     } catch (error) {
       toast.error(
         t("settings.s3Sync.saveFailed", {
@@ -793,7 +819,7 @@ export function WebdavSyncSection({
     try {
       await settingsApi.s3SyncUpload();
       toast.success(t("settings.s3Sync.uploadSuccess"));
-      await queryClient.invalidateQueries();
+      await invalidateSettingsQueries(queryClient);
     } catch (error) {
       toast.error(
         t("settings.s3Sync.uploadFailed", {
@@ -848,7 +874,7 @@ export function WebdavSyncSection({
     try {
       await settingsApi.s3SyncDownload();
       toast.success(t("settings.s3Sync.downloadSuccess"));
-      await queryClient.invalidateQueries();
+      await invalidateAfterRemoteConfigDownload(queryClient);
     } catch (error) {
       toast.error(
         t("settings.s3Sync.downloadFailed", {
@@ -906,7 +932,7 @@ export function WebdavSyncSection({
         setS3Enabled(false);
         setS3AutoSync(false);
       }
-      await queryClient.invalidateQueries();
+      await invalidateSettingsQueries(queryClient);
       setSyncType(pendingSyncType);
     } catch (error) {
       toast.error(

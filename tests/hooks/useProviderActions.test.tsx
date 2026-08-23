@@ -633,6 +633,64 @@ describe("useProviderActions", () => {
     expect(toastSuccessMock).toHaveBeenCalledTimes(1);
   });
 
+  it("merges usage_script onto the latest cached provider before saving", async () => {
+    providersApiUpdateMock.mockResolvedValueOnce(true);
+    const { wrapper, queryClient } = createWrapper();
+    const openedProvider = createProvider({
+      name: "Stale Name",
+      websiteUrl: "https://stale.example",
+      meta: {
+        usage_script: {
+          enabled: false,
+          language: "javascript",
+          code: "",
+        },
+      },
+    });
+    const latestProvider = createProvider({
+      name: "Fresh Name",
+      websiteUrl: "https://fresh.example",
+      meta: {
+        isPartner: true,
+        usage_script: {
+          enabled: false,
+          language: "javascript",
+          code: "old",
+        },
+      },
+    });
+    queryClient.setQueryData(["providers", "claude"], {
+      providers: { [latestProvider.id]: latestProvider },
+      currentProviderId: latestProvider.id,
+    });
+
+    const script: UsageScript = {
+      enabled: true,
+      language: "javascript",
+      code: "return { success: true };",
+      timeout: 5,
+    };
+
+    const { result } = renderHook(() => useProviderActions("claude"), {
+      wrapper,
+    });
+
+    await act(async () => {
+      await result.current.saveUsageScript(openedProvider, script);
+    });
+
+    expect(providersApiUpdateMock).toHaveBeenCalledWith(
+      {
+        ...latestProvider,
+        meta: {
+          ...latestProvider.meta,
+          usage_script: script,
+        },
+      },
+      "claude",
+    );
+  });
+
   it("should show error toast when saveUsageScript fails with error message", async () => {
     providersApiUpdateMock.mockRejectedValueOnce(new Error("Save failed"));
     const { wrapper } = createWrapper();

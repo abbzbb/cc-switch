@@ -66,6 +66,9 @@ fn should_run_auto_sync(settings: Option<&WebDavSyncSettings>) -> bool {
     let Some(sync) = settings else {
         return false;
     };
+    if crate::services::webdav::url_is_insecure_http(&sync.base_url) {
+        return false;
+    }
     sync.enabled && sync.auto_sync
 }
 
@@ -253,6 +256,18 @@ mod tests {
             ..WebDavSyncSettings::default()
         };
         assert!(should_run_auto_sync(Some(&enabled)));
+
+        let insecure_http = WebDavSyncSettings {
+            enabled: true,
+            auto_sync: true,
+            allow_insecure: true,
+            base_url: "http://nas.local/dav".to_string(),
+            ..WebDavSyncSettings::default()
+        };
+        assert!(
+            !should_run_auto_sync(Some(&insecure_http)),
+            "cleartext http must never auto-sync"
+        );
     }
 
     #[test]

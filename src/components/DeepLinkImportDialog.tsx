@@ -38,6 +38,9 @@ export function DeepLinkImportDialog() {
   const [request, setRequest] = useState<DeepLinkImportRequest | null>(null);
   const [isImporting, setIsImporting] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
+  const [mcpFailures, setMcpFailures] = useState<
+    Array<{ id: string; error: string }>
+  >([]);
 
   // 容错判断：MCP 导入结果可能缺少 type 字段
   const isMcpImportResult = (
@@ -82,6 +85,7 @@ export function DeepLinkImportDialog() {
           setRequest(event.payload);
         }
 
+        setMcpFailures([]);
         setIsOpen(true);
       },
     );
@@ -100,13 +104,47 @@ export function DeepLinkImportDialog() {
     };
   }, [t]);
 
+  const validateRequest = (current: DeepLinkImportRequest): string | null => {
+    const resource = current.resource || "provider";
+    if (resource === "provider") {
+      if (!current.app || !current.name?.trim()) {
+        return t("deeplink.validation.providerRequired", {
+          defaultValue: "导入供应商需要指定应用类型和名称",
+        });
+      }
+    } else if (resource === "skill") {
+      if (!current.repo?.trim()) {
+        return t("deeplink.validation.skillRepoRequired", {
+          defaultValue: "导入 Skill 需要指定仓库地址",
+        });
+      }
+    } else if (resource === "prompt") {
+      if (!current.content?.trim()) {
+        return t("deeplink.validation.promptContentRequired", {
+          defaultValue: "导入提示词需要提供内容",
+        });
+      }
+    }
+    return null;
+  };
+
   const handleImport = async () => {
     if (!request) return;
 
+    const validationError = validateRequest(request);
+    if (validationError) {
+      toast.error(t("deeplink.importError"), {
+        description: validationError,
+      });
+      return;
+    }
+
     setIsImporting(true);
+    setMcpFailures([]);
 
     try {
       const result = await deeplinkApi.importFromDeeplink(request);
+      let keepDialogOpen = false;
       const refreshMcp = async (summary: {
         importedCount: number;
         importedIds: string[];
@@ -123,6 +161,8 @@ export function DeepLinkImportDialog() {
         });
 
         if (summary.failed.length > 0) {
+          keepDialogOpen = true;
+          setMcpFailures(summary.failed);
           toast.warning(t("deeplink.mcpPartialSuccess"), {
             description: t("deeplink.mcpPartialSuccessDescription", {
               success: summary.importedCount,
@@ -130,6 +170,7 @@ export function DeepLinkImportDialog() {
             }),
           });
         } else {
+          setMcpFailures([]);
           toast.success(t("deeplink.mcpImportSuccess"), {
             description: t("deeplink.mcpImportSuccessDescription", {
               count: summary.importedCount,
@@ -199,8 +240,9 @@ export function DeepLinkImportDialog() {
         });
       }
 
-      // Close dialog after all refreshes complete
-      setIsOpen(false);
+      if (!keepDialogOpen) {
+        setIsOpen(false);
+      }
     } catch (error) {
       console.error("Failed to import from deep link:", error);
       toast.error(t("deeplink.importError"), {
@@ -212,6 +254,7 @@ export function DeepLinkImportDialog() {
   };
 
   const handleCancel = () => {
+    setMcpFailures([]);
     setIsOpen(false);
   };
 
@@ -756,6 +799,21 @@ export function DeepLinkImportDialog() {
                     {t("deeplink.warning")}
                   </div>
                 </>
+              )}
+              {mcpFailures.length > 0 && (
+                <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm space-y-2">
+                  <div className="font-medium text-destructive">
+                    {t("deeplink.mcpPartialSuccess")}
+                  </div>
+                  <ul className="list-disc pl-5 space-y-1 text-destructive">
+                    {mcpFailures.map((failure) => (
+                      <li key={failure.id} className="break-all">
+                        <span className="font-mono">{failure.id}</span>
+                        {failure.error ? `: ${failure.error}` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               )}
             </div>
 

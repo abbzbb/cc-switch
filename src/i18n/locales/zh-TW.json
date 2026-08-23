@@ -2717,6 +2717,11 @@
     "mcpImportSuccessDescription": "成功匯入 {{count}} 個伺服器",
     "mcpPartialSuccess": "部分匯入成功",
     "mcpPartialSuccessDescription": "成功：{{success}}，失敗：{{failed}}",
+    "validation": {
+      "providerRequired": "匯入供應商需要指定應用類型和名稱",
+      "skillRepoRequired": "匯入 Skill 需要指定倉庫位址",
+      "promptContentRequired": "匯入提示詞需要提供內容"
+    },
     "skillImportSuccess": "Skill 儲存庫新增成功",
     "skillImportSuccessDescription": "已新增儲存庫：{{repo}}",
     "app": "應用程式類型",

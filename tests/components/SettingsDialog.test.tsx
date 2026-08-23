@@ -49,6 +49,8 @@ interface SettingsMock {
   autoSaveSettings: ReturnType<typeof vi.fn>;
   resetSettings: ReturnType<typeof vi.fn>;
   acknowledgeRestart: ReturnType<typeof vi.fn>;
+  getLatestSettings: () => any;
+  markSettingsClean: ReturnType<typeof vi.fn>;
 }
 
 const createSettingsMock = (overrides: Partial<SettingsMock> = {}) => {
@@ -81,9 +83,15 @@ const createSettingsMock = (overrides: Partial<SettingsMock> = {}) => {
     autoSaveSettings: vi.fn().mockResolvedValue({ requiresRestart: false }),
     resetSettings: vi.fn(),
     acknowledgeRestart: vi.fn(),
+    getLatestSettings: () => null,
+    markSettingsClean: vi.fn(),
   };
 
-  return { ...base, ...overrides };
+  const mock = { ...base, ...overrides };
+  if (!overrides.getLatestSettings) {
+    mock.getLatestSettings = () => mock.settings;
+  }
+  return mock;
 };
 
 interface ImportExportMock {

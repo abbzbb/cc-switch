@@ -175,13 +175,20 @@ async fn upload_snapshot(
         }
     };
 
-    let _persisted = persist_sync_success_best_effort(
+    let persisted = persist_sync_success_best_effort(
         settings,
         snapshot.manifest_hash,
         etag,
         persist_sync_success,
     );
-    Ok(serde_json::json!({ "status": "uploaded" }))
+    if persisted {
+        Ok(serde_json::json!({ "status": "uploaded" }))
+    } else {
+        Ok(serde_json::json!({
+            "status": "uploaded",
+            "warning": "remote upload succeeded but local sync cursor was not saved"
+        }))
+    }
 }
 
 /// Download remote snapshot and apply to local database + skills.

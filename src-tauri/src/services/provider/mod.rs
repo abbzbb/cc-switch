@@ -4841,12 +4841,12 @@ impl ProviderService {
         // For other apps: Check if sync is needed (if this is current provider, or no current provider)
         let current = state.db.get_current_provider(app_type.as_str())?;
         if current.is_none() {
-            // No current provider, set as current and sync. Managed Codex adds
-            // use the transactional path above because token resolution can fail.
+            // No current provider: write live first so a failed projection cannot
+            // leave DB pointing at a supplier the disk file does not contain.
+            write_live_with_common_config_for_state(state, &app_type, &provider)?;
             state
                 .db
                 .set_current_provider(app_type.as_str(), &provider.id)?;
-            write_live_with_common_config_for_state(state, &app_type, &provider)?;
         }
 
         Ok(true)
@@ -4992,9 +4992,7 @@ impl ProviderService {
                     let (config_path, previous_bytes) =
                         Self::snapshot_omo_variant_config_file(variant)?;
                     let (plugin_path, previous_plugin) = Self::snapshot_omo_plugin_file()?;
-                    crate::services::OmoService::write_provider_config_to_file(
-                        &provider, variant,
-                    )?;
+                    crate::services::OmoService::write_provider_config_to_file(&provider, variant)?;
                     (
                         Some(config_path),
                         previous_bytes,
@@ -5194,10 +5192,6 @@ impl ProviderService {
 
         drop(codex_update_switch_guard);
 
-        // Save to database
-        state.db.save_provider(app_type.as_str(), &provider)?;
-        Self::drop_codex_discovery_and_rewrite(state, &app_type, &provider.id);
-
         if is_current {
             // 如果 Claude 代理接管处于激活状态，并且代理服务正在运行：
             // - 不直接走普通 Live 写入逻辑
@@ -5265,6 +5259,9 @@ impl ProviderService {
                 }
             }
         }
+
+        state.db.save_provider(app_type.as_str(), &provider)?;
+        Self::drop_codex_discovery_and_rewrite(state, &app_type, &provider.id);
 
         Ok(true)
     }
@@ -5467,6 +5464,13 @@ impl ProviderService {
         } else {
             None
         };
+
+        // Re-read after the lock so a concurrent update cannot make us write a
+        // stale API key into live.
+        let providers = state.db.get_all_providers(app_type.as_str())?;
+        let _provider = providers
+            .get(id)
+            .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
 
         // Backup or live placeholders mean the live file is owned by proxy
         // takeover, even if the proxy server is temporarily stopped or is in the
@@ -5834,6 +5838,7 @@ impl ProviderService {
         // （MCP 投影可自愈：下次切换 / 任一 MCP 启停都会重新投影）。
         if let Err(err) = McpService::sync_enabled_for_app(state, &app_type) {
             log::warn!("切换供应商后重投影 {app_type:?} MCP 失败（将在下次同步时自愈）: {err}");
+            result.warnings.push(format!("mcp_projection_failed:{err}"));
         }
 
         Ok(result)

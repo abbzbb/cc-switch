@@ -1294,7 +1294,7 @@ impl LiveSnapshot {
             LiveSnapshot::Grok { config } => {
                 let path = crate::grok_config::get_grok_config_path();
                 if let Some(text) = config {
-                    crate::config::write_text_file(&path, text)?;
+                    crate::config::write_text_file_private(&path, text)?;
                 } else if path.exists() {
                     delete_file(&path)?;
                 }
@@ -1485,6 +1485,7 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
 fn sync_all_providers_to_live(state: &AppState, app_type: &AppType) -> Result<(), AppError> {
     let providers = state.db.get_all_providers(app_type.as_str())?;
     let mut synced_count = 0usize;
+    let mut failures: Vec<String> = Vec::new();
 
     for provider in providers.values() {
         if provider
@@ -1502,12 +1503,20 @@ fn sync_all_providers_to_live(state: &AppState, app_type: &AppType) -> Result<()
                 app_type,
                 provider.id
             );
+            failures.push(format!("{}: {e}", provider.id));
             continue;
         }
         synced_count += 1;
     }
 
     log::info!("Synced {synced_count} {app_type:?} providers to live config");
+    if !failures.is_empty() {
+        return Err(AppError::Message(format!(
+            "Failed to sync {} {app_type:?} provider(s) to live: {}",
+            failures.len(),
+            failures.join("; ")
+        )));
+    }
     Ok(())
 }
 

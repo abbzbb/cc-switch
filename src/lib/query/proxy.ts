@@ -7,6 +7,7 @@ import type {
   AppProxyConfig,
   ProxyTakeoverStatus,
 } from "@/types/proxy";
+import { getAppLabel } from "@/config/appConfig";
 
 export const proxyKeys = {
   status: ["proxyStatus"] as const,
@@ -26,8 +27,9 @@ export function useProxyStatusQuery() {
   return useQuery({
     queryKey: proxyKeys.status,
     queryFn: () => proxyApi.getProxyStatus(),
-    // 仅在服务运行时轮询
-    refetchInterval: (query) => (query.state.data?.running ? 2000 : false),
+    // Running: 2s. Stopped: 5s so tray-started transitions are observed
+    // without requiring window focus (refetchOnWindowFocus is not enough).
+    refetchInterval: (query) => (query.state.data?.running ? 2000 : 5000),
     // 保持之前的数据，避免闪烁
     placeholderData: (previousData) => previousData,
   });
@@ -40,13 +42,11 @@ export function useProxyTakeoverStatus(poll = true) {
   return useQuery({
     queryKey: proxyKeys.takeoverStatus,
     queryFn: () => proxyApi.getProxyTakeoverStatus(),
-    refetchInterval: poll ? 2000 : false,
-    ...(poll
-      ? {}
-      : {
-          placeholderData: (previousData: ProxyTakeoverStatus | undefined) =>
-            previousData,
-        }),
+    // Fast poll in the proxy panel; modest poll elsewhere so a tray
+    // takeover change is visible even if the event listener is late.
+    refetchInterval: poll ? 2000 : 5000,
+    placeholderData: (previousData: ProxyTakeoverStatus | undefined) =>
+      previousData,
   });
 }
 
@@ -57,12 +57,27 @@ export function useProxyTakeoverStatus(poll = true) {
  */
 export function useSetProxyTakeoverForApp() {
   const queryClient = useQueryClient();
+  const { t } = useTranslation();
 
   return useMutation({
     mutationFn: ({ appType, enabled }: { appType: string; enabled: boolean }) =>
       proxyApi.setProxyTakeoverForApp(appType, enabled),
-    onSuccess: () => {
+    onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: proxyKeys.takeoverStatus });
+      queryClient.invalidateQueries({ queryKey: proxyKeys.status });
+      const appLabel = getAppLabel(variables.appType);
+      toast.success(
+        variables.enabled
+          ? t("proxy.takeover.enabled", {
+              app: appLabel,
+              defaultValue: `已接管 ${appLabel} 配置（请求将走本地代理）`,
+            })
+          : t("proxy.takeover.disabled", {
+              app: appLabel,
+              defaultValue: `已恢复 ${appLabel} 配置`,
+            }),
+        { closeButton: true },
+      );
     },
   });
 }

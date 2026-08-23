@@ -47,7 +47,66 @@ use crate::config::get_app_config_dir;
 use crate::error::AppError;
 use rusqlite::{hooks::Action, Connection};
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+fn sqlite_related_paths(db_path: &Path) -> [PathBuf; 3] {
+    let mut wal = std::ffi::OsString::from(db_path.as_os_str());
+    wal.push("-wal");
+    let mut shm = std::ffi::OsString::from(db_path.as_os_str());
+    shm.push("-shm");
+    [
+        db_path.to_path_buf(),
+        PathBuf::from(wal),
+        PathBuf::from(shm),
+    ]
+}
+
+/// Create a brand-new SQLite file with 0600 so the first `Connection::open`
+/// does not leave a world-readable window under a loose umask.
+fn create_private_sqlite_file_if_needed(db_path: &Path, db_exists: bool) -> Result<(), AppError> {
+    if db_exists {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(db_path)
+        {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(AppError::io(db_path, e)),
+        }
+    }
+    Ok(())
+}
+
+/// Restrict the SQLite main file and WAL/SHM sidecars to 0600 on Unix.
+/// Windows ACL tightening is skipped: there is no existing helper, and a
+/// best-effort homemade DACL would be easy to get wrong.
+fn restrict_sqlite_file_permissions(db_path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in sqlite_related_paths(db_path) {
+            if !path.exists() {
+                continue;
+            }
+            if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            {
+                log::warn!("Failed to set 0600 permissions on {}: {e}", path.display());
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = db_path;
+    }
+}
 
 // DAO 方法通过 impl Database 提供，无需额外导出
 
@@ -106,7 +165,9 @@ impl Database {
             std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
         }
 
+        create_private_sqlite_file_if_needed(&db_path, db_exists)?;
         let conn = Connection::open(&db_path).map_err(|e| AppError::Database(e.to_string()))?;
+        restrict_sqlite_file_permissions(&db_path);
 
         // 启用外键约束
         conn.execute("PRAGMA foreign_keys = ON;", [])
@@ -162,6 +223,9 @@ impl Database {
                 log::warn!("Startup incremental vacuum failed: {e}");
             }
         }
+
+        // WAL/SHM may appear after the first write; re-apply 0600.
+        restrict_sqlite_file_permissions(&db_path);
 
         Ok(db)
     }

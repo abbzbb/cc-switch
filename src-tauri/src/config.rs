@@ -361,9 +361,6 @@ fn atomic_write_with_unix_mode(
     data: &[u8],
     unix_mode: Option<u32>,
 ) -> Result<(), AppError> {
-    #[cfg(not(unix))]
-    let _ = unix_mode;
-
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
     }
@@ -413,6 +410,13 @@ fn atomic_write_with_unix_mode(
         drop(file);
         let _ = fs::remove_file(&tmp);
         return Err(AppError::io(&tmp, source));
+    }
+    if unix_mode.is_some() {
+        if let Err(source) = file.sync_all() {
+            drop(file);
+            let _ = fs::remove_file(&tmp);
+            return Err(AppError::io(&tmp, source));
+        }
     }
     drop(file);
 

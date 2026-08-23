@@ -326,4 +326,46 @@ describe("useSettingsForm Hook", () => {
     });
     expect(result.current.settings?.language).toBe("en");
   });
+
+  it("stops treating the form as dirty after markSettingsClean", async () => {
+    const baseData = {
+      showInTray: true,
+      minimizeToTrayOnClose: true,
+      enableClaudePluginIntegration: false,
+      claudeConfigDir: "/origin",
+      language: "zh" as const,
+    };
+    useSettingsQueryMock.mockReturnValue({
+      data: baseData,
+      isLoading: false,
+    });
+
+    const { result, rerender } = renderHook(() => useSettingsForm());
+
+    await waitFor(() => {
+      expect(result.current.settings).not.toBeNull();
+    });
+
+    act(() => {
+      result.current.updateSettings({ claudeConfigDir: "/edited" });
+    });
+    act(() => {
+      result.current.markSettingsClean();
+    });
+
+    useSettingsQueryMock.mockReturnValue({
+      data: {
+        ...baseData,
+        claudeConfigDir: "/saved",
+        language: "en",
+      },
+      isLoading: false,
+    });
+    rerender();
+
+    await waitFor(() => {
+      expect(result.current.settings?.claudeConfigDir).toBe("/saved");
+    });
+    expect(result.current.settings?.language).toBe("en");
+  });
 });

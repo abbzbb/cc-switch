@@ -333,6 +333,7 @@ impl ProfileService {
         scope: ProfileScope,
     ) -> Result<(Vec<String>, bool), AppError> {
         let mut warnings = Vec::new();
+        let mut provider_switch_failed = false;
 
         // 自动保存旧项目当前状态（仅当前分组），失败不阻塞切换
         if let Some(current_id) = state.db.get_current_profile_id(scope.as_str())? {
@@ -383,9 +384,12 @@ impl ProfileService {
                     if current.as_deref() != Some(target_pid.as_str()) {
                         match ProviderService::switch(state, app.clone(), target_pid) {
                             Ok(result) => warnings.extend(result.warnings),
-                            Err(e) => warnings.push(format!(
-                                "[{app_str}] switch provider '{target_pid}' failed: {e}"
-                            )),
+                            Err(e) => {
+                                provider_switch_failed = true;
+                                warnings.push(format!(
+                                    "[{app_str}] switch provider '{target_pid}' failed: {e}"
+                                ));
+                            }
                         }
                     }
                 }
@@ -454,9 +458,15 @@ impl ProfileService {
             }
         }
 
-        state
-            .db
-            .set_current_profile_id(scope.as_str(), Some(profile_id))?;
+        if provider_switch_failed {
+            warnings.push(format!(
+                "provider switch failed; not marking profile '{profile_id}' as current"
+            ));
+        } else {
+            state
+                .db
+                .set_current_profile_id(scope.as_str(), Some(profile_id))?;
+        }
 
         // 当前分组内所有接管已关闭；若其它应用也无接管，可停止代理服务。
         let should_stop_proxy = !state.db.is_live_takeover_active_sync();

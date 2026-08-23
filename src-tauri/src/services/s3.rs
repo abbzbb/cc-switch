@@ -47,6 +47,11 @@ fn is_aws_endpoint(endpoint: &str) -> bool {
 /// "minio:9000"                  → ("https", "minio:9000")
 /// "storage.example.com"         → ("https", "storage.example.com")
 /// ```
+/// True when a custom endpoint is explicitly `http://` (cleartext).
+pub(crate) fn custom_endpoint_is_insecure_http(endpoint: &str) -> bool {
+    endpoint.trim().to_ascii_lowercase().starts_with("http://")
+}
+
 fn split_scheme_host(endpoint: &str) -> (&str, &str) {
     if let Some(rest) = endpoint.strip_prefix("http://") {
         ("http", rest.trim_end_matches('/'))
@@ -811,6 +816,15 @@ mod tests {
     }
 
     // ── Endpoint detection ──
+
+    #[test]
+    fn custom_endpoint_is_insecure_http_detects_cleartext() {
+        assert!(custom_endpoint_is_insecure_http("http://minio:9000"));
+        assert!(custom_endpoint_is_insecure_http(" HTTP://minio:9000 "));
+        assert!(!custom_endpoint_is_insecure_http("https://minio:9000"));
+        assert!(!custom_endpoint_is_insecure_http("minio:9000"));
+        assert!(!custom_endpoint_is_insecure_http(""));
+    }
 
     #[test]
     fn is_aws_endpoint_detection() {

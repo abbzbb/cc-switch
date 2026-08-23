@@ -491,7 +491,7 @@ impl AnthropicToResponsesState {
             response["incomplete_details"] = json!({ "reason": reason });
         }
 
-        events.push(sse::response_completed(&response));
+        events.push(sse::response_terminal(status, &response));
         self.completed = true;
         events
     }
@@ -940,7 +940,8 @@ mod tests {
         );
         let merged = run(input).await;
         assert!(merged.contains("\"delta\":\"partial\""));
-        assert!(merged.contains("event: response.completed"));
+        assert!(merged.contains("event: response.incomplete"));
+        assert!(!merged.contains("event: response.completed"));
         // The top-level response is incomplete (message output items keep their own
         // "completed" status, but the response status must not be "completed").
         assert!(merged.contains("\"status\":\"incomplete\""));

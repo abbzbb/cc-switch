@@ -208,8 +208,45 @@ pub fn remove_gemini_env_entries(doomed: &HashMap<String, String>) -> Result<boo
 }
 
 /// 写入 Gemini .env 文件（原子操作）
+///
+/// 对已有文件做定向 upsert：已知键就地替换，未知行（注释、用户变量、无法解析
+/// 的行）原样保留。空文件或缺失文件仍走稳定排序的全新序列化。
 pub fn write_gemini_env_atomic(map: &HashMap<String, String>) -> Result<(), AppError> {
-    write_gemini_env_text_atomic(&serialize_env_file(map))
+    let path = get_gemini_env_path();
+    let content = if path.exists() {
+        let existing = fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))?;
+        upsert_env_entries_preserving_layout(&existing, map)
+    } else {
+        serialize_env_file(map)
+    };
+    write_gemini_env_text_atomic(&content)
+}
+
+fn upsert_env_entries_preserving_layout(
+    existing: &str,
+    updates: &HashMap<String, String>,
+) -> String {
+    let mut remaining = updates.clone();
+    let mut lines: Vec<String> = Vec::new();
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with('#') {
+            if let Some((key, _)) = trimmed.split_once('=') {
+                let key = key.trim();
+                if let Some(value) = remaining.remove(key) {
+                    lines.push(format!("{key}={value}"));
+                    continue;
+                }
+            }
+        }
+        lines.push(line.to_string());
+    }
+    let mut extra: Vec<_> = remaining.into_iter().collect();
+    extra.sort_by(|left, right| left.0.cmp(&right.0));
+    for (key, value) in extra {
+        lines.push(format!("{key}={value}"));
+    }
+    lines.join("\n")
 }
 
 /// 写入 Gemini .env 文件（原子操作，内容逐字落盘）
@@ -616,6 +653,20 @@ GEMINI_API_KEY=sk-test123";
         let err_msg = format!("{err:?}");
         assert!(err_msg.contains("第 2 行") || err_msg.contains("line 2"));
         assert!(err_msg.contains("INVALID KEY WITH SPACES"));
+    }
+
+    #[test]
+    fn upsert_env_keeps_comments_and_unknown_keys() {
+        let existing = "# keep me\nUSER_CUSTOM=hello\nGEMINI_API_KEY=old\n";
+        let mut updates = HashMap::new();
+        updates.insert("GEMINI_API_KEY".to_string(), "new".to_string());
+        updates.insert("GOOGLE_CLOUD_PROJECT".to_string(), "proj".to_string());
+        let next = upsert_env_entries_preserving_layout(existing, &updates);
+        assert!(next.contains("# keep me"));
+        assert!(next.contains("USER_CUSTOM=hello"));
+        assert!(next.contains("GEMINI_API_KEY=new"));
+        assert!(next.contains("GOOGLE_CLOUD_PROJECT=proj"));
+        assert!(!next.contains("GEMINI_API_KEY=old"));
     }
 
     #[test]

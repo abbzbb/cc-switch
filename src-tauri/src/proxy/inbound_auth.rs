@@ -64,6 +64,10 @@ pub fn is_public_health_path(path: &str) -> bool {
     matches!(path, "/health" | "/healthz")
 }
 
+pub fn is_status_path(path: &str) -> bool {
+    path == "/status"
+}
+
 pub fn is_loopback_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback(),
@@ -77,10 +81,17 @@ pub fn is_loopback_peer(peer: SocketAddr) -> bool {
     is_loopback_ip(peer.ip())
 }
 
-/// `/health` is always public. Loopback peers keep the historical no-token
-/// CLI behavior. Any other peer must present the inbound capability token.
+/// `/health` is always public. `/status` always requires the inbound
+/// capability token. Other paths keep the historical no-token CLI behavior
+/// for loopback peers; any other peer must present the token.
 pub fn inbound_peer_exempt(path: &str, peer: Option<SocketAddr>) -> bool {
-    is_public_health_path(path) || peer.is_some_and(is_loopback_peer)
+    if is_public_health_path(path) {
+        return true;
+    }
+    if is_status_path(path) {
+        return false;
+    }
+    peer.is_some_and(is_loopback_peer)
 }
 
 pub fn inbound_request_allowed(
@@ -347,6 +358,16 @@ mod tests {
         ));
 
         let loopback: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        assert!(
+            !inbound_request_allowed("/status", Some(loopback), &headers, &tokens),
+            "/status requires the inbound token even on loopback"
+        );
+        assert!(inbound_request_allowed(
+            "/status",
+            Some(loopback),
+            &with_header,
+            &tokens
+        ));
         assert!(inbound_request_allowed(
             "/v1/messages",
             Some(loopback),
