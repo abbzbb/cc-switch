@@ -383,8 +383,9 @@ fn atomic_write_with_unix_mode(
         for _ in 0..16 {
             let counter = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let candidate = parent.join(format!(
-                "{file_name}.tmp.{}.{ts}.{counter}",
-                std::process::id()
+                "{file_name}.tmp.{}.{ts}.{counter}.{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
             ));
             let mut options = fs::OpenOptions::new();
             options.write(true).create_new(true);
@@ -411,7 +412,52 @@ fn atomic_write_with_unix_mode(
         // Windows creates a new file with inherited ACLs. Restrict the empty
         // temporary file before writing the first credential byte so shared or
         // WSL-backed parent directories never expose a readable secret window.
-        if let Err(source) = restrict_path_private(&tmp) {
+        if wsl_private_path_target(&tmp).is_ok() {
+            // The WSL server does not expose a newly created UNC entry to Linux
+            // until the creating Windows handle closes. The file is still empty.
+            drop(file);
+            if let Err(source) = restrict_path_private(&tmp) {
+                let _ = fs::remove_file(&tmp);
+                return Err(AppError::io(&tmp, source));
+            }
+
+            use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+                FILE_SHARE_WRITE,
+            };
+            let mut options = fs::OpenOptions::new();
+            options
+                .write(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+            file = match options.open(&tmp) {
+                Ok(file) => file,
+                Err(source) => {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(AppError::io(&tmp, source));
+                }
+            };
+            let metadata = match file.metadata() {
+                Ok(metadata) => metadata,
+                Err(source) => {
+                    drop(file);
+                    let _ = fs::remove_file(&tmp);
+                    return Err(AppError::io(&tmp, source));
+                }
+            };
+            if !metadata.is_file()
+                || metadata.len() != 0
+                || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            {
+                drop(file);
+                let _ = fs::remove_file(&tmp);
+                return Err(AppError::Config(format!(
+                    "WSL private temporary path is not an empty regular file: {}",
+                    tmp.display()
+                )));
+            }
+        } else if let Err(source) = restrict_path_private(&tmp) {
             drop(file);
             let _ = fs::remove_file(&tmp);
             return Err(AppError::io(&tmp, source));
@@ -643,19 +689,34 @@ fn restrict_path_private_windows(path: &Path) -> std::io::Result<()> {
 fn restrict_wsl_path_private(path: &Path) -> std::io::Result<()> {
     let (distro, linux_path) = wsl_private_path_target(path)?;
 
-    let status = std::process::Command::new("wsl.exe")
-        .arg("-d")
-        .arg(&distro)
-        .args(["--", "chmod", "600", "--"])
-        .arg(&linux_path)
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(std::io::Error::other(format!(
-            "WSL chmod failed for {linux_path} with status {status}"
-        )))
+    let mut last_failure = None;
+    for attempt in 0..5 {
+        let output = std::process::Command::new("wsl.exe")
+            .arg("-d")
+            .arg(&distro)
+            .args(["--", "chmod", "600", "--"])
+            .arg(&linux_path)
+            .output()?;
+        if output.status.success() {
+            return Ok(());
+        }
+        last_failure = Some(format!(
+            "status {}; stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+        if attempt < 4 {
+            // A file created through the Windows UNC provider can become visible
+            // to the Linux side a few milliseconds later. The private temp file
+            // is still empty here; no credential bytes are written until chmod
+            // succeeds.
+            std::thread::sleep(std::time::Duration::from_millis(50 * (attempt + 1)));
+        }
     }
+    Err(std::io::Error::other(format!(
+        "WSL chmod failed for {linux_path}: {}",
+        last_failure.unwrap_or_else(|| "unknown failure".to_string())
+    )))
 }
 
 #[cfg(windows)]
