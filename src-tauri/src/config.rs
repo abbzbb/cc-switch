@@ -566,7 +566,7 @@ fn create_wsl_private_temp(path: &Path) -> std::io::Result<fs::File> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
     const ALREADY_EXISTS_EXIT_CODE: i32 = 73;
-    const CREATE_SCRIPT: &str = "IFS= read -r encoded || exit 74
+    const CREATE_SCRIPT: &str = "IFS= read -r encoded || [ -n \"$encoded\" ] || exit 74
 case $((${#encoded} % 4)) in 0) ;; 2) encoded=$encoded== ;; 3) encoded=$encoded= ;; *) exit 74 ;; esac
 path=$(printf '%s' \"$encoded\" | tr '_-' '/+' | base64 -d) || exit 74
 [ -n \"$path\" ] || exit 74
@@ -574,7 +574,7 @@ if [ -e \"$path\" ] || [ -L \"$path\" ]; then exit 73; fi
 umask 077
 set -C
 : > \"$path\"";
-    const REMOVE_SCRIPT: &str = "IFS= read -r encoded || exit 74
+    const REMOVE_SCRIPT: &str = "IFS= read -r encoded || [ -n \"$encoded\" ] || exit 74
 case $((${#encoded} % 4)) in 0) ;; 2) encoded=$encoded== ;; 3) encoded=$encoded= ;; *) exit 74 ;; esac
 path=$(printf '%s' \"$encoded\" | tr '_-' '/+' | base64 -d) || exit 74
 [ -n \"$path\" ] || exit 74
@@ -624,9 +624,7 @@ fn run_wsl_path_script(
         .stderr(Stdio::piped())
         .spawn()?;
     let write_result = match child.stdin.take() {
-        Some(mut stdin) => stdin
-            .write_all(encoded_path.as_bytes())
-            .and_then(|_| stdin.write_all(b"\n")),
+        Some(mut stdin) => stdin.write_all(encoded_path.as_bytes()),
         None => Err(std::io::Error::other("WSL child stdin was not piped")),
     };
     if let Err(source) = write_result {
