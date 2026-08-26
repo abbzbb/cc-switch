@@ -1177,9 +1177,14 @@ async fn handle_responses_for_app(
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let mut response = result.response;
-    if had_tool_search
-        && super::providers::provider_needs_responses_namespace_flatten(&ctx.provider)
-    {
+    let strict_xai_responses = super::providers::needs_strict_xai_responses_compat(
+        &ctx.provider,
+        ctx.outbound_model
+            .as_deref()
+            .filter(|model| !model.is_empty())
+            .or(Some(ctx.request_model.as_str())),
+    );
+    if had_tool_search && strict_xai_responses {
         response = inject_dropped_tool_search(response);
     }
 
@@ -1188,9 +1193,7 @@ async fn handle_responses_for_app(
     // function tools, so the upstream returns flat function-call names. Restore
     // them to `{name, namespace}` so the Codex client matches them against its
     // namespaced tool registry.
-    if super::providers::provider_needs_responses_namespace_flatten(&ctx.provider)
-        && !namespace_restore_map.is_empty()
-    {
+    if strict_xai_responses && !namespace_restore_map.is_empty() {
         return handle_codex_responses_namespace_restore(
             response,
             &ctx,
@@ -1826,8 +1829,13 @@ async fn handle_responses_compact_for_app(
         .await;
     }
 
-    if super::providers::provider_needs_responses_namespace_flatten(&ctx.provider)
-        && !namespace_restore_map.is_empty()
+    if super::providers::needs_strict_xai_responses_compat(
+        &ctx.provider,
+        ctx.outbound_model
+            .as_deref()
+            .filter(|model| !model.is_empty())
+            .or(Some(ctx.request_model.as_str())),
+    ) && !namespace_restore_map.is_empty()
     {
         return handle_codex_responses_namespace_restore(
             response,

@@ -1826,10 +1826,14 @@ impl RequestForwarder {
         // above already unwrap namespaces, so this only fires on the native
         // passthrough. The response handler restores the flat names using a map
         // re-derived from the same request tools.
+        let strict_xai_responses = super::providers::needs_strict_xai_responses_compat(
+            provider,
+            request_body.get("model").and_then(Value::as_str),
+        );
         if matches!(app_type, AppType::Codex | AppType::GrokBuild)
             && !codex_responses_to_chat
             && !codex_responses_to_anthropic
-            && super::providers::provider_needs_responses_namespace_flatten(provider)
+            && strict_xai_responses
             && super::providers::transform_codex_responses_namespace::flatten_request_namespaces(
                 &mut request_body,
             )?
@@ -1843,14 +1847,14 @@ impl RequestForwarder {
         // Same native-Responses path: scrub the OpenAI-backend-private fields
         // and tool carriers (`external_web_access`, `prompt_cache_retention`,
         // `additional_tools`, `tool_search`, …) that xAI's strict serde parser
-        // rejects with 400/422. Deterministic field removals only, gated on the
-        // xAI OAuth path, so the prompt-cache prefix stays stable and no other
-        // provider is affected. Runs after the flatten above so lifted
-        // `namespace` tools survive the tool-type whitelist.
+        // rejects with 400/422, and rewrite Grok-illegal function-tool
+        // parameter roots. Deterministic, gated on xAI-style hosts or Grok
+        // model slugs. Runs after the flatten above so lifted `namespace`
+        // tools survive the tool-type whitelist.
         if matches!(app_type, AppType::Codex | AppType::GrokBuild)
             && !codex_responses_to_chat
             && !codex_responses_to_anthropic
-            && super::providers::provider_needs_responses_namespace_flatten(provider)
+            && strict_xai_responses
             && super::providers::transform_codex_responses_xai_sanitize::sanitize_xai_responses_request(
                 &mut request_body,
             )

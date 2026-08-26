@@ -354,12 +354,33 @@ pub fn should_convert_codex_responses_to_anthropic(provider: &Provider, endpoint
 ///
 /// Codex 0.142+ emits ChatGPT-backend-private `{"type":"namespace",…}` tool
 /// shapes that strict third-party Responses gateways reject with
-/// `422 unknown variant "namespace"`. Only providers whose upstream is such a
-/// strict native gateway need the flatten+restore pass; the Chat/Anthropic
-/// transform paths already unwrap namespaces on their own. Currently that is the
-/// managed xAI (Grok) OAuth provider — the first strict gateway cc-switch hit.
+/// `422 unknown variant "namespace"`. Chat/Anthropic transforms already unwrap
+/// namespaces; the native passthrough must do this for any xAI/Grok-style
+/// host, not only managed xAI OAuth. Custom Grok providers that point at
+/// `api.x.ai` or `niuma.codes` hit the same strict parser.
 pub fn provider_needs_responses_namespace_flatten(provider: &Provider) -> bool {
-    provider.is_xai_oauth()
+    provider_is_xai_prompt_cache_upstream(provider)
+}
+
+/// Grok sampling rejects some Codex tool schemas before generation. Apply the
+/// native-Responses flatten + xAI sanitizer when the upstream is an xAI-style
+/// host *or* the outbound model is a Grok slug (custom relays not yet in the
+/// host list still compile Grok's tool grammar).
+pub fn needs_strict_xai_responses_compat(provider: &Provider, model: Option<&str>) -> bool {
+    provider_needs_responses_namespace_flatten(provider) || model_looks_like_grok(model)
+}
+
+pub(crate) fn model_looks_like_grok(model: Option<&str>) -> bool {
+    let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let name = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .trim()
+        .to_ascii_lowercase();
+    name.starts_with("grok")
 }
 
 fn has_explicit_codex_third_party_upstream(provider: &Provider) -> bool {
@@ -2417,8 +2438,7 @@ wire_api = "responses"
     }
 
     #[test]
-    fn namespace_flatten_gate_only_fires_for_xai_oauth() {
-        // xAI OAuth: strict native gateway → needs namespace flattening.
+    fn namespace_flatten_gate_fires_for_xai_hosts_and_grok_models() {
         let mut xai = create_provider(json!({ "auth": {}, "config": "" }));
         xai.meta = Some(crate::provider::ProviderMeta {
             provider_type: Some("xai_oauth".to_string()),
@@ -2426,11 +2446,33 @@ wire_api = "responses"
         });
         assert!(provider_needs_responses_namespace_flatten(&xai));
 
-        // A plain third-party API-key Codex provider must not be flattened.
+        let niuma = create_provider(json!({
+            "auth": { "OPENAI_API_KEY": "sk-x" },
+            "base_url": "https://api.niuma.codes/v1"
+        }));
+        assert!(provider_needs_responses_namespace_flatten(&niuma));
+        assert!(needs_strict_xai_responses_compat(
+            &niuma,
+            Some("grok/grok-4.6")
+        ));
+
+        let xai_api = create_provider(json!({
+            "base_url": "https://api.x.ai/v1"
+        }));
+        assert!(provider_needs_responses_namespace_flatten(&xai_api));
+
         let plain = create_provider(json!({
             "auth": { "OPENAI_API_KEY": "sk-x" },
-            "config": "base_url = \"https://api.x.ai/v1\"\nwire_api = \"responses\""
+            "base_url": "https://api.openai.com/v1"
         }));
         assert!(!provider_needs_responses_namespace_flatten(&plain));
+        assert!(!needs_strict_xai_responses_compat(&plain, Some("gpt-5.4")));
+        assert!(needs_strict_xai_responses_compat(
+            &plain,
+            Some("grok/grok-4.6")
+        ));
+        assert!(model_looks_like_grok(Some("grok-4.6")));
+        assert!(model_looks_like_grok(Some("xai/grok-4.5")));
+        assert!(!model_looks_like_grok(Some("gpt-5.4")));
     }
 }
