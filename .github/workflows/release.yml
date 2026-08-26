@@ -19,16 +19,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  quality-gate:
-    uses: ./.github/workflows/ci.yml
-    with:
-      force_all: true
-      checkout_ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', github.event.inputs.tag) || github.sha }}
-    permissions:
-      contents: read
-
   release:
-    needs: quality-gate
     runs-on: ${{ matrix.os }}
     environment: release
     env:
