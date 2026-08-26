@@ -23,7 +23,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
     with:
       force_all: true
-      checkout_ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.sha }}
+      checkout_ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', github.event.inputs.tag) || github.sha }}
     permissions:
       contents: read
 
@@ -32,7 +32,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     environment: release
     env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
     strategy:
       fail-fast: false
       matrix:
@@ -51,7 +51,7 @@ jobs:
         with:
           # Tag pushes build that commit. Manual dispatch builds the named tag,
           # never the workflow branch, so release assets cannot drift from the tag.
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.sha }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', github.event.inputs.tag) || github.sha }}
 
       - name: Verify checkout matches release tag
         shell: bash
@@ -697,7 +697,7 @@ jobs:
     environment: release
     if: ${{ !cancelled() && needs.release.result == 'success' }}
     env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
     permissions:
       contents: write
     steps:
@@ -780,7 +780,7 @@ jobs:
     needs: publish-release
     if: ${{ always() && !cancelled() && needs.publish-release.result == 'success' }}
     env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
     permissions:
       contents: write
     steps:
