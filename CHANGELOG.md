@@ -5,6 +5,20 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.12] - 2026-08-27
+
+Codex → custom Grok Responses no longer 400s on App Tools schemas, and Windows WSL UNC private writes stay 0600.
+
+### Fixed
+
+- **Grok `invalid_client_tool_schema` for `mcp__codex_app__automation_update`**: Codex App Tools 0.1.3 ships that tool as a root `anyOf`/`oneOf` with a `null` (or nested union) branch. Grok rejects the whole `/responses` request before sampling, so even plain chat fails. The native Responses sanitizer now runs for custom Grok providers (`niuma.codes`, `api.x.ai`, and `grok-*` model slugs), drops non-object branches, flattens nested object unions, and drops only tools that cannot be made legal instead of failing the turn.
+- **Windows + WSL2 private temp files**: Atomic private writes to `\\wsl.localhost\` paths now create the 0600 temp file on the Linux side. Paths with spaces/quotes are passed via WSLENV (sidecar fallback). Windows-created parent directories are `mkdir -p`'d in the distro before the noclobber create, so the WSL2 filesystem contract test is green.
+
+### Upgrade notes
+
+- No database schema migration — `SCHEMA_VERSION` stays at 16.
+- Restart CC Switch. Existing Codex threads keep working; Grok `/responses` requests that 400ed on `automation_update` should start sampling. Disable Codex App Tools is no longer required as a workaround.
+
 ## [3.20.11] - 2026-08-22
 
 Grok/xAI empty or truncated Responses hops no longer 502 or finish a Codex turn.
