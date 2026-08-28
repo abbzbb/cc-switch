@@ -5086,7 +5086,10 @@ mod tests {
             let cmd = anchored_command_from_paths("codex", &bin_path, &bin_path);
             let volta_full = format!("{}\\volta.exe", sub.to_string_lossy());
             // codex 自 5092fe51 起不在 prefers_official_update：直接锚定包管理器，无 `codex update ||` 前缀。
-            let expected = format!("{} install @openai/codex", expect_quoted_path(&volta_full));
+            let expected = format!(
+                "{} install @openai/codex@0.150.1",
+                expect_quoted_path(&volta_full)
+            );
             assert_eq!(cmd.as_deref(), Some(expected.as_str()));
         }
 
@@ -5382,25 +5385,21 @@ mod tests {
         }
 
         #[test]
-        fn wsl_hermes_command_uses_unix_installer_not_powershell_or_pip() {
-            // 跨 wsl.exe 边界后跑的是 Linux,Windows PowerShell installer 不适用;
-            // 也不要再走 python3/python pip 链,避免 Python 版本/pyenv shim 问题。
+        fn wsl_hermes_command_uses_hash_pinned_unix_wheel() {
+            // 跨 wsl.exe 边界后跑的是 Linux，必须使用与 POSIX 安装路径
+            // 相同的锁定 wheel 和 SHA-256，不能回退到 Windows PowerShell 或远程脚本。
             let update_cmd =
                 wsl_tool_action_shell_command("hermes", ToolLifecycleAction::Update).unwrap();
+            assert_eq!(update_cmd, HERMES_INSTALL_UNIX);
             assert!(
-                update_cmd.starts_with("hermes update || bash -c 'tmp=$(mktemp) && curl -fsSL "),
-                "WSL hermes 更新应先尝试 CLI 自更新再回退官方 installer,得到: {update_cmd}"
-            );
-            let fallback = update_cmd
-                .split_once("||")
-                .map(|(_, fallback)| fallback)
-                .expect("update should include installer fallback");
-            assert!(
-                !fallback.contains('|')
-                    && fallback.contains(" -o $tmp && bash $tmp")
+                update_cmd.contains("hermes_agent-0.19.0-py3-none-any.whl")
+                    && update_cmd.contains(
+                        "#sha256=bd0bac012aee38a60894781f4597dc29ee7bedb3448540249921f10d3bef327f"
+                    )
                     && !update_cmd.contains("powershell")
-                    && !update_cmd.contains("pip"),
-                "WSL hermes fallback 不能依赖 pipefail/Windows installer/pip,得到: {update_cmd}"
+                    && !update_cmd.contains("curl")
+                    && !update_cmd.contains("install.sh"),
+                "WSL hermes 必须使用哈希锁定的 Unix wheel，得到: {update_cmd}"
             );
 
             let install_cmd =
