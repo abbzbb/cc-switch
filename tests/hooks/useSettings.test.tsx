@@ -5,6 +5,7 @@ import type { Settings } from "@/types";
 
 const mutateAsyncMock = vi.fn();
 const useSettingsQueryMock = vi.fn();
+const validateAppConfigDirOverrideMock = vi.fn();
 const setAppConfigDirOverrideMock = vi.fn();
 const applyClaudePluginConfigMock = vi.fn();
 const applyClaudeOnboardingSkipMock = vi.fn();
@@ -75,6 +76,8 @@ vi.mock("@/hooks/useHermes", () => ({
 
 vi.mock("@/lib/api", () => ({
   settingsApi: {
+    validateAppConfigDirOverride: (...args: unknown[]) =>
+      validateAppConfigDirOverrideMock(...args),
     setAppConfigDirOverride: (...args: unknown[]) =>
       setAppConfigDirOverrideMock(...args),
     applyClaudePluginConfig: (...args: unknown[]) =>
@@ -163,6 +166,7 @@ describe("useSettings hook", () => {
   beforeEach(() => {
     mutateAsyncMock.mockReset();
     useSettingsQueryMock.mockReset();
+    validateAppConfigDirOverrideMock.mockReset();
     setAppConfigDirOverrideMock.mockReset();
     applyClaudePluginConfigMock.mockReset();
     applyClaudeOnboardingSkipMock.mockReset();
@@ -210,6 +214,7 @@ describe("useSettings hook", () => {
     metadataMock = createMetadataMock();
 
     mutateAsyncMock.mockResolvedValue(true);
+    validateAppConfigDirOverrideMock.mockResolvedValue(true);
     setAppConfigDirOverrideMock.mockResolvedValue(true);
     applyClaudePluginConfigMock.mockResolvedValue(true);
     applyClaudeOnboardingSkipMock.mockResolvedValue(true);
@@ -381,6 +386,12 @@ describe("useSettings hook", () => {
     expect(payload.codexConfigDir).toBeUndefined();
     expect(payload.openclawConfigDir).toBe("/custom/openclaw");
     expect(payload.language).toBe("en");
+    expect(validateAppConfigDirOverrideMock).toHaveBeenCalledWith(
+      "/override/app",
+    );
+    expect(
+      validateAppConfigDirOverrideMock.mock.invocationCallOrder[0],
+    ).toBeLessThan(mutateAsyncMock.mock.invocationCallOrder[0]);
     expect(setAppConfigDirOverrideMock).toHaveBeenCalledWith("/override/app");
     // 状态改变，应该调用 API
     expect(applyClaudePluginConfigMock).toHaveBeenCalledWith({
@@ -428,6 +439,7 @@ describe("useSettings hook", () => {
     });
 
     expect(saveResult).toEqual({ requiresRestart: false });
+    expect(validateAppConfigDirOverrideMock).toHaveBeenCalledWith(null);
     expect(setAppConfigDirOverrideMock).toHaveBeenCalledWith(null);
     // 状态未改变，不应调用 API
     expect(applyClaudePluginConfigMock).not.toHaveBeenCalled();
@@ -615,6 +627,7 @@ describe("useSettings hook", () => {
 
     expect(resultValue).toBeNull();
     expect(mutateAsyncMock).not.toHaveBeenCalled();
+    expect(validateAppConfigDirOverrideMock).not.toHaveBeenCalled();
     expect(setAppConfigDirOverrideMock).not.toHaveBeenCalled();
   });
 
@@ -635,6 +648,37 @@ describe("useSettings hook", () => {
       }),
     ).rejects.toThrow("save failed");
 
+    expect(validateAppConfigDirOverrideMock).toHaveBeenCalledWith(
+      "/override/app",
+    );
+    expect(setAppConfigDirOverrideMock).not.toHaveBeenCalled();
+    expect(metadataMock.setRequiresRestart).not.toHaveBeenCalledWith(true);
+  });
+
+  it("surfaces app config directory validation errors without requesting restart", async () => {
+    settingsFormMock = createSettingsFormMock();
+    directorySettingsMock = createDirectorySettingsMock({
+      appConfigDir: "/missing/app-config",
+      initialAppConfigDir: undefined,
+    });
+    validateAppConfigDirOverrideMock.mockRejectedValueOnce(
+      new Error("CC Switch 配置目录不存在: /missing/app-config"),
+    );
+
+    const { result } = renderHook(() => useSettings());
+
+    await expect(
+      act(async () => {
+        await result.current.saveSettings();
+      }),
+    ).rejects.toThrow("配置目录不存在");
+
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        expect.stringContaining("配置目录不存在"),
+      );
+    });
+    expect(mutateAsyncMock).not.toHaveBeenCalled();
     expect(setAppConfigDirOverrideMock).not.toHaveBeenCalled();
     expect(metadataMock.setRequiresRestart).not.toHaveBeenCalledWith(true);
   });

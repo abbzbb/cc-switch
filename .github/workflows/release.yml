@@ -12,18 +12,73 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
-  release:
-    runs-on: ${{ matrix.os }}
-    environment: release
+  validate-release:
+    name: Validate release tag and versions
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      commit_sha: ${{ steps.commit.outputs.commit_sha }}
+    steps:
+      - name: Validate strict SemVer tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "Release tag must be strict SemVer prefixed with v" >&2
+            exit 1
+          fi
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "ref=refs/tags/$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout exact release tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ steps.tag.outputs.ref }}
+
+      - name: Verify tag commit and release versions
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_sha="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          head_sha="$(git rev-parse HEAD)"
+          if [ "$tag_sha" != "$head_sha" ]; then
+            echo "Refusing release: tag commit does not match HEAD" >&2
+            exit 1
+          fi
+          node scripts/validate-release.mjs versions . "$RELEASE_TAG"
+          echo "commit_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
+  quality-gate:
+    needs: validate-release
+    uses: ./.github/workflows/ci.yml
+    with:
+      force_all: true
+      checkout_ref: ${{ needs.validate-release.outputs.commit_sha }}
+    permissions:
+      contents: read
+
+  release:
+    needs: [validate-release, quality-gate]
+    runs-on: ${{ matrix.os }}
+    environment: release
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ needs.validate-release.outputs.tag }}
+      RELEASE_COMMIT: ${{ needs.validate-release.outputs.commit_sha }}
     strategy:
       fail-fast: false
       matrix:
@@ -38,32 +93,31 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          # Tag pushes build that commit. Manual dispatch builds the named tag,
-          # never the workflow branch, so release assets cannot drift from the tag.
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', github.event.inputs.tag) || github.sha }}
+          # Every matrix lane builds the immutable commit resolved by validation.
+          ref: ${{ needs.validate-release.outputs.commit_sha }}
 
       - name: Verify checkout matches release tag
         shell: bash
         run: |
           set -euo pipefail
-          expected="${{ env.RELEASE_TAG }}"
-          git fetch --tags --force origin "refs/tags/${expected}:refs/tags/${expected}" || true
-          tag_sha="$(git rev-parse "refs/tags/${expected}^{commit}")"
+          validation_ref="refs/tags/release-validation/${RELEASE_TAG}"
+          git fetch --force origin "refs/tags/${RELEASE_TAG}:${validation_ref}"
+          tag_sha="$(git rev-parse "${validation_ref}^{commit}")"
           head_sha="$(git rev-parse HEAD)"
-          if [ "$tag_sha" != "$head_sha" ]; then
-            echo "Refusing to build $expected: tag is $tag_sha but HEAD is $head_sha" >&2
+          if [ "$tag_sha" != "$RELEASE_COMMIT" ] || [ "$head_sha" != "$RELEASE_COMMIT" ]; then
+            echo "Refusing to build: release tag or checkout drifted from validated commit" >&2
             exit 1
           fi
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "20"
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: "1.95"
 
@@ -143,7 +197,7 @@ jobs:
 
       - name: Setup pnpm cache
         if: runner.os != 'Windows' || matrix.arch != 'arm64'
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
@@ -657,7 +711,7 @@ jobs:
           ls -la release-assets/*.sig || echo "No signatures found"
 
       - name: Upload release artifacts to workflow
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-assets-${{ runner.os }}-${{ matrix.arch || runner.arch }}
           path: release-assets/*
@@ -684,16 +738,22 @@ jobs:
   publish-release:
     name: Publish GitHub Release
     runs-on: ubuntu-22.04
-    needs: release
+    needs: [validate-release, release]
     environment: release
     if: ${{ !cancelled() && needs.release.result == 'success' }}
     env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ needs.validate-release.outputs.tag }}
+      RELEASE_COMMIT: ${{ needs.validate-release.outputs.commit_sha }}
     permissions:
       contents: write
     steps:
+      - name: Checkout release validation scripts
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.validate-release.outputs.commit_sha }}
+
       - name: Download built release artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: release-assets-*
           path: release-assets
@@ -705,44 +765,48 @@ jobs:
           set -euo pipefail
           ls -la release-assets
 
-      - name: Decide prerelease
+      - name: Validate release assets and publication mode
         id: meta
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          sigs=(release-assets/*.sig)
-          if [ ${#sigs[@]} -eq 0 ]; then
-            echo "No updater signatures found — marking prerelease"
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-            exit 0
+          node scripts/validate-release.mjs assets release-assets "$RELEASE_TAG" "$GITHUB_OUTPUT"
+
+      - name: Generate complete stable updater manifest
+        if: steps.meta.outputs.publish_latest == 'true'
+        shell: bash
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          node scripts/validate-release.mjs latest release-assets "$RELEASE_TAG" "$REPO" release-assets/latest.json
+          cat release-assets/latest.json
+
+      - name: Verify release is new or still a draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/validate-release.mjs draft "$GITHUB_REPOSITORY" "$RELEASE_TAG"
+
+      - name: Verify release tag still identifies validated commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          validation_ref="refs/tags/release-validation/${RELEASE_TAG}"
+          git fetch --force origin "refs/tags/${RELEASE_TAG}:${validation_ref}"
+          current_sha="$(git rev-parse "${validation_ref}^{commit}")"
+          if [ "$current_sha" != "$RELEASE_COMMIT" ]; then
+            echo "Refusing to create release: tag moved after validation" >&2
+            exit 1
           fi
 
-          # A linux/windows .sig must not promote a full release when the
-          # macOS updater artifact is present without its darwin signature.
-          missing=0
-          if compgen -G 'release-assets/*macOS*' > /dev/null \
-            || compgen -G 'release-assets/*.tar.gz' > /dev/null; then
-            if ! compgen -G 'release-assets/*.tar.gz.sig' > /dev/null; then
-              echo "macOS artifacts exist but darwin updater .sig is missing"
-              missing=1
-            fi
-          fi
-
-          if [ "$missing" -ne 0 ]; then
-            echo "Required platform signature missing — marking prerelease"
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "prerelease=false" >> "$GITHUB_OUTPUT"
-
-      - name: Upload Release Assets
-        uses: softprops/action-gh-release@v3
+      - name: Upload all assets to draft release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: CC Switch ${{ env.RELEASE_TAG }}
+          draft: true
           prerelease: ${{ steps.meta.outputs.prerelease }}
+          fail_on_unmatched_files: true
           body: |
             ## CC Switch ${{ env.RELEASE_TAG }}
 
@@ -765,123 +829,36 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  assemble-latest-json:
-    name: Assemble latest.json
-    runs-on: ubuntu-22.04
-    needs: publish-release
-    if: ${{ always() && !cancelled() && needs.publish-release.result == 'success' }}
-    env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
-    permissions:
-      contents: write
-    steps:
-      - name: Prepare GH
-        run: |
-          gh --version || (
-            type -p curl >/dev/null || exit 0
-            if [ "$(uname -m)" = x86_64 ]; then
-              sudo find /etc/apt -type f \( \
-                  -name '*.list' -o -name '*.sources' -o -name 'apt-mirrors.txt' \
-                \) -exec sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' {} +
-            fi
-            sudo apt-get \
-              -o Acquire::Retries=3 \
-              -o Acquire::http::Timeout=20 \
-              -o Acquire::https::Timeout=20 \
-              update
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y gh || true
-          )
+      - name: Download and verify all draft assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Download all release assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euxo pipefail
-          TAG="${RELEASE_TAG}"
-          mkdir -p dl
-          gh release download "$TAG" --dir dl --repo "$GITHUB_REPOSITORY"
-          ls -la dl || true
-      - name: Generate latest.json
-        env:
-          REPO: ${{ github.repository }}
-          TAG: ${{ env.RELEASE_TAG }}
+        run: node scripts/validate-release.mjs remote release-assets verified-release-assets "$GITHUB_REPOSITORY" "$RELEASE_TAG"
+
+      - name: Verify release tag before publication
+        shell: bash
         run: |
           set -euo pipefail
-          VERSION="${TAG#v}"
-          PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          base_url="https://github.com/$REPO/releases/download/$TAG"
-          # 初始化空平台映射
-          mac_url=""; mac_sig=""
-          win_x64_url=""; win_x64_sig=""
-          win_arm64_url=""; win_arm64_sig=""
-          linux_x64_url=""; linux_x64_sig=""
-          linux_arm64_url=""; linux_arm64_sig=""
-          shopt -s nullglob
-          for sig in dl/*.sig; do
-            base=${sig%.sig}
-            fname=$(basename "$base")
-            url="$base_url/$fname"
-            sig_content=$(cat "$sig")
-            case "$fname" in
-              *.tar.gz)
-                # 视为 macOS updater artifact
-                mac_url="$url"; mac_sig="$sig_content";;
-              *-Windows-arm64.msi)
-                win_arm64_url="$url"; win_arm64_sig="$sig_content";;
-              *-Windows.msi)
-                win_x64_url="$url"; win_x64_sig="$sig_content";;
-              *-Linux-arm64.AppImage|*-Linux-arm64.appimage)
-                linux_arm64_url="$url"; linux_arm64_sig="$sig_content";;
-              *-Linux-x86_64.AppImage|*-Linux-x86_64.appimage)
-                linux_x64_url="$url"; linux_x64_sig="$sig_content";;
-            esac
-          done
-          # 构造 JSON（仅包含存在的目标）
-          tmp_json=$(mktemp)
-          {
-            echo '{'
-            echo "  \"version\": \"$VERSION\",";
-            echo "  \"notes\": \"Release $TAG\",";
-            echo "  \"pub_date\": \"$PUB_DATE\",";
-            echo '  "platforms": {'
-            first=1
-            if [ -n "$mac_url" ] && [ -n "$mac_sig" ]; then
-              # 为兼容 arm64 / x64，重复写入两个键，指向同一 universal 包
-              for key in darwin-aarch64 darwin-x86_64; do
-                [ $first -eq 0 ] && echo ','
-                echo "    \"$key\": {\"signature\": \"$mac_sig\", \"url\": \"$mac_url\"}"
-                first=0
-              done
-            fi
-            if [ -n "$win_x64_url" ] && [ -n "$win_x64_sig" ]; then
-              [ $first -eq 0 ] && echo ','
-              echo "    \"windows-x86_64\": {\"signature\": \"$win_x64_sig\", \"url\": \"$win_x64_url\"}"
-              first=0
-            fi
-            if [ -n "$win_arm64_url" ] && [ -n "$win_arm64_sig" ]; then
-              [ $first -eq 0 ] && echo ','
-              echo "    \"windows-aarch64\": {\"signature\": \"$win_arm64_sig\", \"url\": \"$win_arm64_url\"}"
-              first=0
-            fi
-            if [ -n "$linux_x64_url" ] && [ -n "$linux_x64_sig" ]; then
-              [ $first -eq 0 ] && echo ','
-              echo "    \"linux-x86_64\": {\"signature\": \"$linux_x64_sig\", \"url\": \"$linux_x64_url\"}"
-              first=0
-            fi
-            if [ -n "$linux_arm64_url" ] && [ -n "$linux_arm64_sig" ]; then
-              [ $first -eq 0 ] && echo ','
-              echo "    \"linux-aarch64\": {\"signature\": \"$linux_arm64_sig\", \"url\": \"$linux_arm64_url\"}"
-              first=0
-            fi
-            echo '  }'
-            echo '}'
-          } > "$tmp_json"
-          echo "Generated latest.json:" && cat "$tmp_json"
-          mv "$tmp_json" latest.json
-      - name: Upload latest.json to release
+          validation_ref="refs/tags/release-validation/${RELEASE_TAG}"
+          git fetch --force origin "refs/tags/${RELEASE_TAG}:${validation_ref}"
+          current_sha="$(git rev-parse "${validation_ref}^{commit}")"
+          if [ "$current_sha" != "$RELEASE_COMMIT" ]; then
+            echo "Refusing to publish release: tag moved after validation" >&2
+            exit 1
+          fi
+
+      - name: Publish completed draft
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
         run: |
-          set -euxo pipefail
-          gh release upload "$RELEASE_TAG" latest.json --clobber --repo "$GITHUB_REPOSITORY"
+          set -euo pipefail
+          edit_args=(
+            --repo "$GITHUB_REPOSITORY"
+            --draft=false
+            --prerelease="$PRERELEASE"
+          )
+          if [ "$PRERELEASE" = "false" ]; then
+            edit_args+=(--latest)
+          fi
+          gh release edit "$RELEASE_TAG" "${edit_args[@]}"

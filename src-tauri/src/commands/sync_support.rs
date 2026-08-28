@@ -5,7 +5,9 @@ use crate::services::{model_pricing, PromptService, ProviderService};
 use crate::settings;
 use crate::store::AppState;
 
-pub(crate) fn run_post_import_sync(app_state: &AppState) -> Result<(), AppError> {
+const POST_IMPORT_SYNC_PENDING_KEY: &str = "post_import_sync_pending";
+
+fn perform_post_import_sync(app_state: &AppState) -> Result<(), AppError> {
     let mut failures = Vec::new();
 
     if let Err(error) = ProviderService::sync_current_to_live(app_state) {
@@ -38,6 +40,32 @@ pub(crate) fn run_post_import_sync(app_state: &AppState) -> Result<(), AppError>
             failures.join("; ")
         )))
     }
+}
+
+fn run_with_pending_marker<F>(app_state: &AppState, sync: F) -> Result<(), AppError>
+where
+    F: FnOnce() -> Result<(), AppError>,
+{
+    app_state
+        .db
+        .set_setting(POST_IMPORT_SYNC_PENDING_KEY, "true")?;
+    sync()?;
+    app_state
+        .db
+        .set_setting(POST_IMPORT_SYNC_PENDING_KEY, "false")
+}
+
+pub(crate) fn run_post_import_sync(app_state: &AppState) -> Result<(), AppError> {
+    run_with_pending_marker(app_state, || perform_post_import_sync(app_state))
+}
+
+pub(crate) fn retry_pending_post_import_sync(app_state: &AppState) -> Result<bool, AppError> {
+    if !app_state.db.get_bool_flag(POST_IMPORT_SYNC_PENDING_KEY)? {
+        return Ok(false);
+    }
+
+    run_post_import_sync(app_state)?;
+    Ok(true)
 }
 
 fn post_sync_warning<E: std::fmt::Display>(err: E) -> String {
@@ -81,8 +109,41 @@ pub(crate) fn success_payload_with_warning(backup_id: String, warning: Option<St
 
 #[cfg(test)]
 mod tests {
-    use super::{attach_warning, post_sync_warning_from_result};
+    use super::{
+        attach_warning, post_sync_warning_from_result, run_with_pending_marker,
+        POST_IMPORT_SYNC_PENDING_KEY,
+    };
+    use crate::database::Database;
+    use crate::store::AppState;
     use serde_json::json;
+    use std::sync::Arc;
+
+    fn test_state() -> AppState {
+        AppState::new(Arc::new(Database::memory().expect("memory database")))
+    }
+
+    #[test]
+    fn pending_marker_is_cleared_only_after_success() {
+        let state = test_state();
+        run_with_pending_marker(&state, || Ok(())).expect("sync succeeds");
+        assert!(!state
+            .db
+            .get_bool_flag(POST_IMPORT_SYNC_PENDING_KEY)
+            .expect("read marker"));
+    }
+
+    #[test]
+    fn pending_marker_survives_projection_failure() {
+        let state = test_state();
+        let result = run_with_pending_marker(&state, || {
+            Err(crate::error::AppError::Config("projection failed".into()))
+        });
+        assert!(result.is_err());
+        assert!(state
+            .db
+            .get_bool_flag(POST_IMPORT_SYNC_PENDING_KEY)
+            .expect("read marker"));
+    }
 
     #[test]
     fn post_sync_warning_from_result_returns_none_on_success() {

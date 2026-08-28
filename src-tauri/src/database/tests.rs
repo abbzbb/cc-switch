@@ -216,6 +216,167 @@ fn schema_migration_rejects_future_version() {
 }
 
 #[test]
+fn database_initialization_backs_up_before_compatibility_writes() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+         INSERT INTO settings (key, value) VALUES ('current_profile_id', 'legacy-profile');
+         PRAGMA user_version = 12;",
+    )
+    .expect("seed old database");
+    let db = Database {
+        conn: Mutex::new(conn),
+    };
+    let mut backup_snapshot = None;
+
+    db.initialize_schema(true, |db, version| {
+        assert_eq!(version, 12);
+        let conn = lock_conn!(db.conn);
+        let mut snapshot = Connection::open_in_memory().expect("open backup snapshot");
+        let backup = rusqlite::backup::Backup::new(&conn, &mut snapshot)
+            .expect("initialize backup snapshot");
+        backup
+            .run_to_completion(5, std::time::Duration::from_millis(1), None)
+            .expect("complete backup snapshot");
+        drop(backup);
+        backup_snapshot = Some(snapshot);
+        Ok(())
+    })
+    .expect("initialize old database");
+
+    let snapshot = backup_snapshot.expect("pre-migration backup snapshot");
+    let snapshot_legacy_marker: i64 = snapshot
+        .query_row(
+            "SELECT COUNT(*) FROM settings WHERE key = 'current_profile_id'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read legacy marker from backup");
+    let snapshot_repaired_marker: i64 = snapshot
+        .query_row(
+            "SELECT COUNT(*) FROM settings WHERE key = 'current_profile_id_claude'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read repaired marker from backup");
+    assert_eq!(
+        snapshot_legacy_marker, 1,
+        "backup must preserve the original database"
+    );
+    assert_eq!(
+        snapshot_repaired_marker, 0,
+        "backup must not contain create_tables compatibility writes"
+    );
+
+    let conn = db.conn.lock().expect("lock initialized database");
+    let legacy_marker: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM settings WHERE key = 'current_profile_id'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read legacy marker after initialization");
+    let repaired_marker: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM settings WHERE key = 'current_profile_id_claude'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read repaired marker after initialization");
+    assert_eq!(legacy_marker, 0);
+    assert_eq!(repaired_marker, 1);
+}
+
+#[test]
+fn database_initialization_stops_before_schema_writes_when_backup_fails() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+         INSERT INTO settings (key, value) VALUES ('current_profile_id', 'legacy-profile');
+         PRAGMA user_version = 12;",
+    )
+    .expect("seed old database");
+    let db = Database {
+        conn: Mutex::new(conn),
+    };
+
+    let err = db
+        .initialize_schema(true, |_, _| {
+            Err(AppError::Database("forced backup failure".to_string()))
+        })
+        .expect_err("backup failure must abort initialization");
+    assert!(err.to_string().contains("forced backup failure"));
+
+    let conn = db.conn.lock().expect("lock failed initialization database");
+    assert!(
+        !Database::table_exists(&conn, "providers").expect("check providers table"),
+        "create_tables must not run after a failed backup"
+    );
+    let legacy_marker: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM settings WHERE key = 'current_profile_id'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read untouched legacy marker");
+    assert_eq!(legacy_marker, 1);
+    assert_eq!(
+        Database::get_user_version(&conn).expect("read untouched version"),
+        12
+    );
+}
+
+#[test]
+fn database_initialization_rejects_future_schema_before_any_write() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    Database::set_user_version(&conn, SCHEMA_VERSION + 1).expect("set future version");
+    let db = Database {
+        conn: Mutex::new(conn),
+    };
+    let backup_called = std::cell::Cell::new(false);
+
+    let err = db
+        .initialize_schema(true, |_, _| {
+            backup_called.set(true);
+            Ok(())
+        })
+        .expect_err("future schema must be rejected");
+    assert!(err.to_string().contains("数据库版本过新"));
+    assert!(
+        !backup_called.get(),
+        "future databases must not be backed up"
+    );
+
+    let conn = db.conn.lock().expect("lock rejected future database");
+    assert!(
+        !Database::table_exists(&conn, "providers").expect("check providers table"),
+        "create_tables must not run for a future schema"
+    );
+}
+
+#[test]
+fn database_initialization_creates_new_database_without_backup() {
+    let db = Database {
+        conn: Mutex::new(Connection::open_in_memory().expect("open memory db")),
+    };
+    let backup_called = std::cell::Cell::new(false);
+
+    db.initialize_schema(false, |_, _| {
+        backup_called.set(true);
+        Ok(())
+    })
+    .expect("initialize new database");
+
+    assert!(!backup_called.get());
+    let conn = db.conn.lock().expect("lock new database");
+    assert!(Database::table_exists(&conn, "providers").expect("check providers table"));
+    assert_eq!(
+        Database::get_user_version(&conn).expect("read initialized version"),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
 fn schema_migration_adds_missing_columns_for_providers() {
     let conn = Connection::open_in_memory().expect("open memory db");
 

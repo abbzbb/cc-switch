@@ -868,11 +868,10 @@ fn first_public_resolved_addr(url: &Url) -> Result<(String, SocketAddr), AppErro
 fn url_resolves_to_restricted_host(url: &Url) -> Result<bool, AppError> {
     match first_public_resolved_addr(url) {
         Ok(_) => Ok(false),
-        Err(AppError::Localized { key, .. })
-            if key == "usage_script.request_resolved_ip_forbidden" =>
-        {
-            Ok(true)
-        }
+        Err(AppError::Localized {
+            key: "usage_script.request_resolved_ip_forbidden",
+            ..
+        }) => Ok(true),
         Err(error) => Err(error),
     }
 }

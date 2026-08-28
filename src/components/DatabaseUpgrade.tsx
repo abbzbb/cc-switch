@@ -15,7 +15,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
-const RELEASES_URL = "https://github.com/farion1231/cc-switch/releases";
+const RELEASES_URL = "https://github.com/abbzbb/cc-switch/releases";
 
 interface DatabaseUpgradeProps {
   payload: {
@@ -54,6 +54,7 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const unlistenRef = useRef<(() => void) | null>(null);
+  const unmountedRef = useRef(false);
 
   const dbVersion = payload.db_version;
   const supportedVersion = payload.supported_version;
@@ -84,8 +85,11 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
   }, []);
 
   useEffect(() => {
+    unmountedRef.current = false;
     return () => {
+      unmountedRef.current = true;
       unlistenRef.current?.();
+      unlistenRef.current = null;
     };
   }, []);
 
@@ -95,14 +99,23 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
     setErrorMsg(null);
     try {
       unlistenRef.current?.();
-      unlistenRef.current = await listen<DownloadProgress>(
+      unlistenRef.current = null;
+      const unlisten = await listen<DownloadProgress>(
         "update-download-progress",
-        (e) => setProgress(e.payload),
+        (e) => {
+          if (!unmountedRef.current) setProgress(e.payload);
+        },
       );
+      if (unmountedRef.current) {
+        unlisten();
+        return;
+      }
+      unlistenRef.current = unlisten;
       // 成功时后端会下载+安装+重启，不会返回；返回 false 表示无可用更新。
       const updating = await invoke<boolean>("install_update_and_restart");
       unlistenRef.current?.();
       unlistenRef.current = null;
+      if (unmountedRef.current) return;
       if (!updating) {
         // 竞态：检查时有更新、安装时已无 → 按不兼容处理
         setPhase("incompatible");
@@ -111,6 +124,7 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
     } catch (e) {
       unlistenRef.current?.();
       unlistenRef.current = null;
+      if (unmountedRef.current) return;
       setErrorMsg(extractErrorMessage(e));
       setPhase("error");
     }

@@ -393,6 +393,9 @@ export function useSettings(): UseSettingsResult {
           language: mergedSettings.language,
         };
 
+        // 目录校验必须先于 settings / Store 的任何持久化，避免路径错误造成部分保存。
+        await settingsApi.validateAppConfigDirOverride(sanitizedAppDir ?? null);
+
         // 在 mutate 之前从实时缓存捕获上一次持久化的插件集成状态，
         // 避免 closure 里的 data 因 React 尚未 re-render 而滞后
         const prevPluginEnabled = queryClient.getQueryData<Settings>([

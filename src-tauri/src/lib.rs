@@ -429,11 +429,8 @@ pub fn run() {
         // 拦截窗口关闭：根据设置决定是否最小化到托盘
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // 数据库版本过新的恢复模式下没有托盘可唤回，关闭即退出，避免应用隐身后台
-                let in_db_recovery = crate::init_status::get_init_error()
-                    .map(|p| p.kind.as_deref() == Some("db_version_too_new"))
-                    .unwrap_or(false);
-                if in_db_recovery {
+                // 初始化失败的恢复模式下没有托盘可唤回，关闭即退出，避免应用隐身后台。
+                if crate::init_status::get_init_error().is_some() {
                     api.prevent_close();
                     window.app_handle().exit(0);
                     return;
@@ -470,8 +467,22 @@ pub fn run() {
         .setup(|app| {
             let _ = rustls::crypto::ring::default_provider().install_default();
 
-            // 预先刷新 Store 覆盖配置，确保后续路径读取正确（日志/数据库等）
-            app_store::refresh_app_config_dir_override(app.handle());
+            // 启动时固定 Store 覆盖配置，确保日志、数据库等整个进程使用同一目录。
+            if let Err(error) = app_store::initialize_app_config_dir_override(app.handle()) {
+                eprintln!("读取 CC Switch 配置目录失败: {error}");
+                crate::init_status::set_init_error(crate::init_status::InitErrorPayload {
+                    path: "app_paths.json".to_string(),
+                    error: error.to_string(),
+                    kind: Some("app_config_dir_unavailable".to_string()),
+                    db_version: None,
+                    supported_version: None,
+                });
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+                return Ok(());
+            }
             panic_hook::init_app_config_dir(crate::config::get_app_config_dir());
 
             // 初始化日志（输出到 <app_config_dir>/logs/cc-switch.log）
@@ -517,7 +528,7 @@ pub fn run() {
 
             // 首次读取覆盖路径时 logger 尚未可用；此处重放一次，
             // 让 Store 损坏或路径无效等启动警告能够真正落盘。
-            let _ = app_store::refresh_app_config_dir_override(app.handle());
+            let _ = app_store::read_app_config_dir_override_from_store(app.handle());
 
             #[cfg(target_os = "windows")]
             set_windows_app_user_model_id(app.handle());
@@ -1023,9 +1034,12 @@ pub fn run() {
                 }
             }
 
-            // 迁移旧的 app_config_dir 配置到 Store
-            if let Err(e) = app_store::migrate_app_config_dir_from_settings(app.handle()) {
-                log::warn!("迁移 app_config_dir 失败: {e}");
+            match commands::retry_pending_post_import_sync(&app_state) {
+                Ok(true) => log::info!("✓ Retried pending post-import synchronization"),
+                Ok(false) => {}
+                Err(error) => log::warn!(
+                    "✗ Pending post-import synchronization still failed; it will retry next launch: {error}"
+                ),
             }
 
             // 启动阶段不再无条件保存,避免意外覆盖用户配置。
@@ -1512,6 +1526,7 @@ pub fn run() {
             commands::update_endpoint_last_used,
             // app_config_dir override via Store
             commands::get_app_config_dir_override,
+            commands::validate_app_config_dir_override,
             commands::set_app_config_dir_override,
             // provider sort order management
             commands::update_providers_sort_order,

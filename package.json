@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.{js,jsx,ts,tsx,css,json}\" \"tests/**/*.{js,jsx,ts,tsx,css,json}\"",
     "format:check": "prettier --check \"src/**/*.{js,jsx,ts,tsx,css,json}\" \"tests/**/*.{js,jsx,ts,tsx,css,json}\"",
+    "test:release": "node scripts/validate-release.test.mjs",
     "test:unit": "vitest run",
     "test:unit:watch": "vitest watch"
   },

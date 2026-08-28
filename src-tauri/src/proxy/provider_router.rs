@@ -543,7 +543,6 @@ impl ProviderRouter {
         #[cfg(test)]
         {
             let _ = (account_id, manager);
-            return;
         }
         #[cfg(not(test))]
         {
@@ -583,7 +582,6 @@ impl ProviderRouter {
         #[cfg(test)]
         {
             let _ = (provider, kimi, anthropic);
-            return;
         }
         #[cfg(not(test))]
         {
