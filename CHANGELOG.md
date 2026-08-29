@@ -5,6 +5,17 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Grok Chinese progress-only still `task_complete` after 3.20.13 (#19)**: A two-line plan (newline after `：`), an ack prefix (`好的，` / `收到，`), or a weak substring (`已经` / `结果`) made `is_progress_only_text` return false, so inspect forwarded `response.completed`. Collapse whitespace before the 80-char cap; 先…再 / unfinished commitments win over bare 已经/结果; strip ack openers; unknown output items with visible text are classified as messages. Empty-hop continue now uses the same gate as schema sanitizer (xAI host **or** `grok*` model), not the prompt-cache host list alone.
+
+### Upgrade notes
+
+- No database schema migration — `SCHEMA_VERSION` stays at 16.
+- Restart CC Switch. A Grok hop that only emits a wrapped/acked Chinese plan with no tool call should continue or show incomplete instead of `task_complete`.
+
 ## [3.20.13] - 2026-08-29
 
 Grok Chinese status/plan hops no longer finish a Codex turn.
