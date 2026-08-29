@@ -23,7 +23,7 @@ use super::{
         codex_chat_common::extract_reasoning_field_text,
         codex_chat_history::record_responses_sse_stream,
         codex_responses_sse::responses_sse_events_from_response_value,
-        get_adapter, get_claude_api_format, provider_is_xai_prompt_cache_upstream,
+        get_adapter, get_claude_api_format, needs_strict_xai_responses_compat,
         streaming::create_anthropic_sse_stream,
         streaming_codex_anthropic::{
             create_responses_sse_stream_from_anthropic_with_context,
@@ -1085,7 +1085,7 @@ async fn handle_responses_for_app(
             if let Some(provider) = err.provider.take() {
                 ctx.provider = provider;
             }
-            if provider_is_xai_prompt_cache_upstream(&ctx.provider)
+            if needs_strict_xai_responses_compat(&ctx.provider, Some(ctx.request_model.as_str()))
                 && is_xai_empty_stream_error(&err.error)
             {
                 log::warn!(
@@ -1283,7 +1283,12 @@ async fn apply_xai_reasoning_continue(
     extensions: &Extensions,
     mut result: ForwardResult,
 ) -> Result<ForwardResult, ForwardError> {
-    if !provider_is_xai_prompt_cache_upstream(&result.provider) {
+    let continue_model = result
+        .outbound_model
+        .as_deref()
+        .filter(|model| !model.is_empty())
+        .or(Some(ctx.request_model.as_str()));
+    if !needs_strict_xai_responses_compat(&result.provider, continue_model) {
         return Ok(result);
     }
 

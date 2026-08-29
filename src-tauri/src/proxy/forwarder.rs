@@ -523,9 +523,10 @@ impl RequestForwarder {
         app_type: &AppType,
         provider: &Provider,
         endpoint: &str,
+        outbound_model: Option<&str>,
     ) -> bool {
         matches!(app_type, AppType::Codex | AppType::GrokBuild)
-            && super::providers::provider_is_xai_prompt_cache_upstream(provider)
+            && super::providers::needs_strict_xai_responses_compat(provider, outbound_model)
             && !super::providers::should_convert_codex_responses_to_chat(provider, endpoint)
             && !super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint)
     }
@@ -878,8 +879,12 @@ impl RequestForwarder {
                 .await
             {
                 Ok((response, claude_api_format, outbound_model)) => {
-                    let defer_circuit_success =
-                        self.should_defer_xai_circuit_success(app_type, provider, endpoint);
+                    let defer_circuit_success = self.should_defer_xai_circuit_success(
+                        app_type,
+                        provider,
+                        endpoint,
+                        outbound_model.as_deref(),
+                    );
                     if !defer_circuit_success {
                         // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；
                         // HalfOpen 探测仍同步等待，保证 permit 与熔断状态及时释放。
