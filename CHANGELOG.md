@@ -5,6 +5,17 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Grok Chinese status/plan sentence ends the Codex turn (#19)**: A short Chinese progress hop with no tool call (`继续…：先…再…` / `按原计划…全部做完` / `这次直接…不再停`) was forwarded as `response.completed`, so Codex recorded `task_complete`. Those sentences now join the existing empty-hop continue loop (status opener **and** a 先…再 plan or unfinished commitment; prefix-only inspect starters unchanged). Real short answers (`按原计划用现有实现。` / `应该先合并再发布。` / `我打开了 README，结论是应改路由。`) stay productive. The continue nudge is bilingual and forbids another status sentence. After two continues the hop is still rewritten to `response.incomplete`.
+
+### Upgrade notes
+
+- No database schema migration — `SCHEMA_VERSION` stays at 16.
+- Restart CC Switch. Existing Codex threads keep working; a Grok hop that only emits a Chinese plan with no tool call should continue or show incomplete instead of `task_complete`.
+
 ## [3.20.12] - 2026-08-27
 
 Codex → custom Grok Responses no longer 400s on App Tools schemas, and Windows WSL UNC private writes stay 0600.
