@@ -5,7 +5,9 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.20.13] - 2026-08-29
+
+Grok Chinese status/plan hops no longer finish a Codex turn.
 
 ### Fixed
 
