@@ -1,5 +1,5 @@
 //! Grok/xAI native Responses: do not treat an empty hop as a finished Codex
-//! turn (abbzbb#14, abbzbb#16).
+//! turn (abbzbb#14, abbzbb#16, abbzbb#19).
 //!
 //! xAI can (a) spend the whole output budget on `reasoning`, (b) close HTTP 200
 //! without `response.completed`, (c) emit only a short progress sentence, or
@@ -68,7 +68,13 @@ pub(crate) fn same_card_followup(
 /// is not swallowed as an empty hop.
 const PROGRESS_ONLY_MAX_CHARS: usize = 80;
 
-const CONTINUE_NUDGE: &str = "Your previous response did not finish the turn: it was empty, cut off, reasoning-only, or only a short progress note, with no tool call and no user-facing answer. Continue the same turn: call a tool or write the answer. Do not stop after a status sentence.";
+const CONTINUE_NUDGE: &str = concat!(
+    "Your previous response did not finish the turn: it was empty, cut off, reasoning-only, or only a short progress note, with no tool call and no user-facing answer. ",
+    "Continue the same turn: call a tool or write the answer. Do not stop after a status or plan sentence. ",
+    "The next output must be a function_call or the final answer, not another status sentence. ",
+    "上一跳未完成：空输出、被截断、只有 reasoning，或只有一句进度/计划且没有工具调用和最终答案。",
+    "同一轮继续：立刻调用工具或写出答案。禁止再只回复计划或进度句。"
+);
 
 const INSPECT_BUFFER_CAP: usize = 16 * 1024 * 1024;
 
@@ -247,39 +253,7 @@ fn looks_like_progress_phrase(s: &str) -> bool {
     if has_answer_signal(s) {
         return false;
     }
-
-    const ZH: &[&str] = &[
-        "我先看",
-        "我先检查",
-        "我先檢查",
-        "我先读",
-        "我先讀",
-        "我先打开",
-        "我先打開",
-        "我先把",
-        "先看一下",
-        "先看下",
-        "先检查",
-        "先檢查",
-        "让我看",
-        "讓我看",
-        "让我检查",
-        "讓我檢查",
-        "让我先",
-        "讓我先",
-        "我来看",
-        "我來看",
-        "我来检查",
-        "我來檢查",
-        "我看看",
-        "看一下你",
-        "稍等我",
-        "等我先",
-        "我打开",
-        "我打開",
-    ];
-    // Prefix only — substring match turned "我打开了 README，结论是…" into an empty hop.
-    if ZH.iter().any(|needle| s.starts_with(needle)) {
+    if starts_with_zh_progress(s) || looks_like_zh_plan_sentence(s) {
         return true;
     }
 
@@ -310,10 +284,136 @@ fn looks_like_progress_phrase(s: &str) -> bool {
     VERBS.iter().any(|verb| s.contains(verb))
 }
 
+fn starts_with_zh_progress(s: &str) -> bool {
+    const ZH: &[&str] = &[
+        "我先看",
+        "我先检查",
+        "我先檢查",
+        "我先读",
+        "我先讀",
+        "我先打开",
+        "我先打開",
+        "我先把",
+        "我先核",
+        "我先筛",
+        "我先篩",
+        "先看一下",
+        "先看下",
+        "先检查",
+        "先檢查",
+        "先核对",
+        "先核對",
+        "先查看",
+        "先读取",
+        "先讀取",
+        "让我看",
+        "讓我看",
+        "让我检查",
+        "讓我檢查",
+        "让我先",
+        "讓我先",
+        "我来看",
+        "我來看",
+        "我来检查",
+        "我來檢查",
+        "我看看",
+        "看一下你",
+        "稍等我",
+        "等我先",
+        "我打开",
+        "我打開",
+    ];
+    // Prefix only — substring match turned "我打开了 README，结论是…" into an empty hop.
+    ZH.iter().any(|needle| s.starts_with(needle))
+}
+
+/// Grok often stalls in one short Chinese status/plan sentence that does not
+/// start with `我先…` / `让我…`. Require a status opener **and** either a
+/// 先…再 plan or an unfinished commitment so "按原计划用现有实现。" stays a
+/// real answer.
+fn looks_like_zh_plan_sentence(s: &str) -> bool {
+    const OPENERS: &[&str] = &[
+        "继续",
+        "繼續",
+        "按原",
+        "按计",
+        "按計",
+        "开始",
+        "開始",
+        "这次",
+        "這次",
+        "接下来",
+        "接下來",
+        "随后",
+        "隨後",
+        "正在",
+        "马上",
+        "馬上",
+        "现在",
+        "現在",
+        "直接",
+        "立刻",
+        "接着",
+        "接著",
+        "我这边",
+        "我這邊",
+        "我先",
+        "让我",
+        "讓我",
+        "我来",
+        "我來",
+    ];
+    if !OPENERS.iter().any(|opener| s.starts_with(opener)) {
+        return false;
+    }
+    zh_has_first_then_plan(s) || zh_has_unfinished_commitment(s)
+}
+
+fn zh_has_first_then_plan(s: &str) -> bool {
+    let Some(idx) = s.find('先') else {
+        return false;
+    };
+    let rest = &s[idx + '先'.len_utf8()..];
+    rest.contains('再')
+        || rest.contains("然后")
+        || rest.contains("然後")
+        || rest.contains("接着")
+        || rest.contains("接著")
+}
+
+fn zh_has_unfinished_commitment(s: &str) -> bool {
+    s.contains("不再停")
+        || s.contains("不再中断")
+        || s.contains("不再中斷")
+        || s.contains("全部做完")
+        || s.contains("全部判完")
+        || s.contains("全部核完")
+        || s.contains("全部判定")
+}
+
 fn has_answer_signal(s: &str) -> bool {
     const SIGNALS: &[&str] = &[
         "结论",
         "結論",
+        "因为",
+        "因為",
+        "已经",
+        "已經",
+        "完成了",
+        "发现",
+        "發現",
+        "结果",
+        "結果",
+        "如下",
+        "应该",
+        "應該",
+        "建议",
+        "建議",
+        "所以",
+        "因此",
+        "问题在",
+        "問題在",
+        "原因是",
         "because",
         " and fix",
         " then fix",
@@ -1536,6 +1636,44 @@ mod tests {
     }
 
     #[test]
+    fn classify_chinese_status_plans_without_tool_calls_as_progress_only() {
+        const HOPS: &[&str] = &[
+            "继续处理任务：先核对应输入和清单匹配，再按规则批量判定。",
+            "按原计划把剩余条目全部做完：先核对应关系，再批量处理并出最终表。",
+            "开始实际处理：先核对输入对应，再把全部条目判定并出表。",
+            "这次直接把核对和全部判定做完，不再停在中间步骤。",
+            "继续全文筛选：先核对应文件和清单匹配，再按规则批量判定。",
+            "马上把剩余条目全部做完：先核对应关系，再批量处理。",
+            "现在按规则把全部判定做完，不再停在中间步骤。",
+            "直接把核对和全部判定做完，不再停。",
+            "我先核对应关系，再批量处理。",
+        ];
+        for hop in HOPS {
+            assert!(is_progress_only_text(hop), "expected progress-only: {hop}");
+            assert_eq!(
+                classify_output_items(&[assistant_message(hop)]),
+                ResponsesTurnKind::ReasoningOnly,
+                "expected empty-hop classification: {hop}"
+            );
+        }
+        assert_eq!(
+            classify_output_items(&[
+                assistant_message("按原计划把剩余条目全部做完：先核对应关系，再批量处理。"),
+                json!({"type": "function_call", "name": "read_file", "call_id": "c1"})
+            ]),
+            ResponsesTurnKind::Productive
+        );
+        assert!(!is_progress_only_text("按原计划已经做完，结果如下。"));
+        assert!(!is_progress_only_text("开始实际处理后发现三处应改。"));
+        assert!(!is_progress_only_text("继续用现有实现，结论是路由没错。"));
+        assert!(!is_progress_only_text("先检查过了，问题在路由。"));
+        assert!(!is_progress_only_text("我打开了 README，结论是应改路由。"));
+        assert!(!is_progress_only_text("按原计划用现有实现。"));
+        assert!(!is_progress_only_text("应该先合并再发布。"));
+        assert!(!is_progress_only_text("建议先回滚再修。"));
+    }
+
+    #[test]
     fn rewrite_sse_completed_becomes_incomplete() {
         let sse = concat!(
             "event: response.output_item.done\n",
@@ -1589,6 +1727,9 @@ mod tests {
         let input = body["input"].as_array().unwrap();
         assert_eq!(input.len(), 2);
         assert_eq!(input[1]["role"], "developer");
+        let nudge = input[1]["content"][0]["text"].as_str().unwrap();
+        assert!(nudge.contains("function_call"));
+        assert!(nudge.contains("禁止再只回复"));
         assert_eq!(body["max_output_tokens"], 32768);
         let mut high = json!({ "max_output_tokens": 128000 });
         assert_eq!(raise_continue_max_output_tokens(&mut high), 128000);
@@ -1933,6 +2074,45 @@ mod tests {
                 panic!("trailing incomplete utf-8 must not poison a complete last frame")
             }
             InspectedTurn::Passthrough(_) => panic!("empty completed should continue"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inspect_chinese_status_plan_without_tool_call_is_empty_hop() {
+        let text = "按原计划把剩余条目全部做完：先核对应关系，再批量处理并出最终表。";
+        let item = assistant_message(text);
+        let delta = json!({ "type": "response.output_text.delta", "delta": text });
+        let done = json!({
+            "type": "response.output_item.done",
+            "item": item.clone()
+        });
+        let completed = json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "output": [item],
+                "usage": { "input_tokens": 12, "output_tokens": 18 }
+            }
+        });
+        let sse = format!(
+            "event: response.output_text.delta\ndata: {}\n\n\
+             event: response.output_item.done\ndata: {}\n\n\
+             event: response.completed\ndata: {}\n\n",
+            delta, done, completed
+        );
+        let response = ProxyResponse::streamed(
+            StatusCode::OK,
+            sse_headers(),
+            stream::iter([Ok(Bytes::from(sse))]),
+        );
+        match inspect_native_responses_turn(response).await {
+            InspectedTurn::ReasoningOnly { reason, .. } => {
+                assert_eq!(reason, EmptyHopReason::ProgressOnly);
+            }
+            InspectedTurn::Passthrough(_) => {
+                panic!("chinese status/plan with no tool call must continue, not complete")
+            }
+            InspectedTurn::StreamBroken { .. } => panic!("complete sse is not a stream break"),
         }
     }
 
