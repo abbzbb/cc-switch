@@ -2062,7 +2062,7 @@ requires_openai_auth = true
             .filter_map(|entry| entry.get("slug").and_then(Value::as_str))
             .collect();
         assert!(
-            slugs.iter().any(|slug| *slug == "p1/gpt-5.4"),
+            slugs.contains(&"p1/gpt-5.4"),
             "toml-advertised model must remain in the merged catalog: {slugs:?}"
         );
 

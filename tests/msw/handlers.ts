@@ -46,6 +46,17 @@ export const handlers = [
   http.post(`${TAURI_ENDPOINT}/get_skills_migration_result`, () =>
     success(null),
   ),
+  http.post(`${TAURI_ENDPOINT}/get_installed_skills`, () => success([])),
+  http.post(`${TAURI_ENDPOINT}/auth_get_status`, async ({ request }) => {
+    const { authProvider } = await withJson<{ authProvider: string }>(request);
+    return success({
+      provider: authProvider,
+      authenticated: false,
+      default_account_id: null,
+      migration_error: null,
+      accounts: [],
+    });
+  }),
   http.post(`${TAURI_ENDPOINT}/list_profiles`, () => success([])),
   http.post(`${TAURI_ENDPOINT}/get_providers`, async ({ request }) => {
     const { app } = await withJson<{ app: AppId }>(request);
@@ -231,6 +242,10 @@ export const handlers = [
     setSettings(settings);
     return success(true);
   }),
+
+  http.post(`${TAURI_ENDPOINT}/validate_app_config_dir_override`, () =>
+    success(true),
+  ),
 
   http.post(
     `${TAURI_ENDPOINT}/set_app_config_dir_override`,

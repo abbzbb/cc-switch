@@ -837,7 +837,7 @@ fn anthropic_token_url() -> String {
 fn pkce_bind_addr() -> SocketAddr {
     #[cfg(test)]
     {
-        return SocketAddr::from(([127, 0, 0, 1], 0));
+        SocketAddr::from(([127, 0, 0, 1], 0))
     }
     #[cfg(not(test))]
     SocketAddr::from(([127, 0, 0, 1], PKCE_CALLBACK_PORT))
@@ -846,7 +846,7 @@ fn pkce_bind_addr() -> SocketAddr {
 fn pkce_redirect_uri(local_addr: SocketAddr) -> String {
     #[cfg(test)]
     {
-        return format!("http://127.0.0.1:{}/callback", local_addr.port());
+        format!("http://127.0.0.1:{}/callback", local_addr.port())
     }
     #[cfg(not(test))]
     {

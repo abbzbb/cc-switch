@@ -579,7 +579,7 @@ async fn manager_backend(backend: SidecarBackend, state: &ProxyState) -> Option<
     #[cfg(test)]
     {
         let _ = (backend, state);
-        return None;
+        None
     }
     #[cfg(not(test))]
     {

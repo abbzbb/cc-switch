@@ -200,6 +200,9 @@ describe("SettingsPage integration", () => {
 
     await waitFor(() => expect(toastSuccessMock).toHaveBeenCalled());
     await screen.findByText("settings.restartRequired");
+    expect(
+      screen.getByText("settings.restartRequiredMessage"),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByText("settings.restartLater"));
     await waitFor(() =>
       expect(

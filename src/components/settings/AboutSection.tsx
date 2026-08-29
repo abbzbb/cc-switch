@@ -107,58 +107,42 @@ const ENV_BADGE_CONFIG: Record<
   },
 };
 
-const posixScriptInstallCommand = (url: string) =>
-  `bash -c 'tmp=$(mktemp) && curl -fsSL ${url} -o $tmp && bash $tmp; status=$?; rm -f $tmp; exit $status'`;
-
-const HERMES_WINDOWS_INSTALL_SCRIPT =
-  "irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex";
-
-const powershellEncodedCommand = (script: string): string => {
-  let binary = "";
-  for (let i = 0; i < script.length; i += 1) {
-    const code = script.charCodeAt(i);
-    binary += String.fromCharCode(code & 0xff, code >> 8);
-  }
-  return btoa(binary);
-};
-
-const HERMES_WINDOWS_INSTALL_COMMAND = `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${powershellEncodedCommand(
-  HERMES_WINDOWS_INSTALL_SCRIPT,
-)}`;
+const HERMES_WHEEL =
+  "https://files.pythonhosted.org/packages/e5/30/c85be8290e9565dc3c7a9720e93f3e59e09b1b163487be4946c3aa848f80/hermes_agent-0.19.0-py3-none-any.whl#sha256=bd0bac012aee38a60894781f4597dc29ee7bedb3448540249921f10d3bef327f";
 
 const POSIX_ONE_CLICK_INSTALL_COMMANDS = `# Claude Code
-${posixScriptInstallCommand("https://claude.ai/install.sh")} || npm i -g @anthropic-ai/claude-code@latest
+npm i -g @anthropic-ai/claude-code@2.1.250
 # Codex
-npm i -g @openai/codex@latest
+npm i -g @openai/codex@0.150.1
 # Gemini CLI
-npm i -g @google/gemini-cli@latest
+npm i -g @google/gemini-cli@0.57.0
 # Grok Build
-npm i -g @xai-official/grok@latest
+npm i -g @xai-official/grok@1.0.5
 # OpenCode
-${posixScriptInstallCommand("https://opencode.ai/install")} || npm i -g opencode-ai@latest
+npm i -g opencode-ai@1.18.24
 # OpenClaw
-npm i -g openclaw@latest
+npm i -g openclaw@2026.7.1-2
 # Hermes
-${posixScriptInstallCommand("https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh")}
+python3 -m pip install --user --upgrade '${HERMES_WHEEL}'
 # Pi
-npm i -g @earendil-works/pi-coding-agent@latest`;
+npm i -g @earendil-works/pi-coding-agent@0.84.3`;
 
 const WINDOWS_ONE_CLICK_INSTALL_COMMANDS = `# Claude Code
-npm i -g @anthropic-ai/claude-code@latest
+npm i -g @anthropic-ai/claude-code@2.1.250
 # Codex
-npm i -g @openai/codex@latest
+npm i -g @openai/codex@0.150.1
 # Gemini CLI
-npm i -g @google/gemini-cli@latest
+npm i -g @google/gemini-cli@0.57.0
 # Grok Build
-npm i -g @xai-official/grok@latest
+npm i -g @xai-official/grok@1.0.5
 # OpenCode
-npm i -g opencode-ai@latest
+npm i -g opencode-ai@1.18.24
 # OpenClaw
-npm i -g openclaw@latest
+npm i -g openclaw@2026.7.1-2
 # Hermes
-${HERMES_WINDOWS_INSTALL_COMMAND}
+py -3.11 -m pip install --user --upgrade "${HERMES_WHEEL}"
 # Pi
-npm i -g @earendil-works/pi-coding-agent@latest`;
+npm i -g @earendil-works/pi-coding-agent@0.84.3`;
 
 const ONE_CLICK_INSTALL_COMMANDS = isWindows()
   ? WINDOWS_ONE_CLICK_INSTALL_COMMANDS
@@ -447,13 +431,13 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
 
       if (!displayVersion) {
         await settingsApi.openExternal(
-          "https://github.com/farion1231/cc-switch/releases",
+          "https://github.com/abbzbb/cc-switch/releases",
         );
         return;
       }
 
       await settingsApi.openExternal(
-        `https://github.com/farion1231/cc-switch/releases/tag/${displayVersion}`,
+        `https://github.com/abbzbb/cc-switch/releases/tag/${displayVersion}`,
       );
     } catch (error) {
       console.error("[AboutSection] Failed to open release notes", error);
@@ -914,9 +898,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               variant="outline"
               size="sm"
               onClick={() =>
-                settingsApi.openExternal(
-                  "https://github.com/farion1231/cc-switch",
-                )
+                settingsApi.openExternal("https://github.com/abbzbb/cc-switch")
               }
               className="h-8 gap-1.5 text-xs"
             >

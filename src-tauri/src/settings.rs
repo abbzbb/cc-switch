@@ -1446,9 +1446,11 @@ mod tests {
         let home = IsolatedHome::new();
         set_current_provider(&AppType::Claude, Some("live-id")).expect("seed current provider");
 
-        let mut stale = AppSettings::default();
-        stale.current_provider_claude = Some("stale-id".to_string());
-        stale.language = Some("en".to_string());
+        let stale = AppSettings {
+            current_provider_claude: Some("stale-id".to_string()),
+            language: Some("en".to_string()),
+            ..Default::default()
+        };
         update_settings_from_frontend(stale).expect("update settings from frontend");
 
         assert_eq!(

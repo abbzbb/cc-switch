@@ -8,7 +8,7 @@ use crate::error::AppError;
 use chrono::{Local, Utc};
 use rusqlite::backup::{Backup, StepResult};
 use rusqlite::types::ValueRef;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -48,11 +48,9 @@ const IMPORT_ALLOWED_PRAGMAS: &[&str] = &["foreign_keys", "user_version"];
 /// 大小写、换行绕过，还漏掉 `VACUUM INTO`。authorizer 在 prepare 阶段按**解析结果**
 /// 回调，绕不过语法层。
 ///
-/// 为什么是「拒绝越界动作」而不是「只放行 dump_sql 的语句」：这段 SQL 跑在
-/// `NamedTempFile` 建的一次性库上，而那个库的全部内容本来就由这份 SQL 决定。
-/// 因此 `DELETE` / `DROP` / `UPDATE` 给不了攻击者任何新东西——**唯一有意义的边界
-/// 是那个临时文件本身**。按 dump_sql 的产物做严格白名单只会带来误伤风险（用户
-/// 库里出现一种没预料到的对象就恢复不了备份），却不多挡任何攻击。
+/// 为什么不是「只放行 dump_sql 的全部语句」：大多数表内写操作只影响一次性暂存
+/// 库，可以留给后续 schema/数据校验；trigger 是例外，它能在 sanitizer 的可信写入
+/// 时重新注入令牌或启用脚本，因此生产 schema 不使用的 trigger DDL 必须直接拒绝。
 ///
 /// 越界动作是实测出来的，不是推断的：
 /// - `ATTACH DATABASE 'x'`、`VACUUM INTO 'x'`、裸 `VACUUM` **三者都**报
@@ -63,9 +61,13 @@ const IMPORT_ALLOWED_PRAGMAS: &[&str] = &["foreign_keys", "user_version"];
 fn import_authorizer(context: rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization {
     use rusqlite::hooks::{AuthAction, Authorization};
 
-    let escapes_temp_db = match context.action {
+    let denied_action = match context.action {
         AuthAction::Attach { .. } | AuthAction::Detach { .. } => true,
         AuthAction::CreateVtable { .. } | AuthAction::DropVtable { .. } => true,
+        AuthAction::CreateTrigger { .. }
+        | AuthAction::CreateTempTrigger { .. }
+        | AuthAction::DropTrigger { .. }
+        | AuthAction::DropTempTrigger { .. } => true,
         AuthAction::Unknown { .. } => true,
         AuthAction::Pragma { pragma_name, .. } => !IMPORT_ALLOWED_PRAGMAS
             .iter()
@@ -73,9 +75,9 @@ fn import_authorizer(context: rusqlite::hooks::AuthContext<'_>) -> rusqlite::hoo
         _ => false,
     };
 
-    if escapes_temp_db {
+    if denied_action {
         // SQLite 只会回一句 "not authorized"，不记日志就无从知道是哪条语句被拦。
-        log::warn!("SQL 导入拒绝了越界语句: {:?}", context.action);
+        log::warn!("SQL 导入拒绝了危险语句: {:?}", context.action);
         Authorization::Deny
     } else {
         Authorization::Allow
@@ -111,6 +113,12 @@ const SYNC_PRESERVE_TABLES: &[&str] = &[
     "session_usage_dedup",
 ];
 
+/// Capability tokens are owned by the installation that created them. They
+/// must never leave the device through a sync snapshot or be accepted from an
+/// imported database, even when the local installation has not generated one
+/// yet (in that case the normal getter creates a fresh token on first use).
+const DEVICE_LOCAL_SETTING_KEYS: &[&str] = &["proxy_inbound_token", "claude_desktop_gateway_token"];
+
 /// A database backup entry for the UI
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -130,6 +138,10 @@ impl Database {
     /// Export SQL for sync (WebDAV), skipping local-only tables' data
     pub fn export_sql_string_for_sync(&self) -> Result<String, AppError> {
         let snapshot = self.snapshot_to_memory()?;
+        Self::remove_all_triggers(&snapshot)?;
+        Self::assert_no_triggers(&snapshot)?;
+        Self::remove_device_local_settings(&snapshot)?;
+        Self::assert_device_local_settings_absent(&snapshot)?;
         Self::dump_sql(&snapshot, SYNC_SKIP_TABLES)
     }
 
@@ -225,10 +237,13 @@ impl Database {
         // Validate the schema produced by the input itself before migrations
         // can create missing tables and accidentally make a truncated file look valid.
         Self::validate_imported_schema(&temp_conn)?;
+        Self::remove_all_triggers(&temp_conn)?;
+        Self::assert_no_triggers(&temp_conn)?;
 
         // 补齐缺失表/索引并执行迁移
         Self::create_tables_on_conn(&temp_conn)?;
         Self::apply_schema_migrations_on_conn(&temp_conn)?;
+        Self::harden_imported_usage_scripts(&temp_conn)?;
         on_staging_ready()?;
 
         let backup_file_guard = lock_backup_file_operations()?;
@@ -242,6 +257,10 @@ impl Database {
             if !preserve_tables.is_empty() {
                 Self::restore_tables(&main_conn, &temp_conn, preserve_tables)?;
             }
+            Self::restore_device_local_settings(&main_conn, &temp_conn)?;
+            Self::assert_no_triggers(&temp_conn)?;
+            Self::assert_device_local_settings_match(&main_conn, &temp_conn)?;
+            Self::assert_usage_scripts_hardened(&temp_conn)?;
             let backup = Backup::new(&temp_conn, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
             Self::complete_backup(&backup, "替换主数据库")?;
@@ -369,6 +388,215 @@ impl Database {
 
         tx.commit()
             .map_err(|e| AppError::Database(format!("提交恢复事务失败: {e}")))?;
+        Ok(())
+    }
+
+    /// Production schema does not use SQLite triggers. Imported triggers can
+    /// undo every sanitizer write, so their absence is a security invariant
+    /// before and after any staging/snapshot mutation.
+    fn remove_all_triggers(conn: &Connection) -> Result<(), AppError> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name")
+            .map_err(|e| AppError::Database(format!("enumerate imported triggers failed: {e}")))?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| AppError::Database(format!("query imported triggers failed: {e}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::Database(format!("decode imported trigger failed: {e}")))?;
+        drop(stmt);
+
+        for name in names {
+            conn.execute_batch(&format!("DROP TRIGGER {}", Self::quote_identifier(&name)))
+                .map_err(|e| {
+                    AppError::Database(format!("remove imported trigger {name} failed: {e}"))
+                })?;
+        }
+        Ok(())
+    }
+
+    fn assert_no_triggers(conn: &Connection) -> Result<(), AppError> {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Database(format!("verify imported triggers failed: {e}")))?;
+        if count == 0 {
+            Ok(())
+        } else {
+            Err(AppError::Database(format!(
+                "imported database still contains {count} trigger(s) after sanitization"
+            )))
+        }
+    }
+
+    fn remove_device_local_settings(conn: &Connection) -> Result<(), AppError> {
+        for key in DEVICE_LOCAL_SETTING_KEYS {
+            conn.execute("DELETE FROM settings WHERE key = ?1", [key])
+                .map_err(|e| {
+                    AppError::Database(format!("remove device-local setting {key} failed: {e}"))
+                })?;
+        }
+        Ok(())
+    }
+
+    fn device_local_setting_value(
+        conn: &Connection,
+        key: &str,
+    ) -> Result<Option<String>, AppError> {
+        conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+            row.get::<_, Option<String>>(0)
+        })
+        .optional()
+        .map(|value| value.flatten())
+        .map_err(|e| AppError::Database(format!("read device-local setting {key} failed: {e}")))
+    }
+
+    fn assert_device_local_settings_absent(conn: &Connection) -> Result<(), AppError> {
+        for key in DEVICE_LOCAL_SETTING_KEYS {
+            if Self::device_local_setting_value(conn, key)?.is_some() {
+                return Err(AppError::Database(format!(
+                    "device-local setting {key} remained in sync snapshot"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn assert_device_local_settings_match(
+        source_conn: &Connection,
+        target_conn: &Connection,
+    ) -> Result<(), AppError> {
+        for key in DEVICE_LOCAL_SETTING_KEYS {
+            let local = Self::device_local_setting_value(source_conn, key)?;
+            let staged = Self::device_local_setting_value(target_conn, key)?;
+            if staged != local {
+                return Err(AppError::Database(format!(
+                    "device-local setting {key} does not match the live database"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn restore_device_local_settings(
+        source_conn: &Connection,
+        target_conn: &Connection,
+    ) -> Result<(), AppError> {
+        let tx = target_conn
+            .unchecked_transaction()
+            .map_err(|e| AppError::Database(format!("start local-settings restore failed: {e}")))?;
+
+        for key in DEVICE_LOCAL_SETTING_KEYS {
+            let local_value = Self::device_local_setting_value(source_conn, key)?;
+
+            tx.execute("DELETE FROM settings WHERE key = ?1", [key])
+                .map_err(|e| {
+                    AppError::Database(format!("clear imported local setting {key} failed: {e}"))
+                })?;
+            if let Some(value) = local_value {
+                tx.execute(
+                    "INSERT INTO settings (key, value) VALUES (?1, ?2)",
+                    rusqlite::params![key, value],
+                )
+                .map_err(|e| {
+                    AppError::Database(format!("restore device-local setting {key} failed: {e}"))
+                })?;
+            }
+        }
+
+        tx.commit()
+            .map_err(|e| AppError::Database(format!("commit local-settings restore failed: {e}")))
+    }
+
+    /// Imported provider metadata is untrusted. Keep the script contents for
+    /// review, but prevent execution, periodic queries, and private-network
+    /// access until the user explicitly revisits the provider configuration.
+    fn harden_imported_usage_scripts(conn: &Connection) -> Result<(), AppError> {
+        let mut stmt = conn
+            .prepare("SELECT rowid, meta FROM providers")
+            .map_err(|e| AppError::Database(format!("read imported providers failed: {e}")))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| AppError::Database(format!("query imported providers failed: {e}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::Database(format!("decode imported provider failed: {e}")))?;
+        drop(stmt);
+
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| AppError::Database(format!("start script hardening failed: {e}")))?;
+        for (rowid, meta_json) in rows {
+            let mut meta = serde_json::from_str::<serde_json::Value>(&meta_json).map_err(|e| {
+                AppError::Database(format!("invalid imported provider metadata: {e}"))
+            })?;
+            let Some(usage_script) = meta.get_mut("usage_script") else {
+                continue;
+            };
+            let script = usage_script.as_object_mut().ok_or_else(|| {
+                AppError::Database("imported usage_script must be an object".to_string())
+            })?;
+
+            script.insert("enabled".to_string(), serde_json::Value::Bool(false));
+            script.insert(
+                "autoQueryInterval".to_string(),
+                serde_json::Value::Number(0.into()),
+            );
+            script.insert(
+                "restrictPrivateHosts".to_string(),
+                serde_json::Value::Bool(true),
+            );
+            let hardened = serde_json::to_string(&meta)
+                .map_err(|e| AppError::Database(format!("encode hardened script failed: {e}")))?;
+            tx.execute(
+                "UPDATE providers SET meta = ?1 WHERE rowid = ?2",
+                rusqlite::params![hardened, rowid],
+            )
+            .map_err(|e| AppError::Database(format!("harden imported script failed: {e}")))?;
+        }
+        tx.commit()
+            .map_err(|e| AppError::Database(format!("commit script hardening failed: {e}")))
+    }
+
+    fn assert_usage_scripts_hardened(conn: &Connection) -> Result<(), AppError> {
+        let mut stmt = conn
+            .prepare("SELECT id, app_type, meta FROM providers")
+            .map_err(|e| AppError::Database(format!("verify imported scripts failed: {e}")))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| AppError::Database(format!("query imported scripts failed: {e}")))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| AppError::Database(format!("read imported script failed: {e}")))?
+        {
+            let id: String = row.get(0).map_err(AppError::from)?;
+            let app_type: String = row.get(1).map_err(AppError::from)?;
+            let meta_json: String = row.get(2).map_err(AppError::from)?;
+            let meta: serde_json::Value = serde_json::from_str(&meta_json).map_err(|e| {
+                AppError::Database(format!(
+                    "invalid imported provider metadata for {app_type}/{id}: {e}"
+                ))
+            })?;
+            let Some(usage_script) = meta.get("usage_script") else {
+                continue;
+            };
+            let script = usage_script.as_object().ok_or_else(|| {
+                AppError::Database(format!(
+                    "imported usage_script for {app_type}/{id} must be an object"
+                ))
+            })?;
+            let hardened = script.get("enabled") == Some(&serde_json::Value::Bool(false))
+                && script.get("autoQueryInterval") == Some(&serde_json::json!(0))
+                && script.get("restrictPrivateHosts") == Some(&serde_json::Value::Bool(true));
+            if !hardened {
+                return Err(AppError::Database(format!(
+                    "imported usage_script for {app_type}/{id} was not hardened"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1065,10 +1293,13 @@ impl Database {
 
         Self::validate_sqlite_integrity(&staging_conn)?;
         Self::validate_imported_schema(&staging_conn)?;
+        Self::remove_all_triggers(&staging_conn)?;
+        Self::assert_no_triggers(&staging_conn)?;
         Self::ensure_incremental_auto_vacuum_on_conn(&staging_conn)?;
         Self::create_tables_on_conn(&staging_conn)?;
         Self::apply_schema_migrations_on_conn(&staging_conn)?;
         Self::ensure_model_pricing_seeded_on_conn(&staging_conn)?;
+        Self::harden_imported_usage_scripts(&staging_conn)?;
         Self::validate_sqlite_integrity(&staging_conn)?;
 
         // Keep one main-DB guard across the safety snapshot and final apply so
@@ -1082,6 +1313,10 @@ impl Database {
             )?;
             before_replace(safety_backup.as_deref())?;
             Self::restore_tables(&main_conn, &staging_conn, DEVICE_LOCAL_RUNTIME_TABLES)?;
+            Self::restore_device_local_settings(&main_conn, &staging_conn)?;
+            Self::assert_no_triggers(&staging_conn)?;
+            Self::assert_device_local_settings_match(&main_conn, &staging_conn)?;
+            Self::assert_usage_scripts_hardened(&staging_conn)?;
             let backup = Backup::new(&staging_conn, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
             Self::complete_backup(&backup, "恢复主数据库")?;
@@ -2179,6 +2414,253 @@ mod tests {
     }
 
     #[test]
+    fn sync_export_excludes_device_local_capability_tokens() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                ["proxy_inbound_token", "local-proxy-secret"],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                ["claude_desktop_gateway_token", "local-gateway-secret"],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                ["sync-safe-setting", "sync-safe-value"],
+            )?;
+            conn.execute_batch(
+                "CREATE TRIGGER leak_deleted_token AFTER DELETE ON settings
+                 WHEN OLD.key IN ('proxy_inbound_token', 'claude_desktop_gateway_token')
+                 BEGIN
+                   INSERT OR REPLACE INTO settings (key, value)
+                   VALUES ('exfiltrated-token', OLD.value);
+                 END;",
+            )?;
+        }
+
+        let sql = db.export_sql_string_for_sync()?;
+        assert!(!sql.contains("proxy_inbound_token"));
+        assert!(!sql.contains("claude_desktop_gateway_token"));
+        assert!(!sql.contains("local-proxy-secret"));
+        assert!(!sql.contains("local-gateway-secret"));
+        assert!(!sql.contains("leak_deleted_token"));
+        assert!(!sql.contains("exfiltrated-token"));
+
+        let exported = Connection::open_in_memory()?;
+        exported.execute_batch(&sql)?;
+        let safe_value: String = exported.query_row(
+            "SELECT value FROM settings WHERE key = 'sync-safe-setting'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(safe_value, "sync-safe-value");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn sql_import_rejects_triggers_without_touching_live_or_safety_backups() -> Result<(), AppError>
+    {
+        let _test_home = TestHomeGuard::new();
+        let remote_db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(remote_db.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('attacker', 'claude', 'Attacker', '{}',
+                 '{\"usage_script\":{\"enabled\":true,\"language\":\"javascript\",\"code\":\"return fetch(\\\"http://127.0.0.1\\\")\",\"autoQueryInterval\":1,\"restrictPrivateHosts\":false}}')",
+                [],
+            )?;
+            conn.execute_batch(
+                "CREATE TRIGGER attacker_reenable AFTER UPDATE ON providers
+                 BEGIN
+                   INSERT OR REPLACE INTO settings (key, value)
+                   VALUES ('proxy_inbound_token', 'attacker-token');
+                 END;",
+            )?;
+        }
+        let malicious_sql = remote_db.export_sql_string()?;
+
+        let local_db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(local_db.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('live-provider', 'claude', 'Live', '{}', '{}')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                ["proxy_inbound_token", "live-token"],
+            )?;
+        }
+        let backup_dir = crate::config::get_app_config_dir().join("backups");
+        let backup_count = || {
+            std::fs::read_dir(&backup_dir)
+                .map(|entries| entries.filter_map(Result::ok).count())
+                .unwrap_or(0)
+        };
+        let before_backups = backup_count();
+
+        assert!(local_db.import_sql_string(&malicious_sql).is_err());
+        assert!(local_db.import_sql_string_for_sync(&malicious_sql).is_err());
+        assert_eq!(backup_count(), before_backups);
+
+        let conn = crate::database::lock_conn!(local_db.conn);
+        let live: (String, String) = conn.query_row(
+            "SELECT
+                (SELECT id FROM providers WHERE app_type = 'claude'),
+                (SELECT value FROM settings WHERE key = 'proxy_inbound_token')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(live, ("live-provider".into(), "live-token".into()));
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn sync_import_preserves_local_tokens_and_rejects_remote_token_injection(
+    ) -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let remote_db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(remote_db.conn);
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                ["proxy_inbound_token", "attacker-proxy-token"],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                ["claude_desktop_gateway_token", "attacker-gateway-token"],
+            )?;
+        }
+        // A crafted remote is not required to have passed through our exporter.
+        let malicious_remote_sql = remote_db.export_sql_string()?;
+
+        let local_db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(local_db.conn);
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                ["proxy_inbound_token", "local-proxy-token"],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                ["claude_desktop_gateway_token", "local-gateway-token"],
+            )?;
+        }
+
+        local_db.import_sql_string_for_sync(&malicious_remote_sql)?;
+        let conn = crate::database::lock_conn!(local_db.conn);
+        let tokens: (String, String) = conn.query_row(
+            "SELECT
+                (SELECT value FROM settings WHERE key = 'proxy_inbound_token'),
+                (SELECT value FROM settings WHERE key = 'claude_desktop_gateway_token')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(
+            tokens,
+            ("local-proxy-token".into(), "local-gateway-token".into())
+        );
+        drop(conn);
+
+        let fresh_install = Database::memory()?;
+        fresh_install.import_sql_string_for_sync(&malicious_remote_sql)?;
+        let conn = crate::database::lock_conn!(fresh_install.conn);
+        let imported_token_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM settings
+             WHERE key IN ('proxy_inbound_token', 'claude_desktop_gateway_token')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            imported_token_count, 0,
+            "a fresh install must generate new local tokens instead of trusting remote values"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn imported_usage_scripts_are_disabled_and_private_network_restricted() -> Result<(), AppError>
+    {
+        let _test_home = TestHomeGuard::new();
+        let remote_db = Database::memory()?;
+        let malicious_meta = serde_json::json!({
+            "usage_script": {
+                "enabled": true,
+                "language": "javascript",
+                "code": "return fetch('http://169.254.169.254/latest/meta-data')",
+                "autoQueryInterval": 1,
+                "restrictPrivateHosts": false
+            }
+        })
+        .to_string();
+        {
+            let conn = crate::database::lock_conn!(remote_db.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('malicious-script', 'claude', 'Remote', '{}', ?1)",
+                [&malicious_meta],
+            )?;
+        }
+        let remote_sql = remote_db.export_sql_string()?;
+
+        for import_for_sync in [false, true] {
+            let target = Database::memory()?;
+            {
+                let conn = crate::database::lock_conn!(target.conn);
+                conn.execute(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                    ["proxy_inbound_token", "local-proxy-token"],
+                )?;
+                conn.execute(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                    ["claude_desktop_gateway_token", "local-gateway-token"],
+                )?;
+            }
+            if import_for_sync {
+                target.import_sql_string_for_sync(&remote_sql)?;
+            } else {
+                target.import_sql_string(&remote_sql)?;
+            }
+
+            let conn = crate::database::lock_conn!(target.conn);
+            let meta_json: String = conn.query_row(
+                "SELECT meta FROM providers
+                 WHERE id = 'malicious-script' AND app_type = 'claude'",
+                [],
+                |row| row.get(0),
+            )?;
+            let meta: serde_json::Value = serde_json::from_str(&meta_json)
+                .map_err(|e| AppError::Database(format!("parse hardened provider meta: {e}")))?;
+            let script = &meta["usage_script"];
+            assert_eq!(script["enabled"], false);
+            assert_eq!(script["autoQueryInterval"], 0);
+            assert_eq!(script["restrictPrivateHosts"], true);
+            assert!(script["code"]
+                .as_str()
+                .is_some_and(|code| code.contains("169.254.169.254")));
+            let tokens: (String, String) = conn.query_row(
+                "SELECT
+                    (SELECT value FROM settings WHERE key = 'proxy_inbound_token'),
+                    (SELECT value FROM settings WHERE key = 'claude_desktop_gateway_token')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(
+                tokens,
+                ("local-proxy-token".into(), "local-gateway-token".into())
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     #[serial]
     fn manual_sql_import_preserves_device_local_proxy_runtime() -> Result<(), AppError> {
         let _test_home = TestHomeGuard::new();
@@ -2919,6 +3401,95 @@ mod tests {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         assert_eq!(runtime, (33333, 1, "local-live".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn binary_restore_removes_triggers_and_enforces_tokens_and_script_policy(
+    ) -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let db = Database::init()?;
+        let malicious_meta = serde_json::json!({
+            "usage_script": {
+                "enabled": true,
+                "language": "javascript",
+                "code": "return fetch('http://169.254.169.254/latest/meta-data')",
+                "autoQueryInterval": 1,
+                "restrictPrivateHosts": false
+            }
+        })
+        .to_string();
+        let quoted_malicious_meta = format!("'{}'", malicious_meta.replace('\'', "''"));
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute("DELETE FROM providers", [])?;
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('binary-attacker', 'claude', 'Attacker', '{}', ?1)",
+                [&malicious_meta],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                ["proxy_inbound_token", "attacker-proxy-token"],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                ["claude_desktop_gateway_token", "attacker-gateway-token"],
+            )?;
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER binary_reinject_token AFTER DELETE ON settings
+                 WHEN OLD.key IN ('proxy_inbound_token', 'claude_desktop_gateway_token')
+                 BEGIN
+                   INSERT OR REPLACE INTO settings (key, value) VALUES (OLD.key, 'attacker-token');
+                 END;
+                 CREATE TRIGGER binary_reenable_script AFTER UPDATE ON providers
+                 BEGIN
+                   UPDATE providers SET meta = {} WHERE rowid = NEW.rowid;
+                 END;",
+                quoted_malicious_meta
+            ))?;
+        }
+        let source_path = db
+            .backup_database_file()?
+            .expect("file-backed database should create a malicious backup");
+        let source_filename = source_path
+            .file_name()
+            .expect("backup filename")
+            .to_string_lossy()
+            .into_owned();
+
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute_batch(
+                "DROP TRIGGER binary_reinject_token;
+                 DROP TRIGGER binary_reenable_script;",
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                ["proxy_inbound_token", "local-proxy-token"],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                ["claude_desktop_gateway_token", "local-gateway-token"],
+            )?;
+        }
+
+        db.restore_from_backup(&source_filename)?;
+        let conn = crate::database::lock_conn!(db.conn);
+        Database::assert_no_triggers(&conn)?;
+        Database::assert_usage_scripts_hardened(&conn)?;
+        let tokens: (String, String) = conn.query_row(
+            "SELECT
+                (SELECT value FROM settings WHERE key = 'proxy_inbound_token'),
+                (SELECT value FROM settings WHERE key = 'claude_desktop_gateway_token')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(
+            tokens,
+            ("local-proxy-token".into(), "local-gateway-token".into())
+        );
         Ok(())
     }
 

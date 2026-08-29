@@ -72,6 +72,9 @@ export const emitTauriEvent = (event: string, payload: unknown) => {
   handlers?.forEach((handler) => handler({ payload: normalizedPayload }));
 };
 
+export const getTauriListenerCount = (event: string) =>
+  listeners.get(event)?.size ?? 0;
+
 vi.mock("@tauri-apps/api/event", () => ({
   listen: async (
     event: string,

@@ -195,24 +195,10 @@ impl Database {
         let db = Self {
             conn: Mutex::new(conn),
         };
-        db.create_tables()?;
-
-        // Pre-migration backup: only when upgrading from an existing database
-        {
-            let conn = lock_conn!(db.conn);
-            let version = Self::get_user_version(&conn)?;
-            drop(conn);
-            if version > 0 && version < SCHEMA_VERSION {
-                log::info!(
-                    "Creating pre-migration database backup (v{version} → v{SCHEMA_VERSION})"
-                );
-                if let Err(e) = db.backup_database_file() {
-                    log::warn!("Pre-migration backup failed, continuing migration: {e}");
-                }
-            }
-        }
-
-        db.apply_schema_migrations()?;
+        db.initialize_schema(db_exists, |db, version| {
+            log::info!("Creating pre-migration database backup (v{version} → v{SCHEMA_VERSION})");
+            db.backup_database_file().map(|_| ())
+        })?;
         if let Err(e) = db.ensure_incremental_auto_vacuum() {
             log::warn!("Failed to ensure incremental auto-vacuum: {e}");
         }
@@ -240,6 +226,31 @@ impl Database {
         restrict_sqlite_file_permissions(&db_path);
 
         Ok(db)
+    }
+
+    /// Validate and snapshot an existing database before any compatibility or
+    /// migration writes are allowed to run.
+    fn initialize_schema<F>(&self, db_exists: bool, backup: F) -> Result<(), AppError>
+    where
+        F: FnOnce(&Self, i32) -> Result<(), AppError>,
+    {
+        let version = {
+            let conn = lock_conn!(self.conn);
+            Self::get_user_version(&conn)?
+        };
+
+        if version > SCHEMA_VERSION {
+            return Err(AppError::Database(format!(
+                "数据库版本过新（{version}），当前应用仅支持 {SCHEMA_VERSION}，请升级应用后再尝试。"
+            )));
+        }
+
+        if db_exists && version < SCHEMA_VERSION {
+            backup(self, version)?;
+        }
+
+        self.create_tables()?;
+        self.apply_schema_migrations()
     }
 
     /// 读取磁盘上数据库的 `user_version`；仅当它比应用支持的 [`SCHEMA_VERSION`]

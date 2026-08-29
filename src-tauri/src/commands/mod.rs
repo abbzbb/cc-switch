@@ -69,6 +69,7 @@ pub use settings::*;
 pub use skill::*;
 pub use stream_check::*;
 pub use subscription::*;
+pub(crate) use sync_support::retry_pending_post_import_sync;
 pub use xai_oauth::*;
 
 pub use lightweight::*;

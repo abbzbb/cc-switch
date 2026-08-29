@@ -409,25 +409,35 @@ describe("App integration with MSW", () => {
     const liveIdsSpy = vi
       .spyOn(providersApi, "getOpenClawLiveProviderIds")
       .mockRejectedValueOnce(new Error("broken config"));
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
 
-    const { default: App } = await import("@/App");
-    renderApp(App);
+    try {
+      const { default: App } = await import("@/App");
+      renderApp(App);
 
-    fireEvent.click(screen.getByText("switch-openclaw"));
+      fireEvent.click(screen.getByText("switch-openclaw"));
 
-    await waitFor(() => expect(providerListText()).toContain("deepseek"));
+      await waitFor(() => expect(providerListText()).toContain("deepseek"));
 
-    fireEvent.click(screen.getByText("duplicate"));
+      fireEvent.click(screen.getByText("duplicate"));
 
-    await waitFor(() => {
-      expect(toastErrorMock).toHaveBeenCalledWith(
-        expect.stringContaining("读取配置中的供应商标识失败"),
+      await waitFor(() => {
+        expect(toastErrorMock).toHaveBeenCalledWith(
+          expect.stringContaining("读取配置中的供应商标识失败"),
+        );
+      });
+
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        "[App] Failed to load live provider IDs for duplication",
+        expect.objectContaining({ message: "broken config" }),
       );
-    });
-
-    expect(providerListText()).not.toContain("deepseek-copy");
-
-    liveIdsSpy.mockRestore();
+      expect(providerListText()).not.toContain("deepseek-copy");
+    } finally {
+      liveIdsSpy.mockRestore();
+      consoleErrorSpy.mockRestore();
+    }
   });
 
   it("hosts the Skills check-update action in the App toolbar", async () => {

@@ -1849,7 +1849,7 @@ mod tests {
     #[test]
     fn inner_slash_alias_matches() {
         let kimi = provider("kimi", "Kimi", &["org/model"]);
-        match decide_model_route(&[kimi.clone()], "org-model") {
+        match decide_model_route(std::slice::from_ref(&kimi), "org-model") {
             ModelRouteDecision::Pinned {
                 provider_id,
                 upstream_model,
@@ -1859,7 +1859,7 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        match decide_model_route(&[kimi.clone()], "kimi/org-model") {
+        match decide_model_route(std::slice::from_ref(&kimi), "kimi/org-model") {
             ModelRouteDecision::Pinned {
                 provider_id,
                 upstream_model,
@@ -1869,7 +1869,7 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        match decide_model_route(&[kimi.clone()], "kimi/org/model") {
+        match decide_model_route(std::slice::from_ref(&kimi), "kimi/org/model") {
             ModelRouteDecision::Pinned { upstream_model, .. } => {
                 assert_eq!(upstream_model, "org/model");
             }
@@ -2175,7 +2175,7 @@ mod tests {
         };
         let catalog = build_merged_codex_routing_catalog_with_combos(
             &[kimi.clone(), ds.clone()],
-            &[combo.clone()],
+            std::slice::from_ref(&combo),
         )
         .expect("catalog");
         let slugs: Vec<&str> = catalog["models"]
@@ -2241,10 +2241,7 @@ mod tests {
             "gpt-5.6-sol",
             "codex-official/gpt-5.5",
         ] {
-            assert!(
-                slugs.iter().any(|slug| *slug == expected),
-                "missing {expected} in {slugs:?}"
-            );
+            assert!(slugs.contains(&expected), "missing {expected} in {slugs:?}");
         }
         let window = |slug: &str| {
             models
@@ -2318,7 +2315,7 @@ mod tests {
         let grok = provider("grok", "Grok", &["grok-4.6"]);
         assert_eq!(
             shared_catalog_live_rewrite(
-                &[official.clone()],
+                std::slice::from_ref(&official),
                 Some("gpt-5.6-sol"),
                 Some("gpt-5.6-sol"),
                 None,
@@ -2411,7 +2408,8 @@ mod tests {
             "union catalog without current-first starts on the Official card: {official_first:?}"
         );
 
-        let current_first = providers_current_first(&[grok.clone()], [official, grok]);
+        let current_first =
+            providers_current_first(std::slice::from_ref(&grok), [official, grok.clone()]);
         let slugs = catalog_slugs(&current_first);
         assert_eq!(
             slugs.first().map(String::as_str),
@@ -2534,7 +2532,7 @@ mod tests {
         let official = official("codex-official");
         let grok = provider("grok", "Grok", &["grok-4.6"]);
         assert_eq!(
-            expected_outbound_model(&[grok.clone()], "grok/grok-4.6").as_deref(),
+            expected_outbound_model(std::slice::from_ref(&grok), "grok/grok-4.6").as_deref(),
             Some("grok-4.6")
         );
         assert!(provider_rejects_remote_compact(&grok));

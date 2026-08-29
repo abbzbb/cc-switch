@@ -43,7 +43,7 @@ try {
 interface ConfigLoadErrorPayload {
   path?: string;
   error?: string;
-  /** "db_version_too_new" 表示数据库版本过新，渲染应用内升级恢复界面 */
+  /** 后端初始化错误类别；数据库版本过新时渲染应用内升级恢复界面。 */
   kind?: string;
 }
 
@@ -56,18 +56,31 @@ async function handleConfigLoadError(
 ): Promise<void> {
   const path = payload?.path ?? "~/.cc-switch/config.json";
   const detail = payload?.error ?? "Unknown error";
+  const appConfigDirUnavailable =
+    payload?.kind === "app_config_dir_unavailable";
 
   await message(
-    i18n.t("errors.configLoadFailedMessage", {
-      path,
-      detail,
-      defaultValue:
-        "无法读取配置文件：\n{{path}}\n\n错误详情：\n{{detail}}\n\n请手动检查 JSON 是否有效，或从同目录的备份文件（如 config.json.bak）恢复。\n\n应用将退出以便您进行修复。",
-    }),
+    appConfigDirUnavailable
+      ? i18n.t("errors.appConfigDirUnavailableMessage", {
+          path,
+          detail,
+          defaultValue:
+            "已配置的 CC Switch 数据目录当前不可用：\n{{detail}}\n\n请重新连接或挂载该目录后再启动应用。为避免在默认位置创建第二份数据库，应用将退出。",
+        })
+      : i18n.t("errors.configLoadFailedMessage", {
+          path,
+          detail,
+          defaultValue:
+            "无法读取配置文件：\n{{path}}\n\n错误详情：\n{{detail}}\n\n请手动检查 JSON 是否有效，或从同目录的备份文件（如 config.json.bak）恢复。\n\n应用将退出以便您进行修复。",
+        }),
     {
-      title: i18n.t("errors.configLoadFailedTitle", {
-        defaultValue: "配置加载失败",
-      }),
+      title: appConfigDirUnavailable
+        ? i18n.t("errors.appConfigDirUnavailableTitle", {
+            defaultValue: "配置目录不可用",
+          })
+        : i18n.t("errors.configLoadFailedTitle", {
+            defaultValue: "配置加载失败",
+          }),
       kind: "error",
     },
   );

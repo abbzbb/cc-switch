@@ -99,6 +99,10 @@ export const settingsApi = {
     return await invoke("get_app_config_dir_override");
   },
 
+  async validateAppConfigDirOverride(path: string | null): Promise<boolean> {
+    return await invoke("validate_app_config_dir_override", { path });
+  },
+
   async setAppConfigDirOverride(path: string | null): Promise<boolean> {
     return await invoke("set_app_config_dir_override", { path });
   },
